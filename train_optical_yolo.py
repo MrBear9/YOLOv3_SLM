@@ -27,7 +27,7 @@ class Config:
     BATCH_SIZE = 8
     IMG_SIZE = 640
     LEARNING_RATE = 1e-3
-    WEIGHT_DECAY = 1e-4
+    WEIGHT_DECAY = 1e-5
     
     # 损失权重
     BOX_WEIGHT = 0.05
@@ -199,7 +199,8 @@ class OpticalYOLOv3Trainer:
             batch_size=self.config.BATCH_SIZE, 
             shuffle=True, 
             collate_fn=self.collate_fn,
-            num_workers=2
+            num_workers=0,  # 设置为0避免多进程CUDA冲突
+            pin_memory=True
         )
         
         val_loader = DataLoader(
@@ -207,23 +208,24 @@ class OpticalYOLOv3Trainer:
             batch_size=self.config.BATCH_SIZE, 
             shuffle=False, 
             collate_fn=self.collate_fn,
-            num_workers=2
+            num_workers=0,  # 设置为0避免多进程CUDA冲突
+            pin_memory=True
         )
         
         return train_loader, val_loader
 
     def collate_fn(self, batch):
-        """自定义批次处理函数"""
+        """自定义批次处理函数 - 优化内存管理"""
         imgs, targets = zip(*batch)
         imgs = torch.stack(imgs)
         
-        # 对齐targets的长度
+        # 对齐targets的长度 - 使用CPU张量避免CUDA冲突
         max_len = max([t.shape[0] for t in targets])
-        target_tensor = torch.zeros(len(imgs), max_len, 5, device=self.device)
+        target_tensor = torch.zeros(len(imgs), max_len, 5)  # 先创建CPU张量
         
         for i, t in enumerate(targets):
             if t.shape[0] > 0:
-                target_tensor[i, :t.shape[0]] = t.to(self.device)
+                target_tensor[i, :t.shape[0]] = t  # 保持CPU张量
         
         return imgs, target_tensor
 
@@ -237,7 +239,8 @@ class OpticalYOLOv3Trainer:
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{self.config.EPOCHS}")
         
         for batch_idx, (imgs, targets) in enumerate(pbar):
-            imgs = imgs.to(self.device)
+            imgs = imgs.to(self.device, non_blocking=True)
+            targets = targets.to(self.device)  # 将targets移动到GPU
             batch_size = imgs.shape[0]
             
             # 前向传播
@@ -280,7 +283,8 @@ class OpticalYOLOv3Trainer:
         
         with torch.no_grad():
             for imgs, targets in val_loader:
-                imgs = imgs.to(self.device)
+                imgs = imgs.to(self.device, non_blocking=True)
+                targets = targets.to(self.device)  # 将targets移动到GPU
                 batch_size = imgs.shape[0]
                 
                 # 前向传播
@@ -330,12 +334,13 @@ class OpticalYOLOv3Trainer:
         print(f"模型已保存: {filepath}")
 
     def visualize_results(self, dataloader, epoch):
-        """可视化训练结果"""
+        """可视化训练结果 - 包含边界框和类别标签"""
         self.model.eval()
         
         # 获取一个批次的数据
         imgs, targets = next(iter(dataloader))
         imgs = imgs[:4]  # 取前4个样本
+        targets = targets[:4]  # 对应的目标
         
         with torch.no_grad():
             p3, p4, p5, optical_feat = self.model(imgs.to(self.device))
@@ -344,10 +349,45 @@ class OpticalYOLOv3Trainer:
         fig, axes = plt.subplots(4, 5, figsize=(20, 16))
         
         for idx in range(min(4, imgs.shape[0])):
-            # 输入图像
+            # 输入图像（带边界框和标签）
             img_np = imgs[idx].permute(1, 2, 0).cpu().numpy()
+            img_np = (img_np * 255).astype(np.uint8)  # 转换为0-255范围
+            
+            # 绘制图像
             axes[idx, 0].imshow(img_np)
-            axes[idx, 0].set_title(f"Input {idx+1}")
+            
+            # 绘制真实边界框和类别标签
+            h, w = img_np.shape[:2]
+            target_data = targets[idx]
+            
+            # 统计检测到的目标数量
+            obj_count = 0
+            for t_idx in range(target_data.shape[0]):
+                target = target_data[t_idx]
+                if target[4] == 0:  # 跳过空目标
+                    continue
+                    
+                cls_id, cx, cy, bw, bh = target.cpu().numpy()
+                
+                # 转换为像素坐标
+                x1 = int((cx - bw/2) * w)
+                y1 = int((cy - bh/2) * h)
+                x2 = int((cx + bw/2) * w)
+                y2 = int((cy + bh/2) * h)
+                
+                # 绘制边界框
+                rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, 
+                                   fill=False, edgecolor='red', linewidth=2)
+                axes[idx, 0].add_patch(rect)
+                
+                # 添加类别标签
+                class_name = self.class_names.get(int(cls_id), f"Class {int(cls_id)}")
+                axes[idx, 0].text(x1, y1-5, class_name, color='white',
+                                bbox=dict(facecolor='red', alpha=0.8), fontsize=8)
+                
+                obj_count += 1
+            
+            axes[idx, 0].set_title(f"Input {idx+1} (Objects: {obj_count})")
             axes[idx, 0].axis('off')
             
             # 光学特征
@@ -400,11 +440,17 @@ class OpticalYOLOv3Trainer:
         """主训练循环"""
         print("开始训练光学YOLOv3模型...")
         
+        # 添加CUDA内存优化设置
+        torch.backends.cudnn.benchmark = True  # 加速卷积运算
+        
         # 创建数据加载器
         train_loader, val_loader = self.create_dataloaders()
         
         # 训练开始时间
         start_time = time.time()
+        
+        # 添加定期内存清理
+        torch.cuda.empty_cache()
         
         for epoch in range(self.config.EPOCHS):
             print(f"\n{'='*50}")
@@ -440,6 +486,10 @@ class OpticalYOLOv3Trainer:
             
             if (epoch + 1) % self.config.VISUALIZE_EVERY == 0:
                 self.visualize_results(val_loader, epoch)
+            
+            # 定期清理GPU内存
+            if (epoch + 1) % 5 == 0:
+                torch.cuda.empty_cache()
         
         # 训练结束
         end_time = time.time()
