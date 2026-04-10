@@ -38,6 +38,7 @@ class FashionMNISTConfig:
     BOX_WEIGHT = 0.06   # 边界框权重
     OBJ_WEIGHT = 1.0    # 目标权重
     CLS_WEIGHT = 0.25   # 分类权重（Fashion-MNIST有10个类别）
+    OPTICAL_CONSTRAINT_WEIGHT = 0.1  # 光学约束损失权重
     
     # 锚框设置（针对Fashion-MNIST物品优化）
     STRIDES = [8, 16, 32]
@@ -363,7 +364,7 @@ class FashionMNISTTrainer:
             # 光学约束损失（如果启用）
             if constraint_target is not None:
                 optical_constraint_loss = self.optical_constraint_criterion(optical_feature, constraint_target)
-                loss += 0.1 * optical_constraint_loss  # 光学约束损失权重
+                loss += self.config.OPTICAL_CONSTRAINT_WEIGHT * optical_constraint_loss  # 光学约束损失权重
             
             # 反向传播
             self.optimizer.zero_grad()
@@ -417,7 +418,7 @@ class FashionMNISTTrainer:
                 # 光学约束损失（如果启用）
                 if constraint_target is not None:
                     optical_constraint_loss = self.optical_constraint_criterion(optical_feature, constraint_target)
-                    loss += 0.1 * optical_constraint_loss
+                    loss += self.config.OPTICAL_CONSTRAINT_WEIGHT * optical_constraint_loss
                 
                 total_loss += loss.item()
         
@@ -450,6 +451,117 @@ class FashionMNISTTrainer:
         filepath = os.path.join(self.config.SAVE_DIR, filename)
         torch.save(checkpoint, filepath)
         print(f"Fashion-MNIST模型已保存: {filepath}")
+
+    def decode_detections(self, preds, conf_thresh=0.5, nms_thresh=0.4):
+        """解码检测结果，返回边界框、置信度和类别"""
+        detections = []
+        
+        for i, pred in enumerate(preds):
+            batch_size = pred.shape[0]
+            grid_h, grid_w = pred.shape[2], pred.shape[3]
+            
+            # 重塑预测为 (batch_size, grid_h, grid_w, 3, 5+num_classes)
+            pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
+            
+            # 应用置信度阈值
+            obj_conf = torch.sigmoid(pred[..., 4])
+            obj_mask = obj_conf > conf_thresh
+            
+            for b in range(batch_size):
+                batch_detections = []
+                for h in range(grid_h):
+                    for w in range(grid_w):
+                        for anchor in range(3):
+                            if obj_mask[b, h, w, anchor]:
+                                # 提取边界框和类别
+                                bx, by, bw, bh = pred[b, h, w, anchor, :4]
+                                cls_probs = torch.softmax(pred[b, h, w, anchor, 5:], dim=0)
+                                cls_id = torch.argmax(cls_probs).item()
+                                cls_conf = cls_probs[cls_id].item()
+                                
+                                # 计算最终置信度
+                                conf = obj_conf[b, h, w, anchor].item() * cls_conf
+                                
+                                if conf > conf_thresh:
+                                    # 转换为图像坐标
+                                    x = (w + bx) * self.config.STRIDES[i]
+                                    y = (h + by) * self.config.STRIDES[i]
+                                    width = bw * self.config.ANCHORS[i][anchor][0]
+                                    height = bh * self.config.ANCHORS[i][anchor][1]
+                                    
+                                    detection = [x, y, width, height, conf, cls_id]
+                                    batch_detections.append(detection)
+                
+                # 应用非极大值抑制
+                if len(batch_detections) > 0:
+                    batch_detections = torch.tensor(batch_detections)
+                    keep = self.non_max_suppression(batch_detections, nms_thresh)
+                    detections.append(batch_detections[keep].tolist())
+                else:
+                    detections.append([])
+        
+        return detections
+    
+    def non_max_suppression(self, detections, nms_thresh):
+        """非极大值抑制"""
+        if len(detections) == 0:
+            return []
+        
+        # 按置信度排序
+        confidences = detections[:, 4]
+        sorted_indices = torch.argsort(confidences, descending=True)
+        
+        keep = []
+        while len(sorted_indices) > 0:
+            # 取置信度最高的检测
+            current_idx = sorted_indices[0]
+            keep.append(current_idx.item())
+            
+            if len(sorted_indices) == 1:
+                break
+            
+            # 计算与剩余检测的IoU
+            current_box = detections[current_idx, :4]
+            other_boxes = detections[sorted_indices[1:], :4]
+            
+            ious = self.calculate_iou(current_box.unsqueeze(0), other_boxes)
+            
+            # 移除重叠度高的检测
+            keep_indices = torch.where(ious < nms_thresh)[0]
+            sorted_indices = sorted_indices[keep_indices + 1]
+        
+        return keep
+    
+    def calculate_iou(self, box1, box2):
+        """计算IoU"""
+        # box格式: [x, y, w, h]
+        box1_x1 = box1[..., 0] - box1[..., 2] / 2
+        box1_y1 = box1[..., 1] - box1[..., 3] / 2
+        box1_x2 = box1[..., 0] + box1[..., 2] / 2
+        box1_y2 = box1[..., 1] + box1[..., 3] / 2
+        
+        box2_x1 = box2[..., 0] - box2[..., 2] / 2
+        box2_y1 = box2[..., 1] - box2[..., 3] / 2
+        box2_x2 = box2[..., 0] + box2[..., 2] / 2
+        box2_y2 = box2[..., 1] + box2[..., 3] / 2
+        
+        # 计算交集区域
+        inter_x1 = torch.max(box1_x1, box2_x1)
+        inter_y1 = torch.max(box1_y1, box2_y1)
+        inter_x2 = torch.min(box1_x2, box2_x2)
+        inter_y2 = torch.min(box1_y2, box2_y2)
+        
+        inter_area = torch.clamp(inter_x2 - inter_x1, min=0) * torch.clamp(inter_y2 - inter_y1, min=0)
+        
+        # 计算并集区域
+        box1_area = (box1_x2 - box1_x1) * (box1_y2 - box1_y1)
+        box2_area = (box2_x2 - box2_x1) * (box2_y2 - box2_y1)
+        union_area = box1_area + box2_area - inter_area
+        
+        # 计算IoU
+        iou = inter_area / (union_area + 1e-6)
+        
+        return iou
 
     def calculate_detection_metrics(self, detections, targets):
         """计算检测指标"""
