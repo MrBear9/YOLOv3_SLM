@@ -54,8 +54,13 @@ class FashionMNISTConfig:
     
     # 训练策略
     ENABLE_NORM_AFTER_EPOCH = 20  # 20轮后启用归一化
+    ENABLE_CONSTRAINT_AFTER_EPOCH = 10  # 10轮后启用光学约束
     VISUALIZE_EVERY = 5  # 每5轮可视化一次
     SAVE_EVERY = 10  # 每10轮保存一次
+    
+    # 检测阈值
+    CONF_THRESH = 0.5  # 置信度阈值
+    NMS_THRESH = 0.4   # 非极大值抑制阈值
     
     # Fashion-MNIST类别名称
     CLASS_NAMES = [
@@ -228,6 +233,10 @@ class FashionMNISTTrainer:
         # 初始化模型
         self.model = self.init_model()
         self.criterion = YOLOLoss(config.BOX_WEIGHT, config.OBJ_WEIGHT, config.CLS_WEIGHT)
+        
+        # 光学约束损失函数
+        self.optical_constraint_criterion = nn.MSELoss()
+        
         self.optimizer = optim.AdamW(
             self.model.parameters(), 
             lr=config.LEARNING_RATE, 
@@ -251,14 +260,20 @@ class FashionMNISTTrainer:
         self.val_losses = []
         self.best_val_loss = float('inf')
         
+        # 检测指标
+        self.precisions = []
+        self.recalls = []
+        self.f1_scores = []
+        
         print(f"Fashion-MNIST训练器初始化完成，使用设备: {self.device}")
 
     def init_model(self):
-        """初始化针对Fashion-MNIST优化的光学YOLOv3模型"""
+        """初始化针对Fashion-MNIST优化的光学YOLOv3模型（带约束）"""
         model = OpticalYOLOv3(
             num_classes=10,  # Fashion-MNIST有10个类别
             img_size=self.config.TARGET_SIZE,
-            optical_mode="phase"
+            optical_mode="phase",
+            enable_constraint=True  # 启用光学约束
         ).to(self.device)
         
         # 统计参数量
@@ -333,7 +348,7 @@ class FashionMNISTTrainer:
             batch_size = imgs.shape[0]
             
             # 前向传播
-            p3, p4, p5, _ = self.model(imgs)
+            p3, p4, p5, optical_feature, constraint_target = self.model(imgs)
             preds = [p3, p4, p5]
             
             # 多尺度损失计算
@@ -345,6 +360,11 @@ class FashionMNISTTrainer:
                 total_l, box_l, obj_l, cls_l = self.criterion(pred, gt, batch_size)
                 loss += total_l
             
+            # 光学约束损失（如果启用）
+            if constraint_target is not None:
+                optical_constraint_loss = self.optical_constraint_criterion(optical_feature, constraint_target)
+                loss += 0.1 * optical_constraint_loss  # 光学约束损失权重
+            
             # 反向传播
             self.optimizer.zero_grad()
             loss.backward()
@@ -353,10 +373,16 @@ class FashionMNISTTrainer:
             total_loss += loss.item()
             
             # 更新进度条
-            pbar.set_postfix({
+            postfix = {
                 "loss": f"{loss.item():.4f}",
                 "avg_loss": f"{total_loss/(batch_idx+1):.4f}"
-            })
+            }
+            
+            # 显示光学约束损失（如果存在）
+            if constraint_target is not None:
+                postfix["optical_constraint"] = f"{optical_constraint_loss.item():.4f}"
+            
+            pbar.set_postfix(postfix)
         
         avg_loss = total_loss / num_batches
         self.train_losses.append(avg_loss)
@@ -376,7 +402,7 @@ class FashionMNISTTrainer:
                 batch_size = imgs.shape[0]
                 
                 # 前向传播
-                p3, p4, p5, _ = self.model(imgs)
+                p3, p4, p5, optical_feature, constraint_target = self.model(imgs)
                 preds = [p3, p4, p5]
                 
                 # 多尺度损失计算
@@ -387,6 +413,11 @@ class FashionMNISTTrainer:
                     gt = build_target(targets, anchors, stride, 10, self.config.TARGET_SIZE, self.device)
                     total_l, _, _, _ = self.criterion(pred, gt, batch_size)
                     loss += total_l
+                
+                # 光学约束损失（如果启用）
+                if constraint_target is not None:
+                    optical_constraint_loss = self.optical_constraint_criterion(optical_feature, constraint_target)
+                    loss += 0.1 * optical_constraint_loss
                 
                 total_loss += loss.item()
         
@@ -420,8 +451,34 @@ class FashionMNISTTrainer:
         torch.save(checkpoint, filepath)
         print(f"Fashion-MNIST模型已保存: {filepath}")
 
+    def calculate_detection_metrics(self, detections, targets):
+        """计算检测指标"""
+        true_positives = 0
+        false_positives = 0
+        false_negatives = 0
+        
+        for i in range(len(detections)):
+            # 检测到的目标数
+            det_count = len(detections[i])
+            
+            # 真实目标数（过滤空目标）
+            gt_count = 0
+            for t in targets[i]:
+                if t[4] != 0:  # 非空目标
+                    gt_count += 1
+            
+            true_positives += min(det_count, gt_count)
+            false_positives += max(0, det_count - gt_count)
+            false_negatives += max(0, gt_count - det_count)
+        
+        precision = true_positives / (true_positives + false_positives + 1e-6)
+        recall = true_positives / (true_positives + false_negatives + 1e-6)
+        f1_score = 2 * precision * recall / (precision + recall + 1e-6)
+        
+        return precision, recall, f1_score
+
     def visualize_fashion_results(self, epoch):
-        """可视化Fashion-MNIST训练结果 - 包含边界框和类别标签"""
+        """可视化Fashion-MNIST训练结果 - 包含边界框、类别标签和置信度"""
         self.model.eval()
         
         # 获取一个批次的数据
@@ -434,10 +491,16 @@ class FashionMNISTTrainer:
             return
         
         with torch.no_grad():
-            p3, p4, p5, optical_feat = self.model(imgs.to(self.device))
+            p3, p4, p5, optical_feat, constraint_target = self.model(imgs.to(self.device))
+            
+            # 解码检测结果（添加置信度显示）
+            detections = self.decode_detections([p3, p4, p5], self.config.CONF_THRESH, self.config.NMS_THRESH)
         
-        # 创建可视化
-        fig, axes = plt.subplots(4, 5, figsize=(20, 16))
+        # 创建可视化（根据是否启用约束调整布局）
+        if constraint_target is not None:
+            fig, axes = plt.subplots(4, 6, figsize=(24, 16))  # 6列布局
+        else:
+            fig, axes = plt.subplots(4, 5, figsize=(20, 16))
         
         for idx in range(min(4, imgs.shape[0])):
             # 输入图像（带边界框和标签）
@@ -481,7 +544,28 @@ class FashionMNISTTrainer:
                 
                 obj_count += 1
             
-            axes[idx, 0].set_title(f"{class_name}\n输入图像 (目标: {obj_count})")
+            # 绘制模型检测结果（带置信度）
+            img_detections = detections[idx] if idx < len(detections) else []
+            for det in img_detections:
+                x, y, w, h, conf, cls_id = det[:6]
+                
+                # 转换为像素坐标
+                x1 = int(x - w/2)
+                y1 = int(y - h/2)
+                x2 = int(x + w/2)
+                y2 = int(y + h/2)
+                
+                # 绘制检测框（绿色，带置信度）
+                rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, 
+                                   fill=False, edgecolor='green', linewidth=2, linestyle='--')
+                axes[idx, 0].add_patch(rect)
+                
+                # 添加置信度标签
+                class_name_det = self.config.CLASS_NAMES[int(cls_id)]
+                axes[idx, 0].text(x1, y1-25, f"{class_name_det}: {conf:.2f}", 
+                                color='white', bbox=dict(facecolor='green', alpha=0.8), fontsize=8)
+            
+            axes[idx, 0].set_title(f"{class_name}\n输入图像 (真实: {obj_count}, 检测: {len(img_detections)})")
             axes[idx, 0].axis('off')
             
             # 光学特征
@@ -491,21 +575,40 @@ class FashionMNISTTrainer:
             axes[idx, 1].axis('off')
             plt.colorbar(im, ax=axes[idx, 1])
             
+            # 光学约束目标（如果存在）
+            if constraint_target is not None:
+                constraint_np = constraint_target[idx].squeeze().cpu().numpy()
+                im = axes[idx, 2].imshow(constraint_np, cmap='hot')
+                axes[idx, 2].set_title("约束目标")
+                axes[idx, 2].axis('off')
+                plt.colorbar(im, ax=axes[idx, 2])
+            else:
+                axes[idx, 2].axis('off')
+            
             # 多尺度特征
             p3_np = p3[idx].abs().mean(dim=0).cpu().numpy()
-            axes[idx, 2].imshow(p3_np, cmap='hot')
-            axes[idx, 2].set_title("P3检测特征")
-            axes[idx, 2].axis('off')
-            
-            p4_np = p4[idx].abs().mean(dim=0).cpu().numpy()
-            axes[idx, 3].imshow(p4_np, cmap='hot')
-            axes[idx, 3].set_title("P4检测特征")
+            axes[idx, 3].imshow(p3_np, cmap='hot')
+            axes[idx, 3].set_title("P3检测特征")
             axes[idx, 3].axis('off')
             
-            p5_np = p5[idx].abs().mean(dim=0).cpu().numpy()
-            axes[idx, 4].imshow(p5_np, cmap='hot')
-            axes[idx, 4].set_title("P5检测特征")
+            p4_np = p4[idx].abs().mean(dim=0).cpu().numpy()
+            axes[idx, 4].imshow(p4_np, cmap='hot')
+            axes[idx, 4].set_title("P4检测特征")
             axes[idx, 4].axis('off')
+            
+            # 如果启用了约束，调整子图布局
+            if constraint_target is not None:
+                # 添加第6列显示P5特征
+                p5_np = p5[idx].abs().mean(dim=0).cpu().numpy()
+                im = axes[idx, 5].imshow(p5_np, cmap='hot')
+                axes[idx, 5].set_title("P5检测特征")
+                axes[idx, 5].axis('off')
+                plt.colorbar(im, ax=axes[idx, 5])
+            else:
+                p5_np = p5[idx].abs().mean(dim=0).cpu().numpy()
+                axes[idx, 4].imshow(p5_np, cmap='hot')
+                axes[idx, 4].set_title("P5检测特征")
+                axes[idx, 4].axis('off')
         
         plt.tight_layout()
         vis_path = os.path.join(self.config.LOG_DIR, f"fashion_mnist_epoch_{epoch+1}.png")
@@ -579,6 +682,16 @@ class FashionMNISTTrainer:
             # 学习率调度
             self.scheduler.step()
             current_lr = self.optimizer.param_groups[0]['lr']
+            
+            # 训练策略调整
+            if epoch >= self.config.ENABLE_NORM_AFTER_EPOCH:
+                self.model.enable_normalization(True)
+                print("已启用光学输出归一化")
+            
+            # 启用光学约束（在训练稳定后）
+            if epoch >= self.config.ENABLE_CONSTRAINT_AFTER_EPOCH:
+                self.model.enable_constraint_loss(True)
+                print("已启用光学约束损失")
             
             print(f"训练损失: {train_loss:.4f}, 验证损失: {val_loss:.4f}, 学习率: {current_lr:.6f}")
             

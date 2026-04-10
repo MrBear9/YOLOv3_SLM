@@ -179,13 +179,55 @@ class YOLOLightHead(nn.Module):
         return p3_out, p4_out, p5_out
 
 # =========================================================
-# 完整光学YOLOv3系统
+# 光学层约束机制（类似MultiScaleTeacher）
+# =========================================================
+class OpticalConstraint(nn.Module):
+    """光学层约束机制 - 引导光学调制学习边缘和纹理特征"""
+    def __init__(self):
+        super(OpticalConstraint, self).__init__()
+        
+        # 高斯低通滤波器（平滑约束）
+        self.gauss_kernel = nn.Conv2d(1, 1, kernel_size=15, padding=7, bias=False)
+        grid = torch.arange(15) - 7
+        X, Y = torch.meshgrid(grid, grid, indexing='ij')
+        sigma = 3.0
+        g = torch.exp(-(X**2 + Y**2)/(2*sigma**2))
+        g = g/g.sum()
+        self.gauss_kernel.weight.data = g.unsqueeze(0).unsqueeze(0)
+        
+        # Sobel边缘检测器（边缘约束）
+        sobel_x = torch.tensor([[-1,0,1],[-2,0,2],[-1,0,1]], dtype=torch.float32)
+        self.sobel = nn.Conv2d(1, 1, kernel_size=3, padding=1, bias=False)
+        self.sobel.weight.data = sobel_x.unsqueeze(0).unsqueeze(0)
+        
+        # 固定参数，不参与训练
+        for p in self.parameters():
+            p.requires_grad = False
+
+    def forward(self, x):
+        """计算光学特征约束"""
+        # 高斯低通特征
+        low_pass = self.gauss_kernel(x)
+        
+        # Sobel边缘特征
+        edge = torch.abs(self.sobel(x))
+        edge = F.avg_pool2d(edge, 4)  # 降采样去高频
+        edge = F.interpolate(edge, x.shape[-2:])  # 恢复原尺寸
+        
+        # 组合特征（类似MultiScaleTeacher的输出）
+        combined = torch.sigmoid(low_pass + edge)
+        
+        return combined
+
+# =========================================================
+# 完整光学YOLOv3系统（带约束）
 # =========================================================
 class OpticalYOLOv3(nn.Module):
-    """完整的光学YOLOv3系统：光学前端 + YOLOv3检测头"""
-    def __init__(self, num_classes=4, img_size=640, optical_mode="phase"):
+    """完整的光学YOLOv3系统：光学前端 + YOLOv3检测头 + 光学约束"""
+    def __init__(self, num_classes=4, img_size=640, optical_mode="phase", enable_constraint=True):
         super(OpticalYOLOv3, self).__init__()
         self.img_size = img_size
+        self.enable_constraint = enable_constraint
         
         # 光学前端（两层相位调制）
         self.optical_frontend = OpticalFrontend(
@@ -199,6 +241,10 @@ class OpticalYOLOv3(nn.Module):
             in_channels=1, 
             out_channels=out_channels
         )
+        
+        # 光学层约束机制
+        if enable_constraint:
+            self.optical_constraint = OpticalConstraint()
         
         # 类别信息
         self.num_classes = num_classes
@@ -215,14 +261,24 @@ class OpticalYOLOv3(nn.Module):
         # 光学调制
         optical_feature = self.optical_frontend(intensity)  # [B, 1, H, W]
         
+        # 计算光学约束目标（如果启用）
+        if self.enable_constraint:
+            constraint_target = self.optical_constraint(intensity)
+        else:
+            constraint_target = None
+        
         # 目标检测
         p3, p4, p5 = self.detector(optical_feature)  # 三尺度检测结果
         
-        return p3, p4, p5, optical_feature
+        return p3, p4, p5, optical_feature, constraint_target
 
     def enable_normalization(self, enable=True):
         """启用/禁用光学输出归一化"""
         self.optical_frontend.enable_norm = enable
+
+    def enable_constraint_loss(self, enable=True):
+        """启用/禁用光学约束损失"""
+        self.enable_constraint = enable
 
 # =========================================================
 # 损失函数（YOLOv3多尺度损失）

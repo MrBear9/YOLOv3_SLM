@@ -33,6 +33,7 @@ class Config:
     BOX_WEIGHT = 0.05
     OBJ_WEIGHT = 1.5
     CLS_WEIGHT = 0.15
+    OPTICAL_CONSTRAINT_WEIGHT = 0.1  # 光学约束损失权重
     
     # 锚框设置（针对军事目标优化）
     STRIDES = [8, 16, 32]
@@ -50,8 +51,13 @@ class Config:
     
     # 训练策略
     ENABLE_NORM_AFTER_EPOCH = 50  # 50轮后启用归一化
+    ENABLE_CONSTRAINT_AFTER_EPOCH = 20  # 20轮后启用光学约束
     VISUALIZE_EVERY = 5  # 每5轮可视化一次
     SAVE_EVERY = 10  # 每10轮保存一次模型
+    
+    # 检测阈值
+    CONF_THRESH = 0.5  # 置信度阈值
+    NMS_THRESH = 0.4   # 非极大值抑制阈值
 
 # =========================================================
 # 数据集类
@@ -139,6 +145,9 @@ class OpticalYOLOv3Trainer:
         # 初始化模型
         self.model = self.init_model()
         self.criterion = YOLOLoss(config.BOX_WEIGHT, config.OBJ_WEIGHT, config.CLS_WEIGHT)
+        
+        # 光学约束损失函数
+        self.optical_constraint_criterion = nn.MSELoss()
         self.optimizer = optim.Adam(
             self.model.parameters(), 
             lr=config.LEARNING_RATE, 
@@ -152,6 +161,11 @@ class OpticalYOLOv3Trainer:
         self.train_losses = []
         self.val_losses = []
         self.best_val_loss = float('inf')
+        
+        # 检测指标
+        self.precisions = []
+        self.recalls = []
+        self.f1_scores = []
         
         print(f"训练器初始化完成，使用设备: {self.device}")
 
@@ -174,7 +188,8 @@ class OpticalYOLOv3Trainer:
         model = OpticalYOLOv3(
             num_classes=self.num_classes,
             img_size=self.config.IMG_SIZE,
-            optical_mode="phase"  # 使用纯相位调制
+            optical_mode="phase",  # 使用纯相位调制
+            enable_constraint=True  # 启用光学约束
         ).to(self.device)
         
         # 统计参数量
@@ -244,7 +259,7 @@ class OpticalYOLOv3Trainer:
             batch_size = imgs.shape[0]
             
             # 前向传播
-            p3, p4, p5, _ = self.model(imgs)
+            p3, p4, p5, optical_feature, constraint_target = self.model(imgs)
             preds = [p3, p4, p5]
             
             # 多尺度损失计算
@@ -257,6 +272,11 @@ class OpticalYOLOv3Trainer:
                 total_l, box_l, obj_l, cls_l = self.criterion(pred, gt, batch_size)
                 loss += total_l
             
+            # 光学约束损失（如果启用）
+            if constraint_target is not None:
+                optical_constraint_loss = self.optical_constraint_criterion(optical_feature, constraint_target)
+                loss += self.config.OPTICAL_CONSTRAINT_WEIGHT * optical_constraint_loss
+            
             # 反向传播
             self.optimizer.zero_grad()
             loss.backward()
@@ -265,10 +285,16 @@ class OpticalYOLOv3Trainer:
             total_loss += loss.item()
             
             # 更新进度条
-            pbar.set_postfix({
+            postfix = {
                 "loss": f"{loss.item():.4f}",
                 "avg_loss": f"{total_loss/(batch_idx+1):.4f}"
-            })
+            }
+            
+            # 显示光学约束损失（如果存在）
+            if constraint_target is not None:
+                postfix["optical_constraint"] = f"{optical_constraint_loss.item():.4f}"
+            
+            pbar.set_postfix(postfix)
         
         avg_loss = total_loss / num_batches
         self.train_losses.append(avg_loss)
@@ -288,7 +314,7 @@ class OpticalYOLOv3Trainer:
                 batch_size = imgs.shape[0]
                 
                 # 前向传播
-                p3, p4, p5, _ = self.model(imgs)
+                p3, p4, p5, optical_feature, constraint_target = self.model(imgs)
                 preds = [p3, p4, p5]
                 
                 # 多尺度损失计算
@@ -300,6 +326,11 @@ class OpticalYOLOv3Trainer:
                                      self.config.IMG_SIZE, self.device)
                     total_l, _, _, _ = self.criterion(pred, gt, batch_size)
                     loss += total_l
+                
+                # 光学约束损失（如果启用）
+                if constraint_target is not None:
+                    optical_constraint_loss = self.optical_constraint_criterion(optical_feature, constraint_target)
+                    loss += self.config.OPTICAL_CONSTRAINT_WEIGHT * optical_constraint_loss
                 
                 total_loss += loss.item()
         
@@ -333,8 +364,143 @@ class OpticalYOLOv3Trainer:
         torch.save(checkpoint, filepath)
         print(f"模型已保存: {filepath}")
 
+    def decode_detections(self, preds, conf_thresh=0.5, nms_thresh=0.4):
+        """解码检测结果，返回边界框、置信度和类别"""
+        detections = []
+        
+        for i, pred in enumerate(preds):
+            batch_size = pred.shape[0]
+            grid_h, grid_w = pred.shape[2], pred.shape[3]
+            
+            # 重塑预测为 (batch_size, grid_h, grid_w, 3, 5+num_classes)
+            pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
+            
+            # 应用置信度阈值
+            obj_conf = torch.sigmoid(pred[..., 4])
+            obj_mask = obj_conf > conf_thresh
+            
+            for b in range(batch_size):
+                batch_detections = []
+                for h in range(grid_h):
+                    for w in range(grid_w):
+                        for anchor in range(3):
+                            if obj_mask[b, h, w, anchor]:
+                                # 提取边界框和类别
+                                bx, by, bw, bh = pred[b, h, w, anchor, :4]
+                                cls_probs = torch.softmax(pred[b, h, w, anchor, 5:], dim=0)
+                                cls_id = torch.argmax(cls_probs).item()
+                                cls_conf = cls_probs[cls_id].item()
+                                
+                                # 计算最终置信度
+                                conf = obj_conf[b, h, w, anchor].item() * cls_conf
+                                
+                                if conf > conf_thresh:
+                                    # 转换为图像坐标
+                                    x = (w + bx) * self.config.STRIDES[i]
+                                    y = (h + by) * self.config.STRIDES[i]
+                                    width = bw * self.config.ANCHORS[i][anchor][0]
+                                    height = bh * self.config.ANCHORS[i][anchor][1]
+                                    
+                                    detection = [x, y, width, height, conf, cls_id]
+                                    batch_detections.append(detection)
+                
+                # 应用非极大值抑制
+                if len(batch_detections) > 0:
+                    batch_detections = torch.tensor(batch_detections)
+                    keep = self.non_max_suppression(batch_detections, nms_thresh)
+                    detections.append(batch_detections[keep].tolist())
+                else:
+                    detections.append([])
+        
+        return detections
+    
+    def non_max_suppression(self, detections, nms_thresh):
+        """非极大值抑制"""
+        if len(detections) == 0:
+            return []
+        
+        # 按置信度排序
+        confidences = detections[:, 4]
+        sorted_indices = torch.argsort(confidences, descending=True)
+        
+        keep = []
+        while len(sorted_indices) > 0:
+            # 取置信度最高的检测
+            current_idx = sorted_indices[0]
+            keep.append(current_idx.item())
+            
+            if len(sorted_indices) == 1:
+                break
+            
+            # 计算与剩余检测的IoU
+            current_box = detections[current_idx, :4]
+            other_boxes = detections[sorted_indices[1:], :4]
+            
+            ious = self.calculate_iou(current_box.unsqueeze(0), other_boxes)
+            
+            # 移除重叠度高的检测
+            keep_indices = torch.where(ious < nms_thresh)[0]
+            sorted_indices = sorted_indices[keep_indices + 1]
+        
+        return keep
+    
+    def calculate_iou(self, box1, box2):
+        """计算IoU"""
+        # box格式: [x, y, w, h]
+        box1_x1 = box1[..., 0] - box1[..., 2] / 2
+        box1_y1 = box1[..., 1] - box1[..., 3] / 2
+        box1_x2 = box1[..., 0] + box1[..., 2] / 2
+        box1_y2 = box1[..., 1] + box1[..., 3] / 2
+        
+        box2_x1 = box2[..., 0] - box2[..., 2] / 2
+        box2_y1 = box2[..., 1] - box2[..., 3] / 2
+        box2_x2 = box2[..., 0] + box2[..., 2] / 2
+        box2_y2 = box2[..., 1] + box2[..., 3] / 2
+        
+        # 计算交集
+        inter_x1 = torch.max(box1_x1, box2_x1)
+        inter_y1 = torch.max(box1_y1, box2_y1)
+        inter_x2 = torch.min(box1_x2, box2_x2)
+        inter_y2 = torch.min(box1_y2, box2_y2)
+        
+        inter_area = torch.clamp(inter_x2 - inter_x1, min=0) * torch.clamp(inter_y2 - inter_y1, min=0)
+        
+        # 计算并集
+        box1_area = (box1_x2 - box1_x1) * (box1_y2 - box1_y1)
+        box2_area = (box2_x2 - box2_x1) * (box2_y2 - box2_y1)
+        union_area = box1_area + box2_area - inter_area
+        
+        iou = inter_area / (union_area + 1e-6)
+        return iou
+
+    def calculate_detection_metrics(self, detections, targets):
+        """计算检测指标"""
+        true_positives = 0
+        false_positives = 0
+        false_negatives = 0
+        
+        for i in range(len(detections)):
+            # 检测到的目标数
+            det_count = len(detections[i])
+            
+            # 真实目标数（过滤空目标）
+            gt_count = 0
+            for t in targets[i]:
+                if t[4] != 0:  # 非空目标
+                    gt_count += 1
+            
+            true_positives += min(det_count, gt_count)
+            false_positives += max(0, det_count - gt_count)
+            false_negatives += max(0, gt_count - det_count)
+        
+        precision = true_positives / (true_positives + false_positives + 1e-6)
+        recall = true_positives / (true_positives + false_negatives + 1e-6)
+        f1_score = 2 * precision * recall / (precision + recall + 1e-6)
+        
+        return precision, recall, f1_score
+
     def visualize_results(self, dataloader, epoch):
-        """可视化训练结果 - 包含边界框和类别标签"""
+        """可视化训练结果 - 包含边界框、类别标签和置信度"""
         self.model.eval()
         
         # 获取一个批次的数据
@@ -343,10 +509,16 @@ class OpticalYOLOv3Trainer:
         targets = targets[:4]  # 对应的目标
         
         with torch.no_grad():
-            p3, p4, p5, optical_feat = self.model(imgs.to(self.device))
+            p3, p4, p5, optical_feat, constraint_target = self.model(imgs.to(self.device))
+            
+            # 解码检测结果（添加置信度显示）
+            detections = self.decode_detections([p3, p4, p5], self.config.CONF_THRESH, self.config.NMS_THRESH)
         
-        # 创建可视化
-        fig, axes = plt.subplots(4, 5, figsize=(20, 16))
+        # 创建可视化（根据是否启用约束调整布局）
+        if constraint_target is not None:
+            fig, axes = plt.subplots(4, 6, figsize=(24, 16))  # 6列布局
+        else:
+            fig, axes = plt.subplots(4, 5, figsize=(20, 16))
         
         for idx in range(min(4, imgs.shape[0])):
             # 输入图像（带边界框和标签）
@@ -387,7 +559,28 @@ class OpticalYOLOv3Trainer:
                 
                 obj_count += 1
             
-            axes[idx, 0].set_title(f"Input {idx+1} (Objects: {obj_count})")
+            # 绘制模型检测结果（带置信度）
+            img_detections = detections[idx] if idx < len(detections) else []
+            for det in img_detections:
+                x, y, w, h, conf, cls_id = det[:6]
+                
+                # 转换为像素坐标
+                x1 = int(x)
+                y1 = int(y)
+                x2 = int(x + w)
+                y2 = int(y + h)
+                
+                # 绘制检测框（绿色，带置信度）
+                rect = plt.Rectangle((x1, y1), w, h, 
+                                   fill=False, edgecolor='green', linewidth=2, linestyle='--')
+                axes[idx, 0].add_patch(rect)
+                
+                # 添加置信度标签
+                class_name_det = self.class_names.get(int(cls_id), f"Class {int(cls_id)}")
+                axes[idx, 0].text(x1, y1-25, f"{class_name_det}: {conf:.2f}", 
+                                color='white', bbox=dict(facecolor='green', alpha=0.8), fontsize=8)
+            
+            axes[idx, 0].set_title(f"Input {idx+1} (真实: {obj_count}, 检测: {len(img_detections)})")
             axes[idx, 0].axis('off')
             
             # 光学特征
@@ -397,21 +590,40 @@ class OpticalYOLOv3Trainer:
             axes[idx, 1].axis('off')
             plt.colorbar(im, ax=axes[idx, 1])
             
+            # 光学约束目标（如果存在）
+            if constraint_target is not None:
+                constraint_np = constraint_target[idx].squeeze().cpu().numpy()
+                im = axes[idx, 2].imshow(constraint_np, cmap='hot')
+                axes[idx, 2].set_title("Constraint Target")
+                axes[idx, 2].axis('off')
+                plt.colorbar(im, ax=axes[idx, 2])
+            else:
+                axes[idx, 2].axis('off')
+            
             # 多尺度特征
             p3_np = p3[idx].abs().mean(dim=0).cpu().numpy()
-            axes[idx, 2].imshow(p3_np, cmap='hot')
-            axes[idx, 2].set_title("P3 (80×80)")
-            axes[idx, 2].axis('off')
-            
-            p4_np = p4[idx].abs().mean(dim=0).cpu().numpy()
-            axes[idx, 3].imshow(p4_np, cmap='hot')
-            axes[idx, 3].set_title("P4 (40×40)")
+            axes[idx, 3].imshow(p3_np, cmap='hot')
+            axes[idx, 3].set_title("P3 (80×80)")
             axes[idx, 3].axis('off')
             
-            p5_np = p5[idx].abs().mean(dim=0).cpu().numpy()
-            axes[idx, 4].imshow(p5_np, cmap='hot')
-            axes[idx, 4].set_title("P5 (20×20)")
+            p4_np = p4[idx].abs().mean(dim=0).cpu().numpy()
+            axes[idx, 4].imshow(p4_np, cmap='hot')
+            axes[idx, 4].set_title("P4 (40×40)")
             axes[idx, 4].axis('off')
+            
+            # 如果启用了约束，调整子图布局
+            if constraint_target is not None:
+                # 添加第6列显示P5特征
+                p5_np = p5[idx].abs().mean(dim=0).cpu().numpy()
+                im = axes[idx, 5].imshow(p5_np, cmap='hot')
+                axes[idx, 5].set_title("P5 (20×20)")
+                axes[idx, 5].axis('off')
+                plt.colorbar(im, ax=axes[idx, 5])
+            else:
+                p5_np = p5[idx].abs().mean(dim=0).cpu().numpy()
+                axes[idx, 4].imshow(p5_np, cmap='hot')
+                axes[idx, 4].set_title("P5 (20×20)")
+                axes[idx, 4].axis('off')
         
         plt.tight_layout()
         vis_path = os.path.join(self.config.LOG_DIR, f"visualization_epoch_{epoch+1}.png")
@@ -462,6 +674,11 @@ class OpticalYOLOv3Trainer:
                 self.model.enable_normalization(True)
                 print("已启用光学输出归一化")
             
+            # 启用光学约束（在训练稳定后）
+            if epoch >= self.config.ENABLE_CONSTRAINT_AFTER_EPOCH:
+                self.model.enable_constraint_loss(True)
+                print("已启用光学约束损失")
+            
             # 训练一个epoch
             train_loss = self.train_epoch(train_loader, epoch)
             
@@ -472,7 +689,28 @@ class OpticalYOLOv3Trainer:
             self.scheduler.step()
             current_lr = self.optimizer.param_groups[0]['lr']
             
-            print(f"训练损失: {train_loss:.4f}, 验证损失: {val_loss:.4f}, 学习率: {current_lr:.6f}")
+            # 计算检测指标（从第5轮开始）
+            if epoch >= 5:
+                # 获取一个批次的检测结果
+                with torch.no_grad():
+                    imgs_sample, targets_sample = next(iter(val_loader))
+                    imgs_sample = imgs_sample.to(self.device)
+                    p3, p4, p5, _, _ = self.model(imgs_sample)
+                    detections = self.decode_detections([p3, p4, p5], self.config.CONF_THRESH, self.config.NMS_THRESH)
+                    precision, recall, f1_score = self.calculate_detection_metrics(detections, targets_sample)
+                    
+                    self.precisions.append(precision)
+                    self.recalls.append(recall)
+                    self.f1_scores.append(f1_score)
+            else:
+                precision = recall = f1_score = 0
+            
+            if epoch < 5:
+                print(f"训练损失: {train_loss:.4f}, 验证损失: {val_loss:.4f}, 学习率: {current_lr:.6f}")
+            else:
+                print(f"训练损失: {train_loss:.4f}, 验证损失: {val_loss:.4f}, "
+                      f"精确率: {precision:.3f}, 召回率: {recall:.3f}, F1: {f1_score:.3f}, "
+                      f"学习率: {current_lr:.6f}")
             
             # 保存最佳模型
             if val_loss < self.best_val_loss:
