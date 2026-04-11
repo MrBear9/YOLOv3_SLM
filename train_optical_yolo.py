@@ -59,14 +59,17 @@ class Config:
     CONSTRAINT_WARMUP_EPOCHS = 10  # 光学约束线性预热，避免验证损失突然抬升
     VISUALIZE_EVERY = 5  # 每5轮可视化一次
     SAVE_EVERY = 10  # 每10轮保存一次模型
-    EARLY_STOPPING_PATIENCE = 12
-    EARLY_STOPPING_MIN_DELTA = 1e-3
+    EARLY_STOPPING_PATIENCE = 12  # 早停耐心轮数，12轮没有改进则早停
+    EARLY_STOPPING_MIN_DELTA = 1e-3 # 最小损失变化阈值，用于早停
     
     # 检测阈值
     CONF_THRESH = 0.5  # 置信度阈值 # 平衡精度和召回率
     NMS_THRESH = 0.4   # 非极大值抑制阈值 # 适中的去重强度
     VIS_CONF_THRESH = 0.6  # 可视化时使用更严格的阈值，避免框和标签堆叠，只显示高质量的检测结果
     VIS_MAX_DETECTIONS = 8  # 可视化时最多显示8个检测框
+    
+    # 批次选择设置
+    VISUALIZE_BATCH_INDEX = -1  # 可视化批次索引，-1表示随机选择，0-N表示指定批次
 
 # =========================================================
 # 数据集类
@@ -564,8 +567,18 @@ class OpticalYOLOv3Trainer:
         """可视化训练结果 - 包含边界框、类别标签和置信度"""
         self.model.eval()
         
-        # 获取一个批次的数据
-        imgs, targets = next(iter(dataloader))
+        # 获取指定批次的数据
+        if self.config.VISUALIZE_BATCH_INDEX >= 0:
+            # 手动选择指定批次
+            batch_iterator = iter(dataloader)
+            for i in range(self.config.VISUALIZE_BATCH_INDEX + 1):
+                imgs, targets = next(batch_iterator)
+            print(f"使用手动选择的批次索引: {self.config.VISUALIZE_BATCH_INDEX}")
+        else:
+            # 随机选择一个批次
+            imgs, targets = next(iter(dataloader))
+            print("使用随机选择的批次")
+        
         imgs = imgs[:4]  # 取前4个样本
         targets = targets[:4]  # 对应的目标
         
@@ -788,9 +801,17 @@ class OpticalYOLOv3Trainer:
             
             # 计算检测指标（从第5轮开始）
             if epoch >= 5:
-                # 获取一个批次的检测结果
+                # 获取指定批次的检测结果
                 with torch.no_grad():
-                    imgs_sample, targets_sample = next(iter(val_loader))
+                    if self.config.VISUALIZE_BATCH_INDEX >= 0:
+                        # 使用与可视化相同的批次
+                        batch_iterator = iter(val_loader)
+                        for i in range(self.config.VISUALIZE_BATCH_INDEX + 1):
+                            imgs_sample, targets_sample = next(batch_iterator)
+                    else:
+                        # 随机选择一个批次
+                        imgs_sample, targets_sample = next(iter(val_loader))
+                    
                     imgs_sample = imgs_sample.to(self.device)
                     p3, p4, p5, _, _ = self.model(imgs_sample)
                     detections = self.decode_detections([p3, p4, p5], self.config.CONF_THRESH, self.config.NMS_THRESH)
