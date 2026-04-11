@@ -13,15 +13,15 @@ import matplotlib.pyplot as plt
 # =========================================================
 class SLMLayer(nn.Module):
     """空间光调制器层 - 相位调制"""
-    def __init__(self, resolution, mode="phase"):
+    def __init__(self, resolution, mode="phase", vortex_charge=0, vortex_perturbation=0.1):
         super().__init__()
         assert mode in ["phase", "amp_phase"]
         self.mode = mode
+        self.vortex_charge = vortex_charge
+        self.vortex_perturbation = vortex_perturbation
 
         # 相位参数初始化 [0, 2π]
-        self.phase_raw = nn.Parameter(
-            torch.rand(1, 1, *resolution) * 2 * np.pi
-        )
+        self.phase_raw = nn.Parameter(self._init_phase(resolution))
 
         # 可选振幅调制
         if self.mode == "amp_phase":
@@ -30,6 +30,23 @@ class SLMLayer(nn.Module):
             )
         else:
             self.register_parameter("amp_raw", None)
+
+    def _init_phase(self, resolution):
+        """使用涡旋相位加小随机扰动初始化，退化场景下回落到随机相位。"""
+        if self.vortex_charge == 0:
+            return torch.rand(1, 1, *resolution) * 2 * np.pi
+
+        height, width = resolution
+        y = torch.linspace(-1.0, 1.0, height)
+        x = torch.linspace(-1.0, 1.0, width)
+        yy, xx = torch.meshgrid(y, x, indexing='ij')
+
+        theta = torch.atan2(yy, xx)
+        vortex_phase = self.vortex_charge * theta
+        noise = torch.randn_like(vortex_phase) * (self.vortex_perturbation * np.pi)
+
+        init_phase = torch.remainder(vortex_phase + noise, 2 * np.pi)
+        return init_phase.unsqueeze(0).unsqueeze(0)
 
     def forward(self, field):
         # 相位调制
@@ -65,11 +82,28 @@ class ASMPropagation(nn.Module):
 # =========================================================
 class OpticalFrontend(nn.Module):
     """光学前端 - 两层相位调制系统"""
-    def __init__(self, resolution=(640, 640), mode="phase"):
+    def __init__(
+        self,
+        resolution=(640, 640),
+        mode="phase",
+        slm1_vortex_charge=0,
+        slm2_vortex_charge=0,
+        vortex_perturbation=0.1
+    ):
         super().__init__()
-        self.slm1 = SLMLayer(resolution, mode)
+        self.slm1 = SLMLayer(
+            resolution,
+            mode,
+            vortex_charge=slm1_vortex_charge,
+            vortex_perturbation=vortex_perturbation
+        )
         self.prop1 = ASMPropagation(0.01, 532e-9, 6.4e-6, resolution)  # 10mm传播
-        self.slm2 = SLMLayer(resolution, mode)
+        self.slm2 = SLMLayer(
+            resolution,
+            mode,
+            vortex_charge=slm2_vortex_charge,
+            vortex_perturbation=vortex_perturbation
+        )
         self.prop2 = ASMPropagation(0.02, 532e-9, 6.4e-6, resolution)  # 20mm传播
         self.enable_norm = False
 
@@ -224,7 +258,16 @@ class OpticalConstraint(nn.Module):
 # =========================================================
 class OpticalYOLOv3(nn.Module):
     """完整的光学YOLOv3系统：光学前端 + YOLOv3检测头 + 光学约束"""
-    def __init__(self, num_classes=4, img_size=640, optical_mode="phase", enable_constraint=True):
+    def __init__(
+        self,
+        num_classes=4,
+        img_size=640,
+        optical_mode="phase",
+        enable_constraint=True,
+        slm1_vortex_charge=0,
+        slm2_vortex_charge=0,
+        vortex_perturbation=0.1
+    ):
         super(OpticalYOLOv3, self).__init__()
         self.img_size = img_size
         self.enable_constraint = enable_constraint
@@ -232,7 +275,10 @@ class OpticalYOLOv3(nn.Module):
         # 光学前端（两层相位调制）
         self.optical_frontend = OpticalFrontend(
             resolution=(img_size, img_size), 
-            mode=optical_mode
+            mode=optical_mode,
+            slm1_vortex_charge=slm1_vortex_charge,
+            slm2_vortex_charge=slm2_vortex_charge,
+            vortex_perturbation=vortex_perturbation
         )
         
         # YOLOv3检测头（输出通道数 = 3×(4+1+num_classes)）
@@ -242,9 +288,8 @@ class OpticalYOLOv3(nn.Module):
             out_channels=out_channels
         )
         
-        # 光学层约束机制
-        if enable_constraint:
-            self.optical_constraint = OpticalConstraint()
+        # 始终构建约束模块，只通过开关控制是否参与损失与可视化。
+        self.optical_constraint = OpticalConstraint()
         
         # 类别信息
         self.num_classes = num_classes

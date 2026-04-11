@@ -1,4 +1,4 @@
-import torch
+﻿﻿import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
@@ -34,6 +34,10 @@ class Config:
     OBJ_WEIGHT = 1.5
     CLS_WEIGHT = 0.15
     OPTICAL_CONSTRAINT_WEIGHT = 0.1  # 光学约束损失权重
+    USE_VORTEX_INIT = True  # 是否使用涡旋初始化
+    SLM1_VORTEX_CHARGE = 1  # SLM1涡旋电荷
+    SLM2_VORTEX_CHARGE = -1  # SLM2涡旋电荷
+    VORTEX_PERTURBATION = 0.12  # 涡旋相位上的小随机扰动，避免先验过硬 %
     
     # 锚框设置（针对军事目标优化）
     STRIDES = [8, 16, 32]
@@ -47,17 +51,22 @@ class Config:
     DATA_YAML_PATH = r"data\military\data.yaml"
     ROOT_PATH = r"data\military"
     SAVE_DIR = r"output\optical_yolo_models"
-    LOG_DIR = r"output\training_logs"
+    LOG_DIR = r"output\optical_yolo_logs"
     
     # 训练策略
-    ENABLE_NORM_AFTER_EPOCH = 50  # 50轮后启用归一化
-    ENABLE_CONSTRAINT_AFTER_EPOCH = 20  # 20轮后启用光学约束
+    ENABLE_NORM_AFTER_EPOCH = 0  # 从训练开始就保持光学输出尺度稳定
+    ENABLE_CONSTRAINT_AFTER_EPOCH = 10  # 检测头先学基础表征，再逐步加入光学约束
+    CONSTRAINT_WARMUP_EPOCHS = 10  # 光学约束线性预热，避免验证损失突然抬升
     VISUALIZE_EVERY = 5  # 每5轮可视化一次
     SAVE_EVERY = 10  # 每10轮保存一次模型
+    EARLY_STOPPING_PATIENCE = 12
+    EARLY_STOPPING_MIN_DELTA = 1e-3
     
     # 检测阈值
-    CONF_THRESH = 0.5  # 置信度阈值
-    NMS_THRESH = 0.4   # 非极大值抑制阈值
+    CONF_THRESH = 0.5  # 置信度阈值 # 平衡精度和召回率
+    NMS_THRESH = 0.4   # 非极大值抑制阈值 # 适中的去重强度
+    VIS_CONF_THRESH = 0.6  # 可视化时使用更严格的阈值，避免框和标签堆叠，只显示高质量的检测结果
+    VIS_MAX_DETECTIONS = 8  # 可视化时最多显示8个检测框
 
 # =========================================================
 # 数据集类
@@ -155,12 +164,15 @@ class OpticalYOLOv3Trainer:
         )
         
         # 学习率调度器
-        self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=30, gamma=0.5)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=4, min_lr=1e-6
+        )
         
         # 训练历史
         self.train_losses = []
         self.val_losses = []
         self.best_val_loss = float('inf')
+        self.no_improve_epochs = 0
         
         # 检测指标
         self.precisions = []
@@ -189,12 +201,22 @@ class OpticalYOLOv3Trainer:
             num_classes=self.num_classes,
             img_size=self.config.IMG_SIZE,
             optical_mode="phase",  # 使用纯相位调制
-            enable_constraint=True  # 启用光学约束
+            enable_constraint=False,  # 约束损失按训练策略延后启用
+            slm1_vortex_charge=self.config.SLM1_VORTEX_CHARGE if self.config.USE_VORTEX_INIT else 0,
+            slm2_vortex_charge=self.config.SLM2_VORTEX_CHARGE if self.config.USE_VORTEX_INIT else 0,
+            vortex_perturbation=self.config.VORTEX_PERTURBATION
         ).to(self.device)
         
         # 统计参数量
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"模型总参数量: {total_params:,}")
+        if self.config.USE_VORTEX_INIT:
+            print(
+                f"已启用涡旋相位初始化: "
+                f"SLM1 charge={self.config.SLM1_VORTEX_CHARGE}, "
+                f"SLM2 charge={self.config.SLM2_VORTEX_CHARGE}, "
+                f"perturbation={self.config.VORTEX_PERTURBATION}"
+            )
         
         return model
 
@@ -244,6 +266,41 @@ class OpticalYOLOv3Trainer:
         
         return imgs, target_tensor
 
+    def get_constraint_weight(self, epoch):
+        """线性预热光学约束，避免在某一轮突然改变优化目标。"""
+        if epoch < self.config.ENABLE_CONSTRAINT_AFTER_EPOCH:
+            return 0.0
+
+        warmup_epochs = max(1, self.config.CONSTRAINT_WARMUP_EPOCHS)
+        progress = min(1.0, (epoch - self.config.ENABLE_CONSTRAINT_AFTER_EPOCH + 1) / warmup_epochs)
+        return self.config.OPTICAL_CONSTRAINT_WEIGHT * progress
+
+    def normalize_feature_map(self, feature_map):
+        """按样本做min-max归一化，使光学约束与可视化都落在稳定范围。"""
+        feat_min = feature_map.amin(dim=(2, 3), keepdim=True)
+        feat_max = feature_map.amax(dim=(2, 3), keepdim=True)
+        return (feature_map - feat_min) / (feat_max - feat_min + 1e-6)
+
+    def enhance_feature_for_display(self, feature_map):
+        """用稳健分位数拉伸弱响应，避免特征图看起来一片发黑。"""
+        feature_map = np.asarray(feature_map, dtype=np.float32)
+        low = np.percentile(feature_map, 2)
+        high = np.percentile(feature_map, 98)
+        if high - low < 1e-6:
+            return np.zeros_like(feature_map)
+
+        feature_map = np.clip((feature_map - low) / (high - low), 0.0, 1.0)
+        return np.power(feature_map, 0.8)
+
+    def prediction_response_map(self, pred):
+        """将检测头输出转成更可解释的响应热图，而不是直接平均27个logit通道。"""
+        grid_h, grid_w = pred.shape[1], pred.shape[2]
+        pred = pred.permute(1, 2, 0).reshape(grid_h, grid_w, 3, -1)
+        obj_conf = torch.sigmoid(pred[..., 4])
+        cls_conf, _ = torch.sigmoid(pred[..., 5:]).max(dim=-1)
+        response = (obj_conf * cls_conf).max(dim=-1).values
+        return response.detach().cpu().numpy()
+
     def train_epoch(self, train_loader, epoch):
         """训练一个epoch"""
         self.model.train()
@@ -273,9 +330,11 @@ class OpticalYOLOv3Trainer:
                 loss += total_l
             
             # 光学约束损失（如果启用）
-            if constraint_target is not None:
-                optical_constraint_loss = self.optical_constraint_criterion(optical_feature, constraint_target)
-                loss += self.config.OPTICAL_CONSTRAINT_WEIGHT * optical_constraint_loss
+            constraint_weight = self.get_constraint_weight(epoch)
+            if constraint_target is not None and constraint_weight > 0:
+                normalized_optical = self.normalize_feature_map(optical_feature)
+                optical_constraint_loss = self.optical_constraint_criterion(normalized_optical, constraint_target)
+                loss += constraint_weight * optical_constraint_loss
             
             # 反向传播
             self.optimizer.zero_grad()
@@ -291,8 +350,9 @@ class OpticalYOLOv3Trainer:
             }
             
             # 显示光学约束损失（如果存在）
-            if constraint_target is not None:
+            if constraint_target is not None and constraint_weight > 0:
                 postfix["optical_constraint"] = f"{optical_constraint_loss.item():.4f}"
+                postfix["constraint_w"] = f"{constraint_weight:.3f}"
             
             pbar.set_postfix(postfix)
         
@@ -301,7 +361,7 @@ class OpticalYOLOv3Trainer:
         
         return avg_loss
 
-    def validate(self, val_loader):
+    def validate(self, val_loader, epoch):
         """验证模型"""
         self.model.eval()
         total_loss = 0.0
@@ -328,9 +388,11 @@ class OpticalYOLOv3Trainer:
                     loss += total_l
                 
                 # 光学约束损失（如果启用）
-                if constraint_target is not None:
-                    optical_constraint_loss = self.optical_constraint_criterion(optical_feature, constraint_target)
-                    loss += self.config.OPTICAL_CONSTRAINT_WEIGHT * optical_constraint_loss
+                constraint_weight = self.get_constraint_weight(epoch)
+                if constraint_target is not None and constraint_weight > 0:
+                    normalized_optical = self.normalize_feature_map(optical_feature)
+                    optical_constraint_loss = self.optical_constraint_criterion(normalized_optical, constraint_target)
+                    loss += constraint_weight * optical_constraint_loss
                 
                 total_loss += loss.item()
         
@@ -364,55 +426,54 @@ class OpticalYOLOv3Trainer:
         torch.save(checkpoint, filepath)
         print(f"模型已保存: {filepath}")
 
-    def decode_detections(self, preds, conf_thresh=0.5, nms_thresh=0.4):
+    def decode_detections(self, preds, conf_thresh=0.5, nms_thresh=0.4, max_det=100):
         """解码检测结果，返回边界框、置信度和类别"""
-        detections = []
+        batch_size = preds[0].shape[0]
+        detections = [[] for _ in range(batch_size)]
         
         for i, pred in enumerate(preds):
-            batch_size = pred.shape[0]
             grid_h, grid_w = pred.shape[2], pred.shape[3]
+            stride = self.config.STRIDES[i]
             
             # 重塑预测为 (batch_size, grid_h, grid_w, 3, 5+num_classes)
             pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
             
-            # 应用置信度阈值
             obj_conf = torch.sigmoid(pred[..., 4])
-            obj_mask = obj_conf > conf_thresh
+            cls_probs = torch.sigmoid(pred[..., 5:])
+            cls_conf, cls_id = cls_probs.max(dim=-1)
+            final_conf = obj_conf * cls_conf
+            obj_mask = final_conf > conf_thresh
             
             for b in range(batch_size):
-                batch_detections = []
                 for h in range(grid_h):
                     for w in range(grid_w):
                         for anchor in range(3):
                             if obj_mask[b, h, w, anchor]:
-                                # 提取边界框和类别
                                 bx, by, bw, bh = pred[b, h, w, anchor, :4]
-                                cls_probs = torch.softmax(pred[b, h, w, anchor, 5:], dim=0)
-                                cls_id = torch.argmax(cls_probs).item()
-                                cls_conf = cls_probs[cls_id].item()
-                                
-                                # 计算最终置信度
-                                conf = obj_conf[b, h, w, anchor].item() * cls_conf
-                                
-                                if conf > conf_thresh:
-                                    # 转换为图像坐标
-                                    x = (w + bx) * self.config.STRIDES[i]
-                                    y = (h + by) * self.config.STRIDES[i]
-                                    width = bw * self.config.ANCHORS[i][anchor][0]
-                                    height = bh * self.config.ANCHORS[i][anchor][1]
-                                    
-                                    detection = [x, y, width, height, conf, cls_id]
-                                    batch_detections.append(detection)
-                
-                # 应用非极大值抑制
-                if len(batch_detections) > 0:
-                    batch_detections = torch.tensor(batch_detections)
-                    keep = self.non_max_suppression(batch_detections, nms_thresh)
-                    detections.append(batch_detections[keep].tolist())
-                else:
-                    detections.append([])
+                                conf = final_conf[b, h, w, anchor].item()
+                                current_cls_id = cls_id[b, h, w, anchor].item()
+
+                                # 训练目标使用整张特征图坐标，因此解码时不应重复叠加网格索引或anchor尺度。
+                                x = float(torch.clamp(bx * stride, 0, self.config.IMG_SIZE - 1).item())
+                                y = float(torch.clamp(by * stride, 0, self.config.IMG_SIZE - 1).item())
+                                width = float(torch.clamp(torch.abs(bw) * stride, 1, self.config.IMG_SIZE).item())
+                                height = float(torch.clamp(torch.abs(bh) * stride, 1, self.config.IMG_SIZE).item())
+
+                                detections[b].append([x, y, width, height, conf, current_cls_id])
+
+        final_detections = []
+        for batch_detections in detections:
+            if batch_detections:
+                batch_detections = torch.tensor(batch_detections, dtype=torch.float32)
+                keep = self.non_max_suppression(batch_detections, nms_thresh)
+                kept = batch_detections[keep]
+                if kept.shape[0] > max_det:
+                    kept = kept[torch.argsort(kept[:, 4], descending=True)[:max_det]]
+                final_detections.append(kept.tolist())
+            else:
+                final_detections.append([])
         
-        return detections
+        return final_detections
     
     def non_max_suppression(self, detections, nms_thresh):
         """非极大值抑制"""
@@ -512,15 +573,35 @@ class OpticalYOLOv3Trainer:
             p3, p4, p5, optical_feat, constraint_target = self.model(imgs.to(self.device))
             
             # 解码检测结果（添加置信度显示）
-            detections = self.decode_detections([p3, p4, p5], self.config.CONF_THRESH, self.config.NMS_THRESH)
+            detections = self.decode_detections(
+                [p3, p4, p5],
+                self.config.VIS_CONF_THRESH,
+                self.config.NMS_THRESH,
+                max_det=self.config.VIS_MAX_DETECTIONS
+            )
         
         # 创建可视化（根据是否启用约束调整布局）
+        num_rows = min(4, imgs.shape[0])
         if constraint_target is not None:
-            fig, axes = plt.subplots(4, 6, figsize=(24, 16))  # 6列布局
+            fig, axes = plt.subplots(
+                num_rows,
+                6,
+                figsize=(18, 3.6 * num_rows),
+                squeeze=False,
+                gridspec_kw={'width_ratios': [1.45, 1, 1, 1, 1, 1]}
+            )
+            optical_col, constraint_col, p3_col, p4_col, p5_col = 1, 2, 3, 4, 5
         else:
-            fig, axes = plt.subplots(4, 5, figsize=(20, 16))
+            fig, axes = plt.subplots(
+                num_rows,
+                5,
+                figsize=(15.5, 3.6 * num_rows),
+                squeeze=False,
+                gridspec_kw={'width_ratios': [1.45, 1, 1, 1, 1]}
+            )
+            optical_col, constraint_col, p3_col, p4_col, p5_col = 1, None, 2, 3, 4
         
-        for idx in range(min(4, imgs.shape[0])):
+        for idx in range(num_rows):
             # 输入图像（带边界框和标签）
             img_np = imgs[idx].permute(1, 2, 0).cpu().numpy()
             img_np = (img_np * 255).astype(np.uint8)  # 转换为0-255范围
@@ -554,80 +635,92 @@ class OpticalYOLOv3Trainer:
                 
                 # 添加类别标签
                 class_name = self.class_names.get(int(cls_id), f"Class {int(cls_id)}")
-                axes[idx, 0].text(x1, y1-5, class_name, color='white',
-                                bbox=dict(facecolor='red', alpha=0.8), fontsize=8)
+                text_y = max(2, y1 - 10)
+                axes[idx, 0].text(
+                    x1,
+                    text_y,
+                    class_name,
+                    color='white',
+                    bbox=dict(facecolor='red', alpha=0.85, pad=1.5),
+                    fontsize=7
+                )
                 
                 obj_count += 1
             
             # 绘制模型检测结果（带置信度）
-            img_detections = detections[idx] if idx < len(detections) else []
+            img_detections = sorted(
+                detections[idx] if idx < len(detections) else [],
+                key=lambda det: det[4],
+                reverse=True
+            )[:self.config.VIS_MAX_DETECTIONS]
             for det in img_detections:
                 x, y, w, h, conf, cls_id = det[:6]
                 
-                # 转换为像素坐标
-                x1 = int(x)
-                y1 = int(y)
-                x2 = int(x + w)
-                y2 = int(y + h)
+                # 转换为像素坐标（x/y为中心点）
+                x1 = int(max(0, x - w / 2))
+                y1 = int(max(0, y - h / 2))
+                x2 = int(min(self.config.IMG_SIZE, x + w / 2))
+                y2 = int(min(self.config.IMG_SIZE, y + h / 2))
                 
                 # 绘制检测框（绿色，带置信度）
-                rect = plt.Rectangle((x1, y1), w, h, 
+                rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1, 
                                    fill=False, edgecolor='green', linewidth=2, linestyle='--')
                 axes[idx, 0].add_patch(rect)
                 
                 # 添加置信度标签
                 class_name_det = self.class_names.get(int(cls_id), f"Class {int(cls_id)}")
-                axes[idx, 0].text(x1, y1-25, f"{class_name_det}: {conf:.2f}", 
-                                color='white', bbox=dict(facecolor='green', alpha=0.8), fontsize=8)
+                text_y = min(self.config.IMG_SIZE - 12, max(2, y1 + 2))
+                axes[idx, 0].text(
+                    x1,
+                    text_y,
+                    f"{class_name_det} {conf:.2f}",
+                    color='white',
+                    bbox=dict(facecolor='green', alpha=0.85, pad=1.5),
+                    fontsize=7
+                )
             
             axes[idx, 0].set_title(f"Input {idx+1} (真实: {obj_count}, 检测: {len(img_detections)})")
             axes[idx, 0].axis('off')
             
             # 光学特征
-            optical_np = optical_feat[idx].squeeze().cpu().numpy()
-            im = axes[idx, 1].imshow(optical_np, cmap='hot')
-            axes[idx, 1].set_title("Optical Feature")
-            axes[idx, 1].axis('off')
-            plt.colorbar(im, ax=axes[idx, 1])
+            optical_np = self.enhance_feature_for_display(
+                self.normalize_feature_map(optical_feat[idx:idx + 1]).squeeze().cpu().numpy()
+            )
+            im = axes[idx, optical_col].imshow(optical_np, cmap='inferno')
+            axes[idx, optical_col].set_title("Optical Feature")
+            axes[idx, optical_col].axis('off')
+            plt.colorbar(im, ax=axes[idx, optical_col], fraction=0.035, pad=0.01)
             
             # 光学约束目标（如果存在）
             if constraint_target is not None:
-                constraint_np = constraint_target[idx].squeeze().cpu().numpy()
-                im = axes[idx, 2].imshow(constraint_np, cmap='hot')
-                axes[idx, 2].set_title("Constraint Target")
-                axes[idx, 2].axis('off')
-                plt.colorbar(im, ax=axes[idx, 2])
-            else:
-                axes[idx, 2].axis('off')
+                constraint_np = self.enhance_feature_for_display(constraint_target[idx].squeeze().cpu().numpy())
+                im = axes[idx, constraint_col].imshow(constraint_np, cmap='inferno')
+                axes[idx, constraint_col].set_title("Constraint Target")
+                axes[idx, constraint_col].axis('off')
+                plt.colorbar(im, ax=axes[idx, constraint_col], fraction=0.035, pad=0.01)
             
-            # 多尺度特征
-            p3_np = p3[idx].abs().mean(dim=0).cpu().numpy()
-            axes[idx, 3].imshow(p3_np, cmap='hot')
-            axes[idx, 3].set_title("P3 (80×80)")
-            axes[idx, 3].axis('off')
+            # 多尺度响应图：显示 obj * cls 的响应，而不是直接均值化原始logit
+            p3_np = self.enhance_feature_for_display(self.prediction_response_map(p3[idx]))
+            im = axes[idx, p3_col].imshow(p3_np, cmap='inferno', interpolation='nearest')
+            axes[idx, p3_col].set_title("P3 (80×80)")
+            axes[idx, p3_col].axis('off')
+            plt.colorbar(im, ax=axes[idx, p3_col], fraction=0.035, pad=0.01)
             
-            p4_np = p4[idx].abs().mean(dim=0).cpu().numpy()
-            axes[idx, 4].imshow(p4_np, cmap='hot')
-            axes[idx, 4].set_title("P4 (40×40)")
-            axes[idx, 4].axis('off')
+            p4_np = self.enhance_feature_for_display(self.prediction_response_map(p4[idx]))
+            im = axes[idx, p4_col].imshow(p4_np, cmap='inferno', interpolation='nearest')
+            axes[idx, p4_col].set_title("P4 (40×40)")
+            axes[idx, p4_col].axis('off')
+            plt.colorbar(im, ax=axes[idx, p4_col], fraction=0.035, pad=0.01)
             
-            # 如果启用了约束，调整子图布局
-            if constraint_target is not None:
-                # 添加第6列显示P5特征
-                p5_np = p5[idx].abs().mean(dim=0).cpu().numpy()
-                im = axes[idx, 5].imshow(p5_np, cmap='hot')
-                axes[idx, 5].set_title("P5 (20×20)")
-                axes[idx, 5].axis('off')
-                plt.colorbar(im, ax=axes[idx, 5])
-            else:
-                p5_np = p5[idx].abs().mean(dim=0).cpu().numpy()
-                axes[idx, 4].imshow(p5_np, cmap='hot')
-                axes[idx, 4].set_title("P5 (20×20)")
-                axes[idx, 4].axis('off')
+            p5_np = self.enhance_feature_for_display(self.prediction_response_map(p5[idx]))
+            im = axes[idx, p5_col].imshow(p5_np, cmap='inferno', interpolation='nearest')
+            axes[idx, p5_col].set_title("P5 (20×20)")
+            axes[idx, p5_col].axis('off')
+            plt.colorbar(im, ax=axes[idx, p5_col], fraction=0.035, pad=0.01)
         
-        plt.tight_layout()
+        fig.subplots_adjust(left=0.02, right=0.99, top=0.95, bottom=0.02, wspace=0.08, hspace=0.18)
         vis_path = os.path.join(self.config.LOG_DIR, f"visualization_epoch_{epoch+1}.png")
-        plt.savefig(vis_path, dpi=150, bbox_inches='tight')
+        plt.savefig(vis_path, dpi=180, bbox_inches='tight', pad_inches=0.08)
         plt.close()
         print(f"可视化结果已保存: {vis_path}")
 
@@ -673,20 +766,24 @@ class OpticalYOLOv3Trainer:
             if epoch >= self.config.ENABLE_NORM_AFTER_EPOCH:
                 self.model.enable_normalization(True)
                 print("已启用光学输出归一化")
+            else:
+                self.model.enable_normalization(False)
             
             # 启用光学约束（在训练稳定后）
             if epoch >= self.config.ENABLE_CONSTRAINT_AFTER_EPOCH:
                 self.model.enable_constraint_loss(True)
-                print("已启用光学约束损失")
+                print(f"已启用光学约束损失，当前权重: {self.get_constraint_weight(epoch):.4f}")
+            else:
+                self.model.enable_constraint_loss(False)
             
             # 训练一个epoch
             train_loss = self.train_epoch(train_loader, epoch)
             
             # 验证
-            val_loss = self.validate(val_loader)
+            val_loss = self.validate(val_loader, epoch)
             
             # 学习率调度
-            self.scheduler.step()
+            self.scheduler.step(val_loss)
             current_lr = self.optimizer.param_groups[0]['lr']
             
             # 计算检测指标（从第5轮开始）
@@ -713,10 +810,13 @@ class OpticalYOLOv3Trainer:
                       f"学习率: {current_lr:.6f}")
             
             # 保存最佳模型
-            if val_loss < self.best_val_loss:
+            if val_loss < self.best_val_loss - self.config.EARLY_STOPPING_MIN_DELTA:
                 self.best_val_loss = val_loss
+                self.no_improve_epochs = 0
                 self.save_model(epoch, val_loss, is_best=True)
                 print("新的最佳模型已保存!")
+            else:
+                self.no_improve_epochs += 1
             
             # 定期保存和可视化
             if (epoch + 1) % self.config.SAVE_EVERY == 0:
@@ -728,6 +828,10 @@ class OpticalYOLOv3Trainer:
             # 定期清理GPU内存
             if (epoch + 1) % 5 == 0:
                 torch.cuda.empty_cache()
+
+            if self.no_improve_epochs >= self.config.EARLY_STOPPING_PATIENCE:
+                print(f"验证损失连续 {self.no_improve_epochs} 轮未改善，提前停止训练。")
+                break
         
         # 训练结束
         end_time = time.time()
