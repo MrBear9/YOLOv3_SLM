@@ -30,9 +30,9 @@ class Config:
     WEIGHT_DECAY = 1e-5
     
     # 损失权重
-    BOX_WEIGHT = 0.05
-    OBJ_WEIGHT = 1.5
-    CLS_WEIGHT = 0.15
+    BOX_WEIGHT = 0.05 # 目标框损失权重
+    OBJ_WEIGHT = 1.5 # 目标检测损失权重
+    CLS_WEIGHT = 0.15 # 分类损失权重
     OPTICAL_CONSTRAINT_WEIGHT = 0.1  # 光学约束损失权重
     USE_VORTEX_INIT = True  # 是否使用涡旋初始化
     SLM1_VORTEX_CHARGE = 1  # SLM1涡旋电荷
