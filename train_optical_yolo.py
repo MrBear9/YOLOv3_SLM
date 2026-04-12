@@ -50,8 +50,11 @@ class Config:
     # 路径设置
     DATA_YAML_PATH = r"data\military\data.yaml"
     ROOT_PATH = r"data\military"
-    SAVE_DIR = r"output\optical_yolo_models"
-    LOG_DIR = r"output\optical_yolo_logs"
+    # 统一输出路径配置
+    OPTICAL_YOLO_OUTPUT_DIR = r"output\OpticalYOLO"
+    SAVE_DIR = os.path.join(OPTICAL_YOLO_OUTPUT_DIR, "models")
+    LOG_DIR = os.path.join(OPTICAL_YOLO_OUTPUT_DIR, "logs")
+    VISUALIZATION_DIR = os.path.join(OPTICAL_YOLO_OUTPUT_DIR, "visualizations")
     
     # 训练策略
     ENABLE_NORM_AFTER_EPOCH = 0  # 从训练开始就保持光学输出尺度稳定
@@ -149,6 +152,7 @@ class OpticalYOLOv3Trainer:
         # 创建输出目录
         os.makedirs(config.SAVE_DIR, exist_ok=True)
         os.makedirs(config.LOG_DIR, exist_ok=True)
+        os.makedirs(config.VISUALIZATION_DIR, exist_ok=True)
         
         # 加载类别信息
         self.class_names, self.num_classes = self.load_class_names()
@@ -732,7 +736,7 @@ class OpticalYOLOv3Trainer:
             plt.colorbar(im, ax=axes[idx, p5_col], fraction=0.035, pad=0.01)
         
         fig.subplots_adjust(left=0.02, right=0.99, top=0.95, bottom=0.02, wspace=0.08, hspace=0.18)
-        vis_path = os.path.join(self.config.LOG_DIR, f"visualization_epoch_{epoch+1}.png")
+        vis_path = os.path.join(self.config.VISUALIZATION_DIR, f"visualization_epoch_{epoch+1}.png")
         plt.savefig(vis_path, dpi=180, bbox_inches='tight', pad_inches=0.08)
         plt.close()
         print(f"可视化结果已保存: {vis_path}")
@@ -749,7 +753,7 @@ class OpticalYOLOv3Trainer:
         plt.legend()
         plt.grid(True)
         
-        history_path = os.path.join(self.config.LOG_DIR, "training_history.png")
+        history_path = os.path.join(self.config.VISUALIZATION_DIR, "training_history.png")
         plt.savefig(history_path, dpi=150, bbox_inches='tight')
         plt.close()
         print(f"训练历史图已保存: {history_path}")
