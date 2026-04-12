@@ -333,6 +333,7 @@ class YOLOLoss(nn.Module):
     def __init__(self, box_weight=0.05, obj_weight=1.5, cls_weight=0.15):
         super(YOLOLoss, self).__init__()
         self.mse = nn.MSELoss()
+        self.smooth_l1 = nn.SmoothL1Loss()
         self.bce = nn.BCEWithLogitsLoss()
         self.box_weight = box_weight
         self.obj_weight = obj_weight
@@ -347,16 +348,29 @@ class YOLOLoss(nn.Module):
         obj_mask = target[..., 4] == 1
         noobj_mask = target[..., 4] == 0
 
-        # 边界框损失
-        box_loss = self.mse(pred[obj_mask][:, :4], target[obj_mask][:, :4])
+        if obj_mask.any():
+            pred_pos = pred[obj_mask]
+            target_pos = target[obj_mask]
 
-        # 目标置信度损失（均衡正负样本）
-        obj_loss = self.bce(pred[obj_mask][:, 4], target[obj_mask][:, 4])
-        noobj_loss = self.bce(pred[noobj_mask][:, 4], target[noobj_mask][:, 4])
-        obj_loss = obj_loss + 0.5 * noobj_loss
+            # xy 使用网格内偏移，wh 使用相对 anchor 的 log 编码。
+            xy_loss = self.bce(pred_pos[:, 0:2], target_pos[:, 0:2])
+            wh_loss = self.smooth_l1(pred_pos[:, 2:4], target_pos[:, 2:4])
+            box_loss = xy_loss + wh_loss
 
-        # 分类损失
-        cls_loss = self.bce(pred[obj_mask][:, 5:], target[obj_mask][:, 5:])
+            obj_loss_pos = self.bce(pred_pos[:, 4], target_pos[:, 4])
+            cls_loss = self.bce(pred_pos[:, 5:], target_pos[:, 5:])
+        else:
+            box_loss = pred[..., :4].sum() * 0.0
+            obj_loss_pos = pred[..., 4].sum() * 0.0
+            cls_loss = pred[..., 5:].sum() * 0.0
+
+        if noobj_mask.any():
+            noobj_loss = self.bce(pred[noobj_mask][:, 4], target[noobj_mask][:, 4])
+        else:
+            noobj_loss = pred[..., 4].sum() * 0.0
+
+        # 保留较小的 no-object 权重，避免负样本淹没正样本梯度。
+        obj_loss = obj_loss_pos + 0.5 * noobj_loss
 
         # 加权总和
         total_loss = (self.box_weight * box_loss + 
@@ -373,35 +387,49 @@ def build_target(targets, anchors, stride, num_classes, img_size, device):
     batch_size = targets.shape[0]
     h, w = img_size // stride, img_size // stride
     num_anchors = len(anchors)
+    eps = 1e-6
 
     target_tensor = torch.zeros((batch_size, h, w, num_anchors, 5 + num_classes), device=device)
 
     for b in range(batch_size):
         for t in targets[b]:
             cls, cx, cy, bw, bh = t
-            cx_s = cx * w
-            cy_s = cy * h
-            bw_s = bw * w
-            bh_s = bh * h
+            if bw.item() <= 0 or bh.item() <= 0:
+                continue
 
-            i = int(cx_s)
-            j = int(cy_s)
+            gx = cx * w
+            gy = cy * h
+            gw = torch.clamp(bw * img_size / stride, min=eps)
+            gh = torch.clamp(bh * img_size / stride, min=eps)
+
+            i = min(w - 1, max(0, int(gx.item())))
+            j = min(h - 1, max(0, int(gy.item())))
 
             # 选择最佳锚框
             best_idx = 0
             best_iou = 0
             for a_idx, (aw, ah) in enumerate(anchors):
-                inter = min(bw_s, aw) * min(bh_s, ah)
-                union = bw_s * bh_s + aw * ah - inter
+                aw_s = aw / stride
+                ah_s = ah / stride
+                inter = min(gw.item(), aw_s) * min(gh.item(), ah_s)
+                union = gw.item() * gh.item() + aw_s * ah_s - inter
                 iou = inter / union
                 if iou > best_iou:
                     best_iou = iou
                     best_idx = a_idx
 
             # 填充目标张量
-            target_tensor[b, j, i, best_idx, 0:4] = torch.tensor([cx_s, cy_s, bw_s, bh_s], device=device)
+            aw, ah = anchors[best_idx]
+            aw_s = aw / stride
+            ah_s = ah / stride
+            tx = gx - i
+            ty = gy - j
+            tw = torch.log(gw / aw_s + eps)
+            th = torch.log(gh / ah_s + eps)
+
+            target_tensor[b, j, i, best_idx, 0:4] = torch.stack([tx, ty, tw, th])
             target_tensor[b, j, i, best_idx, 4] = 1
-            target_tensor[b, j, i, best_idx, 5 + int(cls)] = 1
+            target_tensor[b, j, i, best_idx, 5 + int(cls.item())] = 1
 
     return target_tensor
 

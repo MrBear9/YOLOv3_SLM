@@ -1,4 +1,4 @@
-﻿﻿import torch
+﻿import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
@@ -441,6 +441,9 @@ class OpticalYOLOv3Trainer:
         for i, pred in enumerate(preds):
             grid_h, grid_w = pred.shape[2], pred.shape[3]
             stride = self.config.STRIDES[i]
+            anchor_tensor = torch.tensor(
+                self.config.ANCHORS[i], device=pred.device, dtype=pred.dtype
+            )
             
             # 重塑预测为 (batch_size, grid_h, grid_w, 3, 5+num_classes)
             pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
@@ -452,19 +455,44 @@ class OpticalYOLOv3Trainer:
             obj_mask = final_conf > conf_thresh
             
             for b in range(batch_size):
-                for h in range(grid_h):
-                    for w in range(grid_w):
+                for h_idx in range(grid_h):
+                    for w_idx in range(grid_w):
                         for anchor in range(3):
-                            if obj_mask[b, h, w, anchor]:
-                                bx, by, bw, bh = pred[b, h, w, anchor, :4]
-                                conf = final_conf[b, h, w, anchor].item()
-                                current_cls_id = cls_id[b, h, w, anchor].item()
+                            if obj_mask[b, h_idx, w_idx, anchor]:
+                                bx, by, bw, bh = pred[b, h_idx, w_idx, anchor, :4]
+                                conf = final_conf[b, h_idx, w_idx, anchor].item()
+                                current_cls_id = cls_id[b, h_idx, w_idx, anchor].item()
+                                anchor_w, anchor_h = anchor_tensor[anchor]
 
-                                # 训练目标使用整张特征图坐标，因此解码时不应重复叠加网格索引或anchor尺度。
-                                x = float(torch.clamp(bx * stride, 0, self.config.IMG_SIZE - 1).item())
-                                y = float(torch.clamp(by * stride, 0, self.config.IMG_SIZE - 1).item())
-                                width = float(torch.clamp(torch.abs(bw) * stride, 1, self.config.IMG_SIZE).item())
-                                height = float(torch.clamp(torch.abs(bh) * stride, 1, self.config.IMG_SIZE).item())
+                                # 与 build_target/YOLOLoss 保持一致：xy 为网格内偏移，wh 为相对 anchor 的 log 编码。
+                                x = float(
+                                    torch.clamp(
+                                        (torch.sigmoid(bx) + w_idx) * stride,
+                                        0,
+                                        self.config.IMG_SIZE - 1
+                                    ).item()
+                                )
+                                y = float(
+                                    torch.clamp(
+                                        (torch.sigmoid(by) + h_idx) * stride,
+                                        0,
+                                        self.config.IMG_SIZE - 1
+                                    ).item()
+                                )
+                                width = float(
+                                    torch.clamp(
+                                        torch.exp(torch.clamp(bw, min=-4.0, max=4.0)) * anchor_w,
+                                        1,
+                                        self.config.IMG_SIZE
+                                    ).item()
+                                )
+                                height = float(
+                                    torch.clamp(
+                                        torch.exp(torch.clamp(bh, min=-4.0, max=4.0)) * anchor_h,
+                                        1,
+                                        self.config.IMG_SIZE
+                                    ).item()
+                                )
 
                                 detections[b].append([x, y, width, height, conf, current_cls_id])
 
@@ -548,18 +576,45 @@ class OpticalYOLOv3Trainer:
         false_negatives = 0
         
         for i in range(len(detections)):
-            # 检测到的目标数
-            det_count = len(detections[i])
-            
-            # 真实目标数（过滤空目标）
-            gt_count = 0
+            gt_boxes = []
             for t in targets[i]:
-                if t[4] != 0:  # 非空目标
-                    gt_count += 1
-            
-            true_positives += min(det_count, gt_count)
-            false_positives += max(0, det_count - gt_count)
-            false_negatives += max(0, gt_count - det_count)
+                if t[3] <= 0 or t[4] <= 0:
+                    continue
+
+                cls_id, cx, cy, bw, bh = t.tolist()
+                gt_boxes.append([
+                    cx * self.config.IMG_SIZE,
+                    cy * self.config.IMG_SIZE,
+                    bw * self.config.IMG_SIZE,
+                    bh * self.config.IMG_SIZE,
+                    int(cls_id)
+                ])
+
+            matched_gt = set()
+            det_boxes = sorted(detections[i], key=lambda det: det[4], reverse=True)
+
+            for det in det_boxes:
+                det_tensor = torch.tensor(det[:4], dtype=torch.float32).unsqueeze(0)
+                best_iou = 0.0
+                best_gt_idx = -1
+
+                for gt_idx, gt in enumerate(gt_boxes):
+                    if gt_idx in matched_gt or int(det[5]) != gt[4]:
+                        continue
+
+                    gt_tensor = torch.tensor(gt[:4], dtype=torch.float32).unsqueeze(0)
+                    iou = float(self.calculate_iou(det_tensor, gt_tensor).item())
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_gt_idx = gt_idx
+
+                if best_iou >= 0.5:
+                    true_positives += 1
+                    matched_gt.add(best_gt_idx)
+                else:
+                    false_positives += 1
+
+            false_negatives += len(gt_boxes) - len(matched_gt)
         
         precision = true_positives / (true_positives + false_positives + 1e-6)
         recall = true_positives / (true_positives + false_negatives + 1e-6)
@@ -665,8 +720,9 @@ class OpticalYOLOv3Trainer:
                 obj_count += 1
             
             # 绘制模型检测结果（带置信度）
+            raw_detections = detections[idx] if idx < len(detections) else []
             img_detections = sorted(
-                detections[idx] if idx < len(detections) else [],
+                raw_detections,
                 key=lambda det: det[4],
                 reverse=True
             )[:self.config.VIS_MAX_DETECTIONS]
@@ -696,7 +752,9 @@ class OpticalYOLOv3Trainer:
                     fontsize=7
                 )
             
-            axes[idx, 0].set_title(f"Input {idx+1} (真实: {obj_count}, 检测: {len(img_detections)})")
+            axes[idx, 0].set_title(
+                f"Input {idx+1} (真实: {obj_count}, 显示检测: {len(img_detections)}/{len(raw_detections)})"
+            )
             axes[idx, 0].axis('off')
             
             # 光学特征
