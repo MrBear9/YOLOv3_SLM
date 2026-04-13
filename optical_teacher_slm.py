@@ -32,11 +32,9 @@ class SLMLayer(nn.Module):
             self.register_parameter("amp_raw", None)
 
     def forward(self, field):
-        # Phase modulation (always enabled)
         phase = torch.remainder(self.phase_raw, 2 * np.pi)
         mod = torch.exp(1j * phase)
 
-        # Optional amplitude modulation
         if self.mode == "amp_phase":
             amp = torch.sigmoid(self.amp_raw)
             mod = mod * amp
@@ -67,8 +65,6 @@ class OpticalStudent(nn.Module):
         self.prop1 = ASMPropagation(0.01, 532e-9, 6.4e-6, resolution)
         self.slm2 = SLMLayer(resolution, mode)
         self.prop2 = ASMPropagation(0.02, 532e-9, 6.4e-6, resolution)
-        # self.slm3 = SLMLayer(resolution)
-        # self.prop3 = ASMPropagation(0.03, 532e-9, 6.4e-6, resolution)
         self.enable_norm = False
 
     def forward(self, intensity):
@@ -76,127 +72,66 @@ class OpticalStudent(nn.Module):
         field = torch.complex(amp, torch.zeros_like(amp))
         field = self.prop1(self.slm1(field))
         field = self.prop2(self.slm2(field))
-        # field = self.prop3(self.slm3(field))
         out = torch.abs(field)**2
         if self.enable_norm:
             out = out / (out.mean(dim=[2,3], keepdim=True) + 1e-6)
         return out
 
 # =========================================================
-# 教师网络--测试用的，其他里面不使用（多尺度滤波器）
+# 教师网络（从last.py复制的ConvTeacher）
 # =========================================================
-# class MultiScaleTeacher(nn.Module):
-#     def __init__(self):
-#         super().__init__()
-#         # 高斯低通
-#         self.gauss = nn.Conv2d(1, 1, kernel_size=15, padding=7, bias=False)
-#         grid = torch.arange(15) - 7
-#         X, Y = torch.meshgrid(grid, grid, indexing='ij')
-#         sigma = 3.0
-#         g = torch.exp(-(X**2 + Y**2)/(2*sigma**2))
-#         g = g/g.sum()
-#         self.gauss.weight.data = g.unsqueeze(0).unsqueeze(0)
-
-#         # Sobel 边缘
-#         sobel_x = torch.tensor([[-1,0,1],[-2,0,2],[-1,0,1]], dtype=torch.float32)
-#         self.sobel = nn.Conv2d(1,1,kernel_size=3,padding=1,bias=False)
-#         self.sobel.weight.data = sobel_x.unsqueeze(0).unsqueeze(0)
-
-#         for p in self.parameters():
-#             p.requires_grad = False
-
-#     def forward(self, x):
-#         gray = x.mean(dim=1, keepdim=True)
-#         low = self.gauss(gray)
-#         edge = torch.abs(self.sobel(gray))   # 去符号
-#         edge = F.avg_pool2d(edge, 4)         # 去高频
-#         edge = F.interpolate(edge, gray.shape[-2:])
-
-#         return torch.sigmoid(low + edge)
-
-# =========================================================
-# 教师网络（卷积-仿YOLOV3）
-# =========================================================
-
 class ConvTeacher(nn.Module):
-    """
-    Conv-based teacher that mimics YOLOv5s P3 feature
-    Output:
-        - single-channel
-        - same spatial resolution as input
-        - P3-equivalent receptive field (~8x downsample)
-    """
     def __init__(self):
         super().__init__()
 
-        # Stem: downsample x2
         self.conv1 = nn.Sequential(
             nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(16),
             nn.SiLU()
         )
 
-        # Downsample x4
         self.conv2 = nn.Sequential(
             nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.SiLU()
         )
 
-        # Downsample x8  → P3 scale
         self.conv3 = nn.Sequential(
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(64),
             nn.SiLU()
         )
 
-        # P3 refinement (YOLOv5 C3-like, but lightweight)
         self.refine = nn.Sequential(
             nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(64),
             nn.SiLU(),
-
             nn.Conv2d(64, 32, kernel_size=1, bias=False),
             nn.BatchNorm2d(32),
             nn.SiLU()
         )
 
-        # Projection to single channel
         self.project = nn.Conv2d(32, 1, kernel_size=1, bias=False)
 
-        # Freeze parameters
-        for p in self.parameters():
-            p.requires_grad = False
-
     def forward(self, x):
-        """
-        x: RGB or Gray image tensor [B, C, H, W]
-        """
         if x.shape[1] > 1:
-            x = x.mean(dim=1, keepdim=True)  # to gray
+            x = x.mean(dim=1, keepdim=True)
 
         f = self.conv1(x)
         f = self.conv2(f)
-        f = self.conv3(f)      # P3 scale (H/8, W/8)
-
+        f = self.conv3(f)
         f = self.refine(f)
         f = self.project(f)
-
-        # Remove sign & high-frequency sensitivity
         f = torch.abs(f)
-
-        # Upsample back to full resolution for pixelwise loss
         f = F.interpolate(
             f, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
-
-        # Bounded intensity-like output
         return torch.sigmoid(f)
 
 # =========================================================
-# Dataset
+# 数据集（使用military数据集）
 # =========================================================
-class COCOFeatureDataset(Dataset):
+class MilitaryFeatureDataset(Dataset):
     def __init__(self, yaml_path, teacher, device):
         with open(yaml_path, 'r', encoding='utf-8') as f:
             cfg = yaml.safe_load(f)
@@ -251,52 +186,43 @@ class MultiScaleMSELoss(nn.Module):
 def save_feature_comparison(epoch, teacher, student, save_dir, prefix="train", idx=None, input_images=None):
     os.makedirs(save_dir, exist_ok=True)
     
-    # 如果没有指定idx，随机选择4张图
     if idx is None:
-        batch_size = min(4, teacher.shape[0])  # 确保不超过批次大小
+        batch_size = min(4, teacher.shape[0])
         indices = torch.randperm(teacher.shape[0])[:batch_size]
     else:
         indices = [idx] if isinstance(idx, int) else idx
     
-    # 创建4个子图，每行4个，共4行（输入、教师、学生、差异）
     fig, axes = plt.subplots(4, 4, figsize=(20, 20))
     
     def norm(x): return (x - x.min()) / (x.max() - x.min() + 1e-8)
     
     for i, idx in enumerate(indices):
-        # 获取输入图像（如果提供）
         if input_images is not None:
             input_img = input_images[idx, 0].numpy()
             axes[i, 0].imshow(norm(input_img), cmap="gray")
             axes[i, 0].set_title(f"Input {i+1}")
             axes[i, 0].axis("off")
         else:
-            # 如果没有输入图像，隐藏该位置
             axes[i, 0].axis("off")
         
         t = teacher[idx, 0].numpy()
         s = student[idx, 0].numpy()
         r = np.abs(s - t)
         
-        # 显示教师特征
         axes[i, 1].imshow(norm(t), cmap="hot")
         axes[i, 1].set_title(f"Teacher {i+1}")
         axes[i, 1].axis("off")
         
-        # 显示学生特征
         axes[i, 2].imshow(norm(s), cmap="hot")
         axes[i, 2].set_title(f"Student {i+1}")
         axes[i, 2].axis("off")
         
-        # 显示差异图
         im = axes[i, 3].imshow(r, cmap="viridis")
         axes[i, 3].set_title(f"Error {i+1}")
         axes[i, 3].axis("off")
         
-        # 添加颜色条
         plt.colorbar(im, ax=axes[i, 3], fraction=0.046)
     
-    # 隐藏多余的子图
     for i in range(len(indices), 4):
         for j in range(4):
             axes[i, j].axis("off")
@@ -308,33 +234,55 @@ def save_feature_comparison(epoch, teacher, student, save_dir, prefix="train", i
     print(f"[Vis] saved: {save_path}")
 
 # =========================================================
-# 训练
+# 训练函数
 # =========================================================
 def train():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # teacher = MultiScaleTeacher()
+    print(f"使用设备: {device}")
+    
+    # 初始化教师网络（从last.py复制的ConvTeacher）
+    print("初始化教师网络（ConvTeacher）...")
     teacher = ConvTeacher()
-    print("="*60)
-    print("OpticalStudent with phase mode")
+    
+    # 冻结教师网络的参数
+    for p in teacher.parameters():
+        p.requires_grad = False
+    print("教师网络参数已冻结")
+    
+    # 初始化学生网络（光学相位层）
+    print("初始化学生网络（OpticalStudent）...")
     student = OpticalStudent((640, 640), mode="phase").to(device)
-    print("="*60)
-    dataset = COCOFeatureDataset("data/data.yaml", teacher, device)
+    
+    # 加载military数据集
+    print("加载数据集...")
+    dataset = MilitaryFeatureDataset("data/military/data.yaml", teacher, device)
     loader = DataLoader(dataset, batch_size=1, shuffle=True)
+    print(f"数据集大小: {len(dataset)}")
+    
+    # 优化器和损失函数
     optimizer = torch.optim.Adam(student.parameters(), lr=5e-4, weight_decay=1e-5)
     criterion = MultiScaleMSELoss()
     
-    # 创建带时间戳的输出目录
+    # 创建输出目录
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    vis_dir = f"output/vis_{timestamp}"
+    output_dir = f"output/OpticalTeacher_{timestamp}"
+    vis_dir = os.path.join(output_dir, "visualizations")
     os.makedirs(vis_dir, exist_ok=True)
-    print(f"Results will be saved to: {vis_dir}")
+    print(f"结果将保存到: {output_dir}")
     
+    # 训练参数
+    EPOCHS = 400
     loss_curve = []
-
-    for epoch in range(400):
+    
+    print("="*60)
+    print("开始训练光学相位层...")
+    print("="*60)
+    
+    for epoch in range(EPOCHS):
         student.train()
         loss_sum = 0
-        for x, t in tqdm(loader, desc=f"Epoch {epoch}"):
+        
+        for x, t in tqdm(loader, desc=f"Epoch {epoch}/{EPOCHS}", leave=False):
             x = x.to(device)
             t = t.to(device)
             y = student(x)
@@ -346,12 +294,16 @@ def train():
 
         avg_loss = loss_sum / len(loader)
         loss_curve.append(avg_loss)
+        
+        # 在第50轮后启用归一化
         if epoch == 50:
             student.enable_norm = True
+            print(f"Epoch {epoch}: 启用归一化")
+        
+        # 每2轮进行可视化
         if epoch % 2 == 0:
             student.eval()
             with torch.no_grad():
-                # 获取一批数据进行可视化
                 vis_loader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True)
                 vis_batch = next(iter(vis_loader))
                 x_vis, t_vis = vis_batch
@@ -360,18 +312,28 @@ def train():
                 y_vis = student(x_vis).cpu()
             save_feature_comparison(epoch, t_vis, y_vis, vis_dir, input_images=x_vis.cpu())
 
-        print(f"Epoch {epoch} | Loss {avg_loss:.6f}")
+        print(f"Epoch {epoch:3d} | Loss: {avg_loss:.6f}")
 
     # 保存损失曲线
-    plt.figure()
+    plt.figure(figsize=(10, 6))
     plt.plot(loss_curve, label="Train Loss")
-    plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.legend()
-    plt.savefig(os.path.join(vis_dir, "loss_curve.png"), dpi=120)
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training Loss Curve")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(output_dir, "loss_curve.png"), dpi=120)
     plt.close()
 
-    torch.save(student.state_dict(), os.path.join(vis_dir, "optical_student_final.pth"))
-    print(f"Training completed! Model saved to: {os.path.join(vis_dir, 'optical_student_final.pth')}")
-    print(f"All results saved to: {vis_dir}")
+    # 保存训练好的模型
+    model_save_path = os.path.join(output_dir, "optical_student_final.pth")
+    torch.save(student.state_dict(), model_save_path)
+    
+    print("="*60)
+    print("训练完成！")
+    print(f"模型已保存到: {model_save_path}")
+    print(f"所有结果已保存到: {output_dir}")
+    print("="*60)
 
 
 if __name__ == "__main__":
