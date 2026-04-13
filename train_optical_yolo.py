@@ -643,9 +643,13 @@ class OpticalYOLOv3Trainer:
                 imgs, targets = next(batch_iterator)
             print(f"使用手动选择的批次索引: {self.config.VISUALIZE_BATCH_INDEX}")
         else:
-            # 随机选择一个批次
-            imgs, targets = next(iter(dataloader))
-            print("使用随机选择的批次")
+            # 真正的随机选择一个批次
+            num_batches = len(dataloader)
+            random_batch_idx = np.random.randint(0, num_batches)
+            batch_iterator = iter(dataloader)
+            for i in range(random_batch_idx + 1):
+                imgs, targets = next(batch_iterator)
+            print(f"使用随机选择的批次索引: {random_batch_idx}/{num_batches-1}")
         
         imgs = imgs[:4]  # 取前4个样本
         targets = targets[:4]  # 对应的目标
@@ -1044,8 +1048,12 @@ class OpticalYOLOv3Trainer:
                         for i in range(self.config.VISUALIZE_BATCH_INDEX + 1):
                             imgs_sample, targets_sample = next(batch_iterator)
                     else:
-                        # 随机选择一个批次
-                        imgs_sample, targets_sample = next(iter(val_loader))
+                        # 真正的随机选择一个批次
+                        num_batches = len(val_loader)
+                        random_batch_idx = np.random.randint(0, num_batches)
+                        batch_iterator = iter(val_loader)
+                        for i in range(random_batch_idx + 1):
+                            imgs_sample, targets_sample = next(batch_iterator)
                     
                     imgs_sample = imgs_sample.to(self.device)
                     p3, p4, p5, _, _ = self.model(imgs_sample)
