@@ -186,6 +186,15 @@ class OpticalYOLOv3Trainer:
         self.recalls = []
         self.f1_scores = []
         
+        # 初始化日志文件
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.config_log_path = os.path.join(config.LOG_DIR, f"config_{timestamp}.txt")
+        self.training_log_path = os.path.join(config.LOG_DIR, f"training_log_{timestamp}.txt")
+        self.summary_log_path = os.path.join(config.LOG_DIR, f"training_summary_{timestamp}.txt")
+        
+        # 保存配置参数
+        self.save_config_to_txt()
+        
         print(f"训练器初始化完成，使用设备: {self.device}")
 
     def load_class_names(self):
@@ -816,6 +825,170 @@ class OpticalYOLOv3Trainer:
         plt.close()
         print(f"训练历史图已保存: {history_path}")
 
+    def save_config_to_txt(self):
+        """将训练配置参数保存为txt文件"""
+        with open(self.config_log_path, 'w', encoding='utf-8') as f:
+            f.write("="*80 + "\n")
+            f.write("光学YOLOv3训练配置参数\n")
+            f.write("="*80 + "\n\n")
+            
+            f.write(f"保存时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            
+            f.write("-"*80 + "\n")
+            f.write("设备设置\n")
+            f.write("-"*80 + "\n")
+            f.write(f"DEVICE: {self.config.DEVICE}\n\n")
+            
+            f.write("-"*80 + "\n")
+            f.write("训练参数\n")
+            f.write("-"*80 + "\n")
+            f.write(f"EPOCHS: {self.config.EPOCHS}\n")
+            f.write(f"BATCH_SIZE: {self.config.BATCH_SIZE}\n")
+            f.write(f"IMG_SIZE: {self.config.IMG_SIZE}\n")
+            f.write(f"LEARNING_RATE: {self.config.LEARNING_RATE}\n")
+            f.write(f"WEIGHT_DECAY: {self.config.WEIGHT_DECAY}\n\n")
+            
+            f.write("-"*80 + "\n")
+            f.write("损失权重\n")
+            f.write("-"*80 + "\n")
+            f.write(f"BOX_WEIGHT: {self.config.BOX_WEIGHT}\n")
+            f.write(f"OBJ_WEIGHT: {self.config.OBJ_WEIGHT}\n")
+            f.write(f"CLS_WEIGHT: {self.config.CLS_WEIGHT}\n")
+            f.write(f"OPTICAL_CONSTRAINT_WEIGHT: {self.config.OPTICAL_CONSTRAINT_WEIGHT}\n\n")
+            
+            f.write("-"*80 + "\n")
+            f.write("光学设置\n")
+            f.write("-"*80 + "\n")
+            f.write(f"USE_VORTEX_INIT: {self.config.USE_VORTEX_INIT}\n")
+            f.write(f"SLM1_VORTEX_CHARGE: {self.config.SLM1_VORTEX_CHARGE}\n")
+            f.write(f"SLM2_VORTEX_CHARGE: {self.config.SLM2_VORTEX_CHARGE}\n")
+            f.write(f"VORTEX_PERTURBATION: {self.config.VORTEX_PERTURBATION}\n\n")
+            
+            f.write("-"*80 + "\n")
+            f.write("锚框设置\n")
+            f.write("-"*80 + "\n")
+            f.write(f"STRIDES: {self.config.STRIDES}\n")
+            f.write("ANCHORS:\n")
+            for i, anchors in enumerate(self.config.ANCHORS):
+                f.write(f"  P{i+3} (stride={self.config.STRIDES[i]}): {anchors}\n")
+            f.write("\n")
+            
+            f.write("-"*80 + "\n")
+            f.write("路径设置\n")
+            f.write("-"*80 + "\n")
+            f.write(f"DATA_YAML_PATH: {self.config.DATA_YAML_PATH}\n")
+            f.write(f"ROOT_PATH: {self.config.ROOT_PATH}\n")
+            f.write(f"OPTICAL_YOLO_OUTPUT_DIR: {self.config.OPTICAL_YOLO_OUTPUT_DIR}\n")
+            f.write(f"SAVE_DIR: {self.config.SAVE_DIR}\n")
+            f.write(f"LOG_DIR: {self.config.LOG_DIR}\n")
+            f.write(f"VISUALIZATION_DIR: {self.config.VISUALIZATION_DIR}\n\n")
+            
+            f.write("-"*80 + "\n")
+            f.write("训练策略\n")
+            f.write("-"*80 + "\n")
+            f.write(f"ENABLE_NORM_AFTER_EPOCH: {self.config.ENABLE_NORM_AFTER_EPOCH}\n")
+            f.write(f"ENABLE_CONSTRAINT_AFTER_EPOCH: {self.config.ENABLE_CONSTRAINT_AFTER_EPOCH}\n")
+            f.write(f"CONSTRAINT_WARMUP_EPOCHS: {self.config.CONSTRAINT_WARMUP_EPOCHS}\n")
+            f.write(f"VISUALIZE_EVERY: {self.config.VISUALIZE_EVERY}\n")
+            f.write(f"SAVE_EVERY: {self.config.SAVE_EVERY}\n")
+            f.write(f"EARLY_STOPPING_PATIENCE: {self.config.EARLY_STOPPING_PATIENCE}\n")
+            f.write(f"EARLY_STOPPING_MIN_DELTA: {self.config.EARLY_STOPPING_MIN_DELTA}\n\n")
+            
+            f.write("-"*80 + "\n")
+            f.write("检测阈值\n")
+            f.write("-"*80 + "\n")
+            f.write(f"CONF_THRESH: {self.config.CONF_THRESH}\n")
+            f.write(f"NMS_THRESH: {self.config.NMS_THRESH}\n")
+            f.write(f"VIS_CONF_THRESH: {self.config.VIS_CONF_THRESH}\n")
+            f.write(f"VIS_MAX_DETECTIONS: {self.config.VIS_MAX_DETECTIONS}\n\n")
+            
+            f.write("-"*80 + "\n")
+            f.write("类别信息\n")
+            f.write("-"*80 + "\n")
+            f.write(f"类别数量: {self.num_classes}\n")
+            f.write("类别名称:\n")
+            for idx, name in self.class_names.items():
+                f.write(f"  {idx}: {name}\n")
+            f.write("\n")
+            
+            f.write("="*80 + "\n")
+            f.write("配置参数保存完成\n")
+            f.write("="*80 + "\n")
+        
+        print(f"配置参数已保存: {self.config_log_path}")
+
+    def log_training_epoch(self, epoch, train_loss, val_loss, precision, recall, f1_score, lr, constraint_weight=0.0):
+        """记录每个epoch的训练日志到txt文件"""
+        with open(self.training_log_path, 'a', encoding='utf-8') as f:
+            if epoch == 0:
+                f.write("="*80 + "\n")
+                f.write("光学YOLOv3训练日志\n")
+                f.write("="*80 + "\n\n")
+                f.write(f"训练开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                f.write("-"*80 + "\n")
+                f.write(f"{'Epoch':<8} {'Train Loss':<12} {'Val Loss':<12} {'Precision':<10} {'Recall':<10} {'F1':<10} {'LR':<12} {'Constraint W':<12}\n")
+                f.write("-"*80 + "\n")
+            
+            f.write(f"{epoch+1:<8} {train_loss:<12.4f} {val_loss:<12.4f} {precision:<10.3f} {recall:<10.3f} {f1_score:<10.3f} {lr:<12.6f} {constraint_weight:<12.4f}\n")
+    
+    def save_training_summary(self, total_time, best_epoch, best_val_loss):
+        """保存训练总结到txt文件"""
+        with open(self.summary_log_path, 'w', encoding='utf-8') as f:
+            f.write("="*80 + "\n")
+            f.write("光学YOLOv3训练总结\n")
+            f.write("="*80 + "\n\n")
+            
+            f.write(f"训练结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"总训练时间: {total_time/60:.2f} 分钟 ({total_time:.2f} 秒)\n\n")
+            
+            f.write("-"*80 + "\n")
+            f.write("训练统计\n")
+            f.write("-"*80 + "\n")
+            f.write(f"总Epoch数: {len(self.train_losses)}\n")
+            f.write(f"最佳Epoch: {best_epoch + 1}\n")
+            f.write(f"最佳验证损失: {best_val_loss:.4f}\n")
+            f.write(f"最终训练损失: {self.train_losses[-1]:.4f}\n")
+            f.write(f"最终验证损失: {self.val_losses[-1]:.4f}\n\n")
+            
+            if self.precisions:
+                f.write("-"*80 + "\n")
+                f.write("检测指标统计\n")
+                f.write("-"*80 + "\n")
+                f.write(f"最佳精确率: {max(self.precisions):.3f}\n")
+                f.write(f"最佳召回率: {max(self.recalls):.3f}\n")
+                f.write(f"最佳F1分数: {max(self.f1_scores):.3f}\n")
+                f.write(f"最终精确率: {self.precisions[-1]:.3f}\n")
+                f.write(f"最终召回率: {self.recalls[-1]:.3f}\n")
+                f.write(f"最终F1分数: {self.f1_scores[-1]:.3f}\n\n")
+            
+            f.write("-"*80 + "\n")
+            f.write("损失曲线统计\n")
+            f.write("-"*80 + "\n")
+            f.write(f"训练损失范围: [{min(self.train_losses):.4f}, {max(self.train_losses):.4f}]\n")
+            f.write(f"训练损失均值: {np.mean(self.train_losses):.4f}\n")
+            f.write(f"训练损失标准差: {np.std(self.train_losses):.4f}\n")
+            if self.val_losses:
+                f.write(f"验证损失范围: [{min(self.val_losses):.4f}, {max(self.val_losses):.4f}]\n")
+                f.write(f"验证损失均值: {np.mean(self.val_losses):.4f}\n")
+                f.write(f"验证损失标准差: {np.std(self.val_losses):.4f}\n")
+            f.write("\n")
+            
+            f.write("-"*80 + "\n")
+            f.write("文件路径\n")
+            f.write("-"*80 + "\n")
+            f.write(f"模型保存目录: {self.config.SAVE_DIR}\n")
+            f.write(f"日志保存目录: {self.config.LOG_DIR}\n")
+            f.write(f"可视化保存目录: {self.config.VISUALIZATION_DIR}\n")
+            f.write(f"配置文件: {self.config_log_path}\n")
+            f.write(f"训练日志: {self.training_log_path}\n")
+            f.write(f"总结文件: {self.summary_log_path}\n\n")
+            
+            f.write("="*80 + "\n")
+            f.write("训练总结保存完成\n")
+            f.write("="*80 + "\n")
+        
+        print(f"训练总结已保存: {self.summary_log_path}")
+
     def train(self):
         """主训练循环"""
         print("开始训练光学YOLOv3模型...")
@@ -885,6 +1058,10 @@ class OpticalYOLOv3Trainer:
             else:
                 precision = recall = f1_score = 0
             
+            # 记录训练日志
+            constraint_weight = self.get_constraint_weight(epoch)
+            self.log_training_epoch(epoch, train_loss, val_loss, precision, recall, f1_score, current_lr, constraint_weight)
+            
             if epoch < 5:
                 print(f"训练损失: {train_loss:.4f}, 验证损失: {val_loss:.4f}, 学习率: {current_lr:.6f}")
             else:
@@ -919,6 +1096,7 @@ class OpticalYOLOv3Trainer:
         # 训练结束
         end_time = time.time()
         training_time = end_time - start_time
+        best_epoch = len(self.train_losses) - self.no_improve_epochs - 1
         
         print(f"\n{'='*50}")
         print("训练完成!")
@@ -926,6 +1104,9 @@ class OpticalYOLOv3Trainer:
         print(f"最佳验证损失: {self.best_val_loss:.4f}")
         print(f"模型保存在: {self.config.SAVE_DIR}")
         print(f"日志保存在: {self.config.LOG_DIR}")
+        
+        # 保存训练总结
+        self.save_training_summary(training_time, best_epoch, self.best_val_loss)
         
         # 绘制训练历史
         self.plot_training_history()
