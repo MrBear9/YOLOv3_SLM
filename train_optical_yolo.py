@@ -1,4 +1,5 @@
-﻿import torch
+﻿
+import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
@@ -31,9 +32,13 @@ class Config:
     
     # 损失权重
     BOX_WEIGHT = 0.05 # 目标框损失权重
-    OBJ_WEIGHT = 1.5 # 目标检测损失权重
+    OBJ_WEIGHT = 1.0 # 目标检测损失权重（降低，避免过度关注目标存在性）
+    NOOBJ_WEIGHT = 0.5 # 非目标损失权重（降低，减少背景误检的影响）
     CLS_WEIGHT = 0.15 # 分类损失权重
-    OPTICAL_CONSTRAINT_WEIGHT = 0.1  # 光学约束损失权重
+    OPTICAL_CONSTRAINT_WEIGHT = 0.05  # 光学约束损失权重（降低，避免过度约束）
+    
+    # 差异化学习率设置
+    OPTICAL_LR_RATIO = 0.1  # 相位层学习率比例 10%（相对于主学习率），相位层对学习率敏感度较低
     USE_VORTEX_INIT = True  # 是否使用涡旋初始化
     SLM1_VORTEX_CHARGE = 1  # SLM1涡旋电荷
     SLM2_VORTEX_CHARGE = -1  # SLM2涡旋电荷
@@ -160,15 +165,25 @@ class OpticalYOLOv3Trainer:
         
         # 初始化模型
         self.model = self.init_model()
-        self.criterion = YOLOLoss(config.BOX_WEIGHT, config.OBJ_WEIGHT, config.CLS_WEIGHT)
+        self.criterion = YOLOLoss(config.BOX_WEIGHT, config.OBJ_WEIGHT, config.NOOBJ_WEIGHT, config.CLS_WEIGHT)
         
         # 光学约束损失函数
         self.optical_constraint_criterion = nn.MSELoss()
-        self.optimizer = optim.Adam(
-            self.model.parameters(), 
-            lr=config.LEARNING_RATE, 
-            weight_decay=config.WEIGHT_DECAY
-        )
+        
+        # 差异化学习率：相位层使用更小的学习率
+        optical_params = []
+        other_params = []
+        for name, param in self.model.named_parameters():
+            if 'phase_raw' in name or 'amp_raw' in name:
+                optical_params.append(param)
+            else:
+                other_params.append(param)
+        
+        param_groups = [
+            {'params': other_params, 'lr': config.LEARNING_RATE, 'weight_decay': config.WEIGHT_DECAY},
+            {'params': optical_params, 'lr': config.LEARNING_RATE * config.OPTICAL_LR_RATIO, 'weight_decay': config.WEIGHT_DECAY}
+        ]
+        self.optimizer = optim.Adam(param_groups)
         
         # 学习率调度器
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -579,7 +594,7 @@ class OpticalYOLOv3Trainer:
         return iou
 
     def calculate_detection_metrics(self, detections, targets):
-        """计算检测指标"""
+        """计算检测指标（单个批次）"""
         true_positives = 0
         false_positives = 0
         false_negatives = 0
@@ -627,6 +642,71 @@ class OpticalYOLOv3Trainer:
         
         precision = true_positives / (true_positives + false_positives + 1e-6)
         recall = true_positives / (true_positives + false_negatives + 1e-6)
+        f1_score = 2 * precision * recall / (precision + recall + 1e-6)
+        
+        return precision, recall, f1_score
+    
+    def calculate_full_detection_metrics(self, val_loader):
+        """计算完整验证集的检测指标"""
+        self.model.eval()
+        all_true_positives = 0
+        all_false_positives = 0
+        all_false_negatives = 0
+        
+        with torch.no_grad():
+            for imgs, targets in val_loader:
+                imgs = imgs.to(self.device, non_blocking=True)
+                
+                p3, p4, p5, _, _ = self.model(imgs)
+                detections = self.decode_detections(
+                    [p3, p4, p5], 
+                    self.config.CONF_THRESH, 
+                    self.config.NMS_THRESH
+                )
+                
+                for i in range(len(detections)):
+                    gt_boxes = []
+                    for t in targets[i]:
+                        if t[3] <= 0 or t[4] <= 0:
+                            continue
+
+                        cls_id, cx, cy, bw, bh = t.tolist()
+                        gt_boxes.append([
+                            cx * self.config.IMG_SIZE,
+                            cy * self.config.IMG_SIZE,
+                            bw * self.config.IMG_SIZE,
+                            bh * self.config.IMG_SIZE,
+                            int(cls_id)
+                        ])
+
+                    matched_gt = set()
+                    det_boxes = sorted(detections[i], key=lambda det: det[4], reverse=True)
+
+                    for det in det_boxes:
+                        det_tensor = torch.tensor(det[:4], dtype=torch.float32).unsqueeze(0)
+                        best_iou = 0.0
+                        best_gt_idx = -1
+
+                        for gt_idx, gt in enumerate(gt_boxes):
+                            if gt_idx in matched_gt or int(det[5]) != gt[4]:
+                                continue
+
+                            gt_tensor = torch.tensor(gt[:4], dtype=torch.float32).unsqueeze(0)
+                            iou = float(self.calculate_iou(det_tensor, gt_tensor).item())
+                            if iou > best_iou:
+                                best_iou = iou
+                                best_gt_idx = gt_idx
+
+                        if best_iou >= 0.5:
+                            all_true_positives += 1
+                            matched_gt.add(best_gt_idx)
+                        else:
+                            all_false_positives += 1
+
+                    all_false_negatives += len(gt_boxes) - len(matched_gt)
+        
+        precision = all_true_positives / (all_true_positives + all_false_positives + 1e-6)
+        recall = all_true_positives / (all_true_positives + all_false_negatives + 1e-6)
         f1_score = 2 * precision * recall / (precision + recall + 1e-6)
         
         return precision, recall, f1_score
@@ -1040,29 +1120,12 @@ class OpticalYOLOv3Trainer:
             
             # 计算检测指标（从第5轮开始）
             if epoch >= 5:
-                # 获取指定批次的检测结果
-                with torch.no_grad():
-                    if self.config.VISUALIZE_BATCH_INDEX >= 0:
-                        # 使用与可视化相同的批次
-                        batch_iterator = iter(val_loader)
-                        for i in range(self.config.VISUALIZE_BATCH_INDEX + 1):
-                            imgs_sample, targets_sample = next(batch_iterator)
-                    else:
-                        # 真正的随机选择一个批次
-                        num_batches = len(val_loader)
-                        random_batch_idx = np.random.randint(0, num_batches)
-                        batch_iterator = iter(val_loader)
-                        for i in range(random_batch_idx + 1):
-                            imgs_sample, targets_sample = next(batch_iterator)
-                    
-                    imgs_sample = imgs_sample.to(self.device)
-                    p3, p4, p5, _, _ = self.model(imgs_sample)
-                    detections = self.decode_detections([p3, p4, p5], self.config.CONF_THRESH, self.config.NMS_THRESH)
-                    precision, recall, f1_score = self.calculate_detection_metrics(detections, targets_sample)
-                    
-                    self.precisions.append(precision)
-                    self.recalls.append(recall)
-                    self.f1_scores.append(f1_score)
+                # 使用完整验证集计算检测指标
+                precision, recall, f1_score = self.calculate_full_detection_metrics(val_loader)
+                
+                self.precisions.append(precision)
+                self.recalls.append(recall)
+                self.f1_scores.append(f1_score)
             else:
                 precision = recall = f1_score = 0
             

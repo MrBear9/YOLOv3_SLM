@@ -330,13 +330,14 @@ class OpticalYOLOv3(nn.Module):
 # =========================================================
 class YOLOLoss(nn.Module):
     """YOLOv3多尺度损失函数"""
-    def __init__(self, box_weight=0.05, obj_weight=1.5, cls_weight=0.15):
+    def __init__(self, box_weight=0.05, obj_weight=1.5, noobj_weight=0.5, cls_weight=0.15):
         super(YOLOLoss, self).__init__()
         self.mse = nn.MSELoss()
         self.smooth_l1 = nn.SmoothL1Loss()
         self.bce = nn.BCEWithLogitsLoss()
         self.box_weight = box_weight
         self.obj_weight = obj_weight
+        self.noobj_weight = noobj_weight
         self.cls_weight = cls_weight
 
     def forward(self, pred, target, batch_size):
@@ -369,8 +370,8 @@ class YOLOLoss(nn.Module):
         else:
             noobj_loss = pred[..., 4].sum() * 0.0
 
-        # 保留较小的 no-object 权重，避免负样本淹没正样本梯度。
-        obj_loss = obj_loss_pos + 0.5 * noobj_loss
+        # 使用独立的noobj_weight，避免负样本淹没正样本梯度
+        obj_loss = obj_loss_pos + self.noobj_weight * noobj_loss
 
         # 加权总和
         total_loss = (self.box_weight * box_loss + 
