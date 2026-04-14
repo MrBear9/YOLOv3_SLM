@@ -557,7 +557,6 @@ def save_feature_comparison(epoch, teacher, student, save_dir, prefix="train", i
     save_path = os.path.join(save_dir, f"{prefix}_epoch_{epoch:03d}.png")
     plt.savefig(save_path, dpi=Config.VIS_DPI)
     plt.close()
-    log_to_file(f"[Vis] saved: {save_path}", also_print=False)
 
 def save_detection_visualization(images, detections, save_dir, epoch, class_names):
     os.makedirs(save_dir, exist_ok=True)
@@ -598,7 +597,6 @@ def save_detection_visualization(images, detections, save_dir, epoch, class_name
     save_path = os.path.join(save_dir, f"detections_epoch_{epoch:03d}.png")
     plt.savefig(save_path, dpi=Config.VIS_DPI)
     plt.close()
-    log_to_file(f"[Detection Vis] saved: {save_path}", also_print=False)
 
 # =========================================================
 # 日志输出所有参数
@@ -756,7 +754,7 @@ def train():
         student.train()
         loss_sum = 0
         
-        for x, t in tqdm(loader, desc=f"Epoch {epoch}/{Config.EPOCHS}", leave=False):
+        for x, t in tqdm(loader, desc=f"Epoch {epoch}/{Config.EPOCHS}", leave=True):
             x = x.to(device)
             t = t.to(device)
             y = student(x)
