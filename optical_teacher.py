@@ -430,6 +430,19 @@ def enhance_feature_for_display(feature_map):
     return np.power(feature_map, 0.8)
 
 def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, img_size=None):
+    """
+    解码YOLO检测结果，返回边界框坐标、置信度和类别ID
+    
+    参数:
+        preds: 预测结果列表 [p3, p4, p5]
+        conf_thresh: 置信度阈值
+        nms_thresh: NMS阈值
+        max_det: 最大检测数量
+        img_size: 图像尺寸
+    
+    返回:
+        detections: 每个样本的检测结果列表，每个检测为 [x_center, y_center, w, h, conf, cls_id]
+    """
     if conf_thresh is None:
         conf_thresh = Config.CONF_THRESH
     if nms_thresh is None:
@@ -438,71 +451,72 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
         max_det = Config.MAX_DET
     if img_size is None:
         img_size = Config.IMG_SIZE
+    
     batch_size = preds[0].shape[0]
     detections = [[] for _ in range(batch_size)]
     strides = [8, 16, 32]
+    anchors = Config.ANCHORS
     
     for i, pred in enumerate(preds):
         grid_h, grid_w = pred.shape[2], pred.shape[3]
         stride = strides[i]
+        anchor_set = anchors[i]
         
+        # 重塑预测为 (batch_size, grid_h, grid_w, 3, 5+num_classes)
         pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
         
-        obj_conf = torch.sigmoid(pred[..., 4])
-        cls_conf = torch.sigmoid(pred[..., 5:])
-        bbox_pred = pred[..., :4]
+        # 应用sigmoid激活函数
+        obj_conf = torch.sigmoid(pred[..., 4])  # 目标置信度
+        cls_conf = torch.sigmoid(pred[..., 5:])  # 类别置信度
+        bbox_pred = pred[..., :4]  # 边界框预测 (tx, ty, tw, th)
         
         for b in range(batch_size):
             for gh in range(grid_h):
                 for gw in range(grid_w):
                     for a in range(3):
-                        conf = obj_conf[b, gh, gw, a].item()
-                        if conf < conf_thresh:
+                        # 获取目标置信度
+                        obj_score = obj_conf[b, gh, gw, a].item()
+                        if obj_score < conf_thresh:
                             continue
                         
-                        cls_score, cls_id = cls_conf[b, gh, gw, a].max(dim=-1)
-                        final_conf = conf * cls_score.item()
+                        # 获取类别置信度和类别ID
+                        cls_scores = cls_conf[b, gh, gw, a]
+                        cls_score, cls_id = cls_scores.max(dim=-1)
+                        final_conf = obj_score * cls_score.item()
                         
                         if final_conf < conf_thresh:
                             continue
                         
-                        x_center = (gw + 0.5) * stride
-                        y_center = (gh + 0.5) * stride
-                        w = stride
-                        h = stride
+                        # 解码边界框坐标 (YOLO格式)
+                        tx, ty, tw, th = bbox_pred[b, gh, gw, a]
+                        
+                        # 转换为绝对坐标
+                        x_center = (gw + tx.item()) * stride
+                        y_center = (gh + ty.item()) * stride
+                        
+                        # 解码宽度和高度
+                        anchor_w, anchor_h = anchor_set[a]
+                        w = anchor_w * torch.exp(tw).item()
+                        h = anchor_h * torch.exp(th).item()
+                        
+                        # 限制边界框在图像范围内
+                        x_center = max(0, min(x_center, img_size - 1))
+                        y_center = max(0, min(y_center, img_size - 1))
+                        w = max(1, min(w, img_size))
+                        h = max(1, min(h, img_size))
                         
                         detections[b].append([x_center, y_center, w, h, final_conf, cls_id.item()])
     
+    # 按置信度排序并限制最大检测数量
     for b in range(batch_size):
         if len(detections[b]) > 0:
             detections[b] = np.array(detections[b])
-            detections[b] = detections[b][detections[b][:, 4].argsort()[::-1]]
-            
-            keep = []
-            while len(detections[b]) > 0 and len(keep) < max_det:
-                keep.append(0)
-                if len(detections[b]) == 1:
-                    break
-                
-                ious = []
-                for i in range(1, len(detections[b])):
-                    box1 = detections[b][0]
-                    box2 = detections[b][i]
-                    x1 = max(box1[0] - box1[2]/2, box2[0] - box2[2]/2)
-                    y1 = max(box1[1] - box1[3]/2, box2[1] - box2[3]/2)
-                    x2 = min(box1[0] + box1[2]/2, box2[0] + box2[2]/2)
-                    y2 = min(box1[1] + box1[3]/2, box2[1] + box2[3]/2)
-                    
-                    if x2 < x1 or y2 < y1:
-                        ious.append(0)
-                    else:
-                        inter = (x2 - x1) * (y2 - y1)
-                        union = box1[2] * box1[3] + box2[2] * box2[3] - inter
-                        ious.append(inter / union)
-                
-                detections[b] = detections[b][1:][np.array(ious) < nms_thresh]
-            
-            detections[b] = detections[b][keep]
+            # 按置信度降序排序
+            sorted_indices = detections[b][:, 4].argsort()[::-1]
+            detections[b] = detections[b][sorted_indices]
+            # 限制最大检测数量
+            if len(detections[b]) > max_det:
+                detections[b] = detections[b][:max_det]
     
     return detections
 
