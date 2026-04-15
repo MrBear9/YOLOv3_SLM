@@ -1,0 +1,939 @@
+import yaml
+import torch.nn.functional as F
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+import os
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+from datetime import datetime
+from PIL import Image
+import matplotlib.patches as patches
+
+# =========================================================
+# 配置类 - 集中管理所有参数
+# =========================================================
+class ConfigSLMYOLO:
+    """光学教师YOLO SLM训练配置类"""
+    
+    # 数据集参数
+    YAML_PATH = r"data\military\data.yaml"
+    CLASS_NAMES = None
+    NUM_CLASSES = None
+    
+    # 输出路径配置
+    OUTPUT_DIR = r"output\OpticalTeacherYOLO_SLM"
+    LOG_ROOT_DIR = None
+    LOG_FILE = None
+    TIMESTAMP = None
+    VISUALIZATION_DIR = None
+    
+    # 训练参数
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    IMG_SIZE = 640
+    BATCH_SIZE = 8
+    EPOCHS = 100  # 总轮数：30+20+50
+    
+    # 阶段划分参数
+    PHASE1_EPOCHS = 30  # 阶段1：教师网络对光学层的学习训练
+    PHASE2_EPOCHS = 20  # 阶段2：教师网络对光学层的约束 + 检测头训练
+    PHASE3_EPOCHS = 50  # 阶段3：光学层 + 检测头的训练
+    
+    # 损失权重
+    BOX_WEIGHT = 0.8
+    OBJ_WEIGHT = 1.0
+    CLS_WEIGHT = 0.15
+    
+    # 锚框设置
+    STRIDES = [8, 16, 32]
+    ANCHORS = [
+        # P3: 小目标（士兵、小型装备）
+        [[16, 20], [24, 32], [32, 48]],
+        # P4: 中目标（坦克、战机主体）
+        [[48, 64], [64, 96], [96, 128]],
+        # P5: 大目标（军舰、大型战机）
+        [[128, 160], [192, 240], [256, 320]]
+    ]
+    
+    # 优化器参数
+    LEARNING_RATE = 5e-4
+    WEIGHT_DECAY = 1e-5
+    OPTIMIZER = "Adam"
+    
+    # 光学传播参数
+    WAVELENGTH = 532e-9
+    PIXEL_SIZE = 6.4e-6
+    PROP_DISTANCE_1 = 0.01
+    PROP_DISTANCE_2 = 0.02
+    SLM_MODE = "phase"
+    RESOLUTION = (640, 640)
+    
+    # 训练控制参数
+    VIS_INTERVAL = 5
+    SAVE_INTERVAL = 10
+    
+    # 检测参数
+    CONF_THRESH = 0.5
+    NMS_THRESH = 0.4
+    MAX_DET = 8
+    
+    # 可视化参数
+    VIS_BATCH_SIZE = 4
+    VIS_DPI = 120
+    
+    @classmethod
+    def initialize(cls):
+        """初始化配置"""
+        cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
+        os.makedirs(cls.OUTPUT_DIR, exist_ok=True)
+        cls.LOG_ROOT_DIR = os.path.join(cls.OUTPUT_DIR, "logs")
+        cls.VISUALIZATION_DIR = os.path.join(cls.OUTPUT_DIR, "visualizations")
+        os.makedirs(cls.LOG_ROOT_DIR, exist_ok=True)
+        os.makedirs(cls.VISUALIZATION_DIR, exist_ok=True)
+        cls.TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+        cls.LOG_FILE = os.path.join(cls.LOG_ROOT_DIR, f"training_log_{cls.TIMESTAMP}.txt")
+    
+    @classmethod
+    def get_detector_output_channels(cls):
+        """获取检测头输出通道数"""
+        return 3 * (4 + 1 + cls.NUM_CLASSES)
+    
+    @classmethod
+    def get_current_phase(cls, epoch):
+        """获取当前训练阶段"""
+        if epoch < cls.PHASE1_EPOCHS:
+            return "phase1", "教师网络对光学层学习"
+        elif epoch < cls.PHASE1_EPOCHS + cls.PHASE2_EPOCHS:
+            return "phase2", "教师约束+检测头训练"
+        else:
+            return "phase3", "光学层+检测头训练"
+    
+    @classmethod
+    def print_config(cls):
+        """打印当前配置"""
+        print("="*80)
+        print("光学教师YOLO SLM训练配置")
+        print("="*80)
+        print(f"设备: {cls.DEVICE}")
+        print(f"图像尺寸: {cls.IMG_SIZE}")
+        print(f"批次大小: {cls.BATCH_SIZE}")
+        print(f"总轮数: {cls.EPOCHS}")
+        print(f"阶段1轮数: {cls.PHASE1_EPOCHS}")
+        print(f"阶段2轮数: {cls.PHASE2_EPOCHS}")
+        print(f"阶段3轮数: {cls.PHASE3_EPOCHS}")
+        print(f"类别数量: {cls.NUM_CLASSES}")
+        print(f"学习率: {cls.LEARNING_RATE}")
+        print("="*80)
+
+# =========================================================
+# 辅助函数
+# =========================================================
+def load_class_names(yaml_path):
+    """从YAML文件加载类别名称"""
+    with open(yaml_path, 'r', encoding='utf-8') as f:
+        cfg = yaml.safe_load(f)
+    
+    if 'names' in cfg:
+        class_names = {i: name for i, name in enumerate(cfg['names'])}
+        num_classes = len(cfg['names'])
+    else:
+        class_names = {0: 'object'}
+        num_classes = 1
+    
+    return class_names, num_classes
+
+def init_log_file():
+    """初始化日志文件"""
+    os.makedirs(ConfigSLMYOLO.LOG_ROOT_DIR, exist_ok=True)
+    with open(ConfigSLMYOLO.LOG_FILE, 'w', encoding='utf-8') as f:
+        f.write("=" * 80 + "\n")
+        f.write("光学教师YOLO SLM训练日志\n")
+        f.write("=" * 80 + "\n")
+        f.write(f"训练开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 80 + "\n\n")
+
+def log_to_file(message, also_print=True):
+    """记录消息到文件"""
+    timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    log_message = f"{timestamp} {message}"
+    
+    with open(ConfigSLMYOLO.LOG_FILE, 'a', encoding='utf-8') as f:
+        f.write(log_message + "\n")
+    
+    if also_print:
+        print(log_message)
+
+def enhance_feature_for_display(feature_map):
+    """增强特征图显示效果"""
+    feature_map = np.asarray(feature_map, dtype=np.float32)
+    low = np.percentile(feature_map, 2)
+    high = np.percentile(feature_map, 98)
+    if high - low < 1e-6:
+        return np.zeros_like(feature_map)
+    
+    feature_map = np.clip((feature_map - low) / (high - low), 0.0, 1.0)
+    return np.power(feature_map, 0.8)
+
+# =========================================================
+# 光学层组件（从optical_teacher.py导入）
+# =========================================================
+class SLMLayer(nn.Module):
+    def __init__(self, resolution, mode="phase"):
+        super().__init__()
+        assert mode in ["phase", "amp_phase"]
+        self.mode = mode
+
+        self.phase_raw = nn.Parameter(
+            torch.rand(1, 1, *resolution) * 2 * np.pi
+        )
+
+        if self.mode == "amp_phase":
+            self.amp_raw = nn.Parameter(
+                torch.rand(1, 1, *resolution)
+            )
+        else:
+            self.register_parameter("amp_raw", None)
+
+    def forward(self, field):
+        phase = torch.remainder(self.phase_raw, 2 * np.pi)
+        mod = torch.exp(1j * phase)
+
+        if self.mode == "amp_phase":
+            amp = torch.sigmoid(self.amp_raw)
+            mod = mod * amp
+
+        return field * mod
+
+class ASMPropagation(nn.Module):
+    def __init__(self, distance, wavelength=None, pixel_size=None, resolution=None):
+        super().__init__()
+        if wavelength is None:
+            wavelength = ConfigSLMYOLO.WAVELENGTH
+        if pixel_size is None:
+            pixel_size = ConfigSLMYOLO.PIXEL_SIZE
+        if resolution is None:
+            resolution = ConfigSLMYOLO.RESOLUTION
+        fx = torch.fft.fftfreq(resolution[0], pixel_size)
+        fy = torch.fft.fftfreq(resolution[1], pixel_size)
+        FX, FY = torch.meshgrid(fx, fy, indexing='ij')
+        k2 = 1 / wavelength**2 - FX**2 - FY**2
+        k2 = torch.clamp(k2, min=0)
+        H = torch.exp(1j * 2 * np.pi * distance * torch.sqrt(k2))
+        self.register_buffer("H", H)
+
+    def forward(self, field):
+        return torch.fft.ifft2(torch.fft.fft2(field) * self.H)
+
+# =========================================================
+# 教师网络（从optical_teacher.py导入）
+# =========================================================
+class ConvTeacher(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.SiLU()
+        )
+
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.SiLU()
+        )
+
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU()
+        )
+
+        self.refine = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+            nn.Conv2d(64, 32, kernel_size=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.SiLU()
+        )
+
+        self.project = nn.Conv2d(32, 1, kernel_size=1, bias=False)
+
+    def forward(self, x):
+        if x.shape[1] > 1:
+            x = x.mean(dim=1, keepdim=True)
+
+        f = self.conv1(x)
+        f = self.conv2(f)
+        f = self.conv3(f)
+        f = self.refine(f)
+        f = self.project(f)
+        f = torch.abs(f)
+        f = F.interpolate(
+            f, size=x.shape[-2:], mode="bilinear", align_corners=False
+        )
+        return torch.sigmoid(f)
+
+# =========================================================
+# 光学学生网络（多层光学传播）
+# =========================================================
+class OpticalStudent(nn.Module):
+    def __init__(self, resolution=None, mode=None):
+        super().__init__()
+        if resolution is None:
+            resolution = ConfigSLMYOLO.RESOLUTION
+        if mode is None:
+            mode = ConfigSLMYOLO.SLM_MODE
+        self.slm1 = SLMLayer(resolution, mode)
+        self.prop1 = ASMPropagation(ConfigSLMYOLO.PROP_DISTANCE_1)
+        self.slm2 = SLMLayer(resolution, mode)
+        self.prop2 = ASMPropagation(ConfigSLMYOLO.PROP_DISTANCE_2)
+        self.enable_norm = False
+
+    def forward(self, intensity):
+        amp = torch.sqrt(intensity.clamp(min=0)+1e-8)
+        field = torch.complex(amp, torch.zeros_like(amp))
+        field = self.prop1(self.slm1(field))
+        field = self.prop2(self.slm2(field))
+        out = torch.abs(field)**2
+        if self.enable_norm:
+            out = out / (out.mean(dim=[2,3], keepdim=True) + 1e-6)
+        return out
+
+# =========================================================
+# 轻量化卷积块和检测头（从optical_teacher.py导入）
+# =========================================================
+class LightConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
+        super(LightConvBlock, self).__init__()
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size, stride, padding, groups=in_channels, bias=False)
+        self.pointwise = nn.Conv2d(in_channels, out_channels, 1, 1, 0, bias=False)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        x = self.bn(x)
+        x = self.act(x)
+        return x
+
+class YOLOLightHead(nn.Module):
+    def __init__(self, in_channels=1, out_channels=27):
+        super(YOLOLightHead, self).__init__()
+        base_ch = 32
+
+        self.init_conv = LightConvBlock(in_channels, base_ch, kernel_size=3, stride=1)
+
+        self.down_to_p5 = nn.Sequential(
+            LightConvBlock(base_ch, base_ch * 2, stride=2),
+            LightConvBlock(base_ch * 2, base_ch * 4, stride=2),
+            LightConvBlock(base_ch * 4, base_ch * 8, stride=2),
+            LightConvBlock(base_ch * 8, base_ch * 8, stride=2),
+            LightConvBlock(base_ch * 8, base_ch * 8, stride=2)
+        )
+
+        self.up_p5_to_p4 = nn.Upsample(scale_factor=2, mode='nearest')
+        self.fuse_p4 = LightConvBlock(base_ch * 8 + base_ch * 8, base_ch * 4)
+
+        self.up_p4_to_p3 = nn.Upsample(scale_factor=2, mode='nearest')
+        self.fuse_p3 = LightConvBlock(base_ch * 4 + base_ch * 8, base_ch * 2)
+
+        self.head_p5 = nn.Conv2d(base_ch * 8, out_channels, 1)
+        self.head_p4 = nn.Conv2d(base_ch * 4, out_channels, 1)
+        self.head_p3 = nn.Conv2d(base_ch * 2, out_channels, 1)
+
+    def forward(self, x):
+        x_init = self.init_conv(x)
+
+        x320 = self.down_to_p5[0](x_init)
+        x160 = self.down_to_p5[1](x320)
+        x80 = self.down_to_p5[2](x160)
+        x40 = self.down_to_p5[3](x80)
+        p5 = self.down_to_p5[4](x40)
+
+        p5_up = self.up_p5_to_p4(p5)
+        p4_fuse = torch.cat([p5_up, x40], dim=1)
+        p4 = self.fuse_p4(p4_fuse)
+
+        p4_up = self.up_p4_to_p3(p4)
+        p3_fuse = torch.cat([p4_up, x80], dim=1)
+        p3 = self.fuse_p3(p3_fuse)
+
+        p5_out = self.head_p5(p5)
+        p4_out = self.head_p4(p4)
+        p3_out = self.head_p3(p3)
+
+        return p3_out, p4_out, p5_out
+
+# =========================================================
+# 数据集类
+# =========================================================
+class YOLODataset(Dataset):
+    def __init__(self, yaml_path=None, split="train"):
+        if yaml_path is None:
+            yaml_path = ConfigSLMYOLO.YAML_PATH
+        with open(yaml_path, 'r', encoding='utf-8') as f:
+            cfg = yaml.safe_load(f)
+        
+        # 获取数据集根目录
+        data_root = cfg.get("path", "")
+        if not os.path.exists(data_root):
+            # 如果路径不存在，尝试使用YAML文件所在目录
+            data_root = os.path.dirname(yaml_path)
+        
+        img_dir = os.path.join(data_root, f"{split}/images")
+        label_dir = os.path.join(data_root, f"{split}/labels")
+        
+        self.files = sorted([
+            os.path.join(img_dir, f)
+            for f in os.listdir(img_dir)
+            if f.endswith(".jpg") or f.endswith(".png")
+        ])
+        
+        self.label_dir = label_dir
+        self.img_size = ConfigSLMYOLO.IMG_SIZE
+        self.num_classes = ConfigSLMYOLO.NUM_CLASSES
+        
+        self.transform = transforms.Compose([
+            transforms.Resize((self.img_size, self.img_size)),
+            transforms.Grayscale(1),
+            transforms.ToTensor()
+        ])
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        img_path = self.files[idx]
+        img = Image.open(img_path).convert("RGB")
+        
+        img_tensor = self.transform(img)
+        
+        label_path = os.path.join(self.label_dir, os.path.splitext(os.path.basename(img_path))[0] + ".txt")
+        
+        targets = []
+        if os.path.exists(label_path):
+            with open(label_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 5:
+                        cls_id = int(parts[0])
+                        x_center = float(parts[1])
+                        y_center = float(parts[2])
+                        width = float(parts[3])
+                        height = float(parts[4])
+                        targets.append([cls_id, x_center, y_center, width, height])
+        
+        if len(targets) > 0:
+            targets = torch.tensor(targets, dtype=torch.float32)
+        else:
+            targets = torch.zeros((0, 5), dtype=torch.float32)
+        
+        return img_tensor, targets
+
+# =========================================================
+# 损失函数
+# =========================================================
+class YOLOLoss(nn.Module):
+    def __init__(self, anchors, num_classes, strides):
+        super().__init__()
+        self.anchors = torch.tensor(anchors, dtype=torch.float32)
+        self.num_classes = num_classes
+        self.strides = strides
+        
+        self.box_weight = ConfigSLMYOLO.BOX_WEIGHT
+        self.obj_weight = ConfigSLMYOLO.OBJ_WEIGHT
+        self.cls_weight = ConfigSLMYOLO.CLS_WEIGHT
+        
+        self.mse_loss = nn.MSELoss(reduction="mean")
+        self.bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
+    
+    def forward(self, predictions, targets):
+        total_loss = 0
+        
+        for i, pred in enumerate(predictions):
+            batch_size, _, grid_h, grid_w = pred.shape
+            stride = self.strides[i]
+            anchors = self.anchors[i] / stride
+            
+            pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
+            
+            pred_boxes = pred[..., :4]
+            pred_obj = pred[..., 4]
+            pred_cls = pred[..., 5:]
+            
+            target_boxes = torch.zeros_like(pred_boxes)
+            target_obj = torch.zeros_like(pred_obj)
+            target_cls = torch.zeros_like(pred_cls)
+            
+            for b in range(batch_size):
+                if len(targets[b]) == 0:
+                    continue
+                
+                for target_idx in range(len(targets[b])):
+                    # 确保目标张量有正确的形状
+                    if targets[b].dim() == 1:
+                        # 单个目标的情况
+                        cls_id, tx, ty, tw, th = targets[b]
+                        cls_id = int(cls_id.item())
+                    else:
+                        # 多个目标的情况
+                        cls_id, tx, ty, tw, th = targets[b][target_idx]
+                        cls_id = int(cls_id.item())
+                    
+                    gx = int(tx * grid_w)
+                    gy = int(ty * grid_h)
+                    
+                    gx = max(0, min(gx, grid_w - 1))
+                    gy = max(0, min(gy, grid_h - 1))
+                    
+                    best_iou = 0
+                    best_anchor = 0
+                    
+                    for a in range(3):
+                        anchor_w, anchor_h = anchors[a]
+                        iou = min(tw, anchor_w) * min(th, anchor_h) / (tw * th + anchor_w * anchor_h - min(tw, anchor_w) * min(th, anchor_h) + 1e-6)
+                        if iou > best_iou:
+                            best_iou = iou
+                            best_anchor = a
+                    
+                    if best_iou > 0.5:
+                        target_boxes[b, gy, gx, best_anchor, 0] = tx * grid_w - gx
+                        target_boxes[b, gy, gx, best_anchor, 1] = ty * grid_h - gy
+                        target_boxes[b, gy, gx, best_anchor, 2] = torch.log(tw / anchors[best_anchor, 0] + 1e-6)
+                        target_boxes[b, gy, gx, best_anchor, 3] = torch.log(th / anchors[best_anchor, 1] + 1e-6)
+                        target_obj[b, gy, gx, best_anchor] = 1.0
+                        target_cls[b, gy, gx, best_anchor, cls_id] = 1.0
+            
+            obj_mask = target_obj > 0.5
+            noobj_mask = target_obj <= 0.5
+            
+            if obj_mask.sum() > 0:
+                box_loss = self.mse_loss(pred_boxes[obj_mask], target_boxes[obj_mask]).mean()
+                obj_loss = self.bce_loss(pred_obj[obj_mask], target_obj[obj_mask]).mean()
+                cls_loss = self.bce_loss(pred_cls[obj_mask], target_cls[obj_mask]).mean()
+            else:
+                box_loss = torch.tensor(0.0, device=pred_boxes.device)
+                obj_loss = torch.tensor(0.0, device=pred_boxes.device)
+                cls_loss = torch.tensor(0.0, device=pred_boxes.device)
+            
+            if noobj_mask.sum() > 0:
+                noobj_loss = self.bce_loss(pred_obj[noobj_mask], target_obj[noobj_mask]).mean()
+            else:
+                noobj_loss = torch.tensor(0.0, device=pred_boxes.device)
+            
+            scale_loss = (self.box_weight * box_loss + 
+                         self.obj_weight * obj_loss + 
+                         self.obj_weight * 0.5 * noobj_loss + 
+                         self.cls_weight * cls_loss)
+            
+            if torch.isnan(scale_loss) or torch.isinf(scale_loss):
+                scale_loss = torch.tensor(0.0, device=pred_boxes.device)
+                print(f"警告: 检测到无效损失值，已重置为0")
+            
+            total_loss += scale_loss
+        
+        return total_loss
+
+class TeacherStudentLoss(nn.Module):
+    """教师-学生网络损失函数"""
+    def __init__(self):
+        super().__init__()
+        self.mse_loss = nn.MSELoss()
+    
+    def forward(self, student_output, teacher_output):
+        return self.mse_loss(student_output, teacher_output)
+
+# =========================================================
+# 模型组合类
+# =========================================================
+class OpticalYOLOModel(nn.Module):
+    """光学YOLO检测模型（光学层 + 检测头）"""
+    def __init__(self, optical_student=None, detector=None):
+        super().__init__()
+        if optical_student is None:
+            self.optical_student = OpticalStudent()
+        else:
+            self.optical_student = optical_student
+        
+        if detector is None:
+            self.detector = YOLOLightHead(in_channels=1, 
+                                         out_channels=ConfigSLMYOLO.get_detector_output_channels())
+        else:
+            self.detector = detector
+
+    def forward(self, x):
+        optical_features = self.optical_student(x)
+        detections = self.detector(optical_features)
+        return detections
+
+class TeacherOpticalModel(nn.Module):
+    """教师-光学模型（教师网络 + 光学层）"""
+    def __init__(self, teacher=None, optical_student=None):
+        super().__init__()
+        if teacher is None:
+            self.teacher = ConvTeacher()
+        else:
+            self.teacher = teacher
+        
+        if optical_student is None:
+            self.optical_student = OpticalStudent()
+        else:
+            self.optical_student = optical_student
+
+    def forward(self, x):
+        teacher_features = self.teacher(x)
+        optical_features = self.optical_student(x)
+        return teacher_features, optical_features
+
+# =========================================================
+# 解码检测结果函数
+# =========================================================
+def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, img_size=None):
+    """解码YOLO检测结果"""
+    if conf_thresh is None:
+        conf_thresh = ConfigSLMYOLO.CONF_THRESH
+    if nms_thresh is None:
+        nms_thresh = ConfigSLMYOLO.NMS_THRESH
+    if max_det is None:
+        max_det = ConfigSLMYOLO.MAX_DET
+    if img_size is None:
+        img_size = ConfigSLMYOLO.IMG_SIZE
+    
+    batch_size = preds[0].shape[0]
+    detections = [[] for _ in range(batch_size)]
+    strides = [8, 16, 32]
+    anchors = ConfigSLMYOLO.ANCHORS
+    
+    for i, pred in enumerate(preds):
+        grid_h, grid_w = pred.shape[2], pred.shape[3]
+        stride = strides[i]
+        anchor_set = anchors[i]
+        
+        pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
+        
+        obj_conf = torch.sigmoid(pred[..., 4])
+        cls_conf = torch.sigmoid(pred[..., 5:])
+        bbox_pred = pred[..., :4]
+        
+        for b in range(batch_size):
+            for gh in range(grid_h):
+                for gw in range(grid_w):
+                    for a in range(3):
+                        obj_score = obj_conf[b, gh, gw, a].item()
+                        if obj_score < conf_thresh:
+                            continue
+                        
+                        cls_scores = cls_conf[b, gh, gw, a]
+                        cls_score, cls_id = cls_scores.max(dim=-1)
+                        final_conf = obj_score * cls_score.item()
+                        
+                        if final_conf < conf_thresh:
+                            continue
+                        
+                        tx, ty, tw, th = bbox_pred[b, gh, gw, a]
+                        
+                        x_center = (gw + tx.item()) * stride
+                        y_center = (gh + ty.item()) * stride
+                        
+                        anchor_w, anchor_h = anchor_set[a]
+                        w = anchor_w * torch.exp(tw).item()
+                        h = anchor_h * torch.exp(th).item()
+                        
+                        x_center = max(0, min(x_center, img_size - 1))
+                        y_center = max(0, min(y_center, img_size - 1))
+                        w = max(1, min(w, img_size))
+                        h = max(1, min(h, img_size))
+                        
+                        detections[b].append([x_center, y_center, w, h, final_conf, cls_id.item()])
+    
+    for b in range(batch_size):
+        if len(detections[b]) > 0:
+            detections[b] = np.array(detections[b])
+            sorted_indices = detections[b][:, 4].argsort()[::-1]
+            detections[b] = detections[b][sorted_indices]
+            if len(detections[b]) > max_det:
+                detections[b] = detections[b][:max_det]
+    
+    return detections
+
+# =========================================================
+# 可视化函数
+# =========================================================
+def save_visualization(epoch, model_type, input_images, teacher_features, optical_features, 
+                      ground_truth, predictions, save_dir, prefix="train"):
+    """保存可视化结果"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    num_samples = min(ConfigSLMYOLO.VIS_BATCH_SIZE, len(input_images))
+    indices = torch.randperm(len(input_images))[:num_samples]
+    
+    fig, axes = plt.subplots(num_samples, 4, figsize=(24, 6 * num_samples))
+    if num_samples == 1:
+        axes = axes.reshape(1, -1)
+    
+    with torch.no_grad():
+        for i, idx in enumerate(indices):
+            # 第一列：输入图像 + 真实框
+            img_tensor = input_images[idx].cpu()
+            if img_tensor.dim() == 4:
+                img_tensor = img_tensor.squeeze(0)  # 如果是批次维度，去掉批次
+            
+            # 确保是3通道图像 (C, H, W)
+            if img_tensor.shape[0] == 1:  # 如果是灰度图
+                img_np = img_tensor.squeeze(0).numpy()  # 去掉通道维度
+                img_np = np.stack([img_np] * 3, axis=-1)  # 转换为3通道
+            else:
+                img_np = img_tensor.numpy().transpose(1, 2, 0)  # (C, H, W) -> (H, W, C)
+            
+            img_np = (img_np * 255).astype(np.uint8)
+            
+            axes[i, 0].imshow(img_np)
+            axes[i, 0].set_title(f"Input + GT {i+1}")
+            axes[i, 0].axis("off")
+            
+            # 绘制真实边界框
+            for target_idx in range(len(ground_truth[idx])):
+                cls_id, x_center, y_center, width, height = ground_truth[idx][target_idx]
+                cls_id = int(cls_id.item())
+                
+                x1 = int((x_center - width / 2) * ConfigSLMYOLO.IMG_SIZE)
+                y1 = int((y_center - height / 2) * ConfigSLMYOLO.IMG_SIZE)
+                w = int(width * ConfigSLMYOLO.IMG_SIZE)
+                h = int(height * ConfigSLMYOLO.IMG_SIZE)
+                
+                rect = patches.Rectangle((x1, y1), w, h, linewidth=2, 
+                                        edgecolor='green', facecolor='none')
+                axes[i, 0].add_patch(rect)
+                axes[i, 0].text(x1, y1 - 5, ConfigSLMYOLO.CLASS_NAMES[cls_id], 
+                              color='green', fontsize=10, fontweight='bold')
+            
+            # 第二列：光学特征
+            optical_np = optical_features[idx].squeeze(0).cpu().numpy()
+            optical_np = enhance_feature_for_display(optical_np)
+            axes[i, 1].imshow(optical_np, cmap="hot")
+            axes[i, 1].set_title(f"Optical Feature {i+1}")
+            axes[i, 1].axis("off")
+            
+            # 第三列：约束图（教师特征）
+            teacher_np = teacher_features[idx].squeeze(0).cpu().numpy()
+            teacher_np = enhance_feature_for_display(teacher_np)
+            axes[i, 2].imshow(teacher_np, cmap="hot")
+            axes[i, 2].set_title(f"Teacher Constraint {i+1}")
+            axes[i, 2].axis("off")
+            
+            # 第四列：预测结果（置信度分类框）
+            axes[i, 3].imshow(img_np)
+            axes[i, 3].set_title(f"Predictions {i+1}")
+            axes[i, 3].axis("off")
+            
+            # 绘制预测边界框
+            if len(predictions[idx]) > 0:
+                for det in predictions[idx]:
+                    x_center, y_center, w, h, conf, cls_id = det
+                    cls_id = int(cls_id)
+                    
+                    x1 = int(x_center - w / 2)
+                    y1 = int(y_center - h / 2)
+                    w = int(w)
+                    h = int(h)
+                    
+                    color = plt.cm.tab20(cls_id / max(ConfigSLMYOLO.NUM_CLASSES, 1))
+                    rect = patches.Rectangle((x1, y1), w, h, linewidth=2, 
+                                            edgecolor=color, facecolor='none')
+                    axes[i, 3].add_patch(rect)
+                    
+                    label = f"{ConfigSLMYOLO.CLASS_NAMES[cls_id]}: {conf:.2f}"
+                    axes[i, 3].text(x1, y1 - 5, label, 
+                                  color=color, fontsize=10, fontweight='bold',
+                                  bbox=dict(boxstyle='round,pad=0.3', 
+                                          facecolor=color, alpha=0.7))
+    
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, f"{model_type}_{prefix}_epoch_{epoch:03d}.png")
+    plt.savefig(save_path, dpi=ConfigSLMYOLO.VIS_DPI)
+    plt.close()
+
+# =========================================================
+# 训练函数
+# =========================================================
+def train():
+    """主训练函数"""
+    # 先初始化配置
+    ConfigSLMYOLO.initialize()
+    init_log_file()
+    ConfigSLMYOLO.print_config()
+    
+    device = ConfigSLMYOLO.DEVICE
+    log_to_file(f"使用设备: {device}")
+    
+    log_to_file("初始化模型组件...")
+    
+    # 初始化教师网络
+    teacher = ConvTeacher().to(device)
+    for p in teacher.parameters():
+        p.requires_grad = False
+    
+    # 初始化光学学生网络
+    optical_student = OpticalStudent().to(device)
+    
+    # 初始化检测头
+    detector = YOLOLightHead(in_channels=1, 
+                           out_channels=ConfigSLMYOLO.get_detector_output_channels()).to(device)
+    
+    # 初始化组合模型
+    teacher_optical_model = TeacherOpticalModel(teacher, optical_student).to(device)
+    optical_yolo_model = OpticalYOLOModel(optical_student, detector).to(device)
+    
+    # 初始化损失函数
+    teacher_student_loss = TeacherStudentLoss().to(device)
+    yolo_loss = YOLOLoss(ConfigSLMYOLO.ANCHORS, ConfigSLMYOLO.NUM_CLASSES, ConfigSLMYOLO.STRIDES).to(device)
+    
+    # 初始化优化器
+    optimizer_optical = optim.Adam(optical_student.parameters(), lr=ConfigSLMYOLO.LEARNING_RATE)
+    optimizer_detector = optim.Adam(detector.parameters(), lr=ConfigSLMYOLO.LEARNING_RATE)
+    
+    # 自定义collate函数处理不同数量的边界框
+    def yolo_collate_fn(batch):
+        """处理YOLO数据集中不同数量边界框的问题"""
+        images = []
+        targets = []
+        
+        for img, target in batch:
+            images.append(img)
+            targets.append(target)
+        
+        # 堆叠图像
+        images = torch.stack(images, 0)
+        
+        return images, targets
+    
+    # 加载数据集
+    log_to_file("加载数据集...")
+    train_dataset = YOLODataset(split="train")
+    train_loader = DataLoader(train_dataset, batch_size=ConfigSLMYOLO.BATCH_SIZE, 
+                             shuffle=True, collate_fn=yolo_collate_fn)
+    
+    # 训练循环
+    log_to_file("开始训练...")
+    
+    for epoch in range(ConfigSLMYOLO.EPOCHS):
+        phase, phase_desc = ConfigSLMYOLO.get_current_phase(epoch)
+        log_to_file(f"Epoch {epoch+1}/{ConfigSLMYOLO.EPOCHS} - {phase_desc}")
+        
+        total_loss = 0
+        teacher_optical_model.train()
+        optical_yolo_model.train()
+        
+        for batch_idx, (images, targets) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
+            images = images.to(device)
+            targets = [target.to(device) for target in targets]
+            
+            if phase == "phase1":
+                # 阶段1：只训练光学层（教师网络约束）
+                optimizer_optical.zero_grad()
+                
+                teacher_features, optical_features = teacher_optical_model(images)
+                loss = teacher_student_loss(optical_features, teacher_features)
+                
+                loss.backward()
+                optimizer_optical.step()
+                total_loss += loss.item()
+                
+            elif phase == "phase2":
+                # 阶段2：教师约束 + 检测头训练
+                optimizer_optical.zero_grad()
+                optimizer_detector.zero_grad()
+                
+                # 教师约束损失
+                teacher_features, optical_features = teacher_optical_model(images)
+                constraint_loss = teacher_student_loss(optical_features, teacher_features)
+                
+                # 检测头损失
+                detections = optical_yolo_model(images)
+                detection_loss = yolo_loss(detections, targets)
+                
+                # 组合损失
+                loss = constraint_loss + detection_loss
+                
+                loss.backward()
+                optimizer_optical.step()
+                optimizer_detector.step()
+                total_loss += loss.item()
+                
+            else:
+                # 阶段3：只训练光学层 + 检测头
+                optimizer_optical.zero_grad()
+                optimizer_detector.zero_grad()
+                
+                detections = optical_yolo_model(images)
+                loss = yolo_loss(detections, targets)
+                
+                loss.backward()
+                optimizer_optical.step()
+                optimizer_detector.step()
+                total_loss += loss.item()
+        
+        avg_loss = total_loss / len(train_loader)
+        log_to_file(f"Epoch {epoch+1} 平均损失: {avg_loss:.6f}")
+        
+        # 保存模型
+        if (epoch + 1) % ConfigSLMYOLO.SAVE_INTERVAL == 0 or epoch + 1 == ConfigSLMYOLO.EPOCHS:
+            # 保存光学YOLO检测模型
+            optical_yolo_path = os.path.join(ConfigSLMYOLO.OUTPUT_DIR, f"optical_yolo_epoch_{epoch+1}.pth")
+            torch.save({
+                'epoch': epoch,
+                'optical_student_state_dict': optical_student.state_dict(),
+                'detector_state_dict': detector.state_dict(),
+                'optimizer_optical_state_dict': optimizer_optical.state_dict(),
+                'optimizer_detector_state_dict': optimizer_detector.state_dict(),
+                'loss': avg_loss,
+            }, optical_yolo_path)
+            log_to_file(f"保存光学YOLO模型: {optical_yolo_path}")
+            
+            # 保存教师-光学模型
+            teacher_optical_path = os.path.join(ConfigSLMYOLO.OUTPUT_DIR, f"teacher_optical_epoch_{epoch+1}.pth")
+            torch.save({
+                'epoch': epoch,
+                'teacher_state_dict': teacher.state_dict(),
+                'optical_student_state_dict': optical_student.state_dict(),
+                'optimizer_optical_state_dict': optimizer_optical.state_dict(),
+                'loss': avg_loss,
+            }, teacher_optical_path)
+            log_to_file(f"保存教师-光学模型: {teacher_optical_path}")
+        
+        # 可视化
+        if (epoch + 1) % ConfigSLMYOLO.VIS_INTERVAL == 0:
+            log_to_file("生成可视化结果...")
+            teacher_optical_model.eval()
+            optical_yolo_model.eval()
+            
+            with torch.no_grad():
+                # 获取一批样本用于可视化
+                sample_images, sample_targets = next(iter(train_loader))
+                sample_images = sample_images.to(device)
+                
+                # 获取特征和预测
+                teacher_features, optical_features = teacher_optical_model(sample_images)
+                detections = optical_yolo_model(sample_images)
+                pred_results = decode_detections(detections)
+                
+                # 保存可视化
+                save_visualization(
+                    epoch + 1, phase, sample_images, teacher_features, 
+                    optical_features, sample_targets, pred_results, 
+                    ConfigSLMYOLO.VISUALIZATION_DIR
+                )
+            
+            log_to_file(f"可视化结果已保存到: {ConfigSLMYOLO.VISUALIZATION_DIR}")
+    
+    log_to_file("训练完成！")
+
+if __name__ == "__main__":
+    train()

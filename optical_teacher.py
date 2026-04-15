@@ -727,12 +727,12 @@ def log_all_parameters():
     log_to_file("参数设置输出完成")
     log_to_file("="*80 + "\n")
 
-log_all_parameters()
 
 # =========================================================
 # 训练函数
 # =========================================================
 def train():
+    log_all_parameters()
     device = Config.DEVICE
     log_to_file(f"使用设备: {device}")
     

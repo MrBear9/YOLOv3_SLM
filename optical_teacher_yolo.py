@@ -78,16 +78,55 @@ class ConfigYOLO:
     BATCH_SIZE = 8
     EPOCHS = 100
     
-    BOX_WEIGHT = 0.05 # box loss weight
-    OBJ_WEIGHT = 1.0 # object loss weight
-    NOOBJ_WEIGHT = 0.5 # no-object loss weight
-    CLS_WEIGHT = 0.15 # class loss weight
+    # 动态损失权重配置（先位置后分类策略）
+    BOX_WEIGHT_BASE = 0.62     # 基础边界框权重
+    OBJ_WEIGHT_BASE = 1.0     # 基础目标性权重
+    NOOBJ_WEIGHT_BASE = 0.3   # 基础非目标权重
+    CLS_WEIGHT_BASE = 0.08    # 基础分类权重
     
-    STRIDES = [8, 16, 32]
+    # 阶段划分参数
+    POSITION_PHASE_EPOCHS = 20  # 位置优先阶段轮数
+    BALANCE_PHASE_EPOCHS = 10   # 平衡过渡阶段轮数
+    
+    @classmethod
+    def get_dynamic_weights(cls, epoch):
+        """根据训练阶段动态调整损失权重"""
+        if epoch < cls.POSITION_PHASE_EPOCHS:
+            # 阶段1：位置优先（前20轮）
+            # 加强位置检测，降低分类权重
+            box_weight = cls.BOX_WEIGHT_BASE * 1.5    # 增加位置权重
+            cls_weight = cls.CLS_WEIGHT_BASE * 0.5    # 降低分类权重
+            phase = "位置优先"
+        elif epoch < cls.POSITION_PHASE_EPOCHS + cls.BALANCE_PHASE_EPOCHS:
+            # 阶段2：平衡过渡（20-30轮）
+            # 逐步恢复平衡
+            progress = (epoch - cls.POSITION_PHASE_EPOCHS) / cls.BALANCE_PHASE_EPOCHS
+            box_weight = cls.BOX_WEIGHT_BASE * (1.5 - 0.5 * progress)
+            cls_weight = cls.CLS_WEIGHT_BASE * (0.5 + 0.5 * progress)
+            phase = "平衡过渡"
+        else:
+            # 阶段3：最终平衡（30轮后）
+            box_weight = cls.BOX_WEIGHT_BASE
+            cls_weight = cls.CLS_WEIGHT_BASE
+            phase = "最终平衡"
+        
+        return {
+            'box_weight': box_weight,
+            'obj_weight': cls.OBJ_WEIGHT_BASE,
+            'noobj_weight': cls.NOOBJ_WEIGHT_BASE,
+            'cls_weight': cls_weight,
+            'phase': phase
+        }
+    IOU_WEIGHT = 0.5    # 增加IOU损失权重，加强位置检测
+    
+    STRIDES = [8, 16, 32] # strides for each feature map
     ANCHORS = [
-        [[10,13], [16,30], [33,23]],
-        [[30,61], [62,45], [59,119]],
-        [[116,90], [156,198], [373,326]]
+        # P3: 小目标（士兵、小型装备）
+        [[16, 20], [24, 32], [32, 48]],
+        # P4: 中目标（坦克、战机主体）
+        [[48, 64], [64, 96], [96, 128]],
+        # P5: 大目标（军舰、大型战机）
+        [[128, 160], [192, 240], [256, 320]]
     ]
     
     LEARNING_RATE = 5e-4
@@ -204,15 +243,24 @@ class YOLOLoss(nn.Module):
         self.num_classes = num_classes
         self.strides = strides
         
-        # 使用更合理的损失权重
-        self.box_weight = Config.BOX_WEIGHT
-        self.obj_weight = Config.OBJ_WEIGHT
-        self.noobj_weight = Config.NOOBJ_WEIGHT
-        self.cls_weight = Config.CLS_WEIGHT
+        # 使用动态损失权重
+        self.box_weight = Config.BOX_WEIGHT_BASE
+        self.obj_weight = Config.OBJ_WEIGHT_BASE
+        self.noobj_weight = Config.NOOBJ_WEIGHT_BASE
+        self.cls_weight = Config.CLS_WEIGHT_BASE
         
         # 使用带reduction的损失函数，避免数值爆炸
         self.mse_loss = nn.MSELoss(reduction="mean")
         self.bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
+    
+    def set_epoch_weights(self, epoch):
+        """根据训练轮数设置动态权重"""
+        weights = Config.get_dynamic_weights(epoch)
+        self.box_weight = weights['box_weight']
+        self.obj_weight = weights['obj_weight']
+        self.noobj_weight = weights['noobj_weight']
+        self.cls_weight = weights['cls_weight']
+        return weights['phase']
 
     def forward(self, predictions, targets):
         total_loss = 0
@@ -256,7 +304,7 @@ class YOLOLoss(nn.Module):
                             best_iou = iou
                             best_anchor = a
                     
-                    if best_iou > 0.3:
+                    if best_iou > Config.IOU_WEIGHT:
                         target_boxes[b, gy, gx, best_anchor, 0] = tx * grid_w - gx
                         target_boxes[b, gy, gx, best_anchor, 1] = ty * grid_h - gy
                         target_boxes[b, gy, gx, best_anchor, 2] = torch.log(tw / anchors[best_anchor, 0] + 1e-6)
@@ -500,7 +548,10 @@ def train():
         model.train()
         loss_sum = 0
         
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS}", leave=True):
+        # 根据训练阶段动态调整损失权重
+        phase = criterion.set_epoch_weights(epoch)
+        
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True):
             batch_targets = []
             batch_images = []
             
