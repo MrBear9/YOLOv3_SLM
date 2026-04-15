@@ -117,7 +117,7 @@ class ConfigYOLO:
             'cls_weight': cls_weight,
             'phase': phase
         }
-    IOU_WEIGHT = 0.5    # 增加IOU损失权重，加强位置检测
+    IOU_THRESHOLD = 0.5    # 目标匹配的IOU阈值（标准YOLOv3设置）
     
     STRIDES = [8, 16, 32] # strides for each feature map
     ANCHORS = [
@@ -304,7 +304,7 @@ class YOLOLoss(nn.Module):
                             best_iou = iou
                             best_anchor = a
                     
-                    if best_iou > Config.IOU_WEIGHT:
+                    if best_iou > Config.IOU_THRESHOLD:
                         target_boxes[b, gy, gx, best_anchor, 0] = tx * grid_w - gx
                         target_boxes[b, gy, gx, best_anchor, 1] = ty * grid_h - gy
                         target_boxes[b, gy, gx, best_anchor, 2] = torch.log(tw / anchors[best_anchor, 0] + 1e-6)
@@ -315,16 +315,16 @@ class YOLOLoss(nn.Module):
             obj_mask = target_obj > 0.5
             noobj_mask = target_obj <= 0.5
             
-            # 计算各项损失（使用更稳定的计算方式）
+            # 计算各项损失（修复损失值过小问题）
             if obj_mask.sum() > 0:
-                # 边界框损失
-                box_loss = self.mse_loss(pred_boxes[obj_mask], target_boxes[obj_mask]).mean()
+                # 边界框损失 - 使用正确的损失计算
+                box_loss = self.mse_loss(pred_boxes[obj_mask], target_boxes[obj_mask])
                 
                 # 目标存在性损失
-                obj_loss = self.bce_loss(pred_obj[obj_mask], target_obj[obj_mask]).mean()
+                obj_loss = self.bce_loss(pred_obj[obj_mask], target_obj[obj_mask])
                 
                 # 类别损失
-                cls_loss = self.bce_loss(pred_cls[obj_mask], target_cls[obj_mask]).mean()
+                cls_loss = self.bce_loss(pred_cls[obj_mask], target_cls[obj_mask])
             else:
                 box_loss = torch.tensor(0.0, device=pred_boxes.device)
                 obj_loss = torch.tensor(0.0, device=pred_boxes.device)
@@ -332,14 +332,14 @@ class YOLOLoss(nn.Module):
             
             # 非目标损失
             if noobj_mask.sum() > 0:
-                noobj_loss = self.bce_loss(pred_obj[noobj_mask], target_obj[noobj_mask]).mean()
+                noobj_loss = self.bce_loss(pred_obj[noobj_mask], target_obj[noobj_mask])
             else:
                 noobj_loss = torch.tensor(0.0, device=pred_boxes.device)
             
-            # 总损失计算（添加数值稳定性检查）
+            # 总损失计算（修复权重应用）
             scale_loss = (self.box_weight * box_loss + 
                          self.obj_weight * obj_loss + 
-                         self.obj_weight * 0.5 * noobj_loss + 
+                         self.noobj_weight * noobj_loss + 
                          self.cls_weight * cls_loss)
             
             # 检查损失值是否合理，避免数值爆炸

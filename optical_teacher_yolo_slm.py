@@ -60,8 +60,10 @@ class ConfigSLMYOLO:
     ]
     
     # 优化器参数
-    LEARNING_RATE = 5e-4
-    WEIGHT_DECAY = 1e-5
+    OPTICAL_LEARNING_RATE = 1e-3      # 光学部分学习率（较高，因为光学层需要快速收敛）
+    DETECTOR_LEARNING_RATE = 5e-4    # 检测头学习率（适中）
+    OPTICAL_WEIGHT_DECAY = 1e-5      # 光学部分权重衰减
+    DETECTOR_WEIGHT_DECAY = 1e-5     # 检测头权重衰减
     OPTIMIZER = "Adam"
     
     # 光学传播参数
@@ -75,6 +77,7 @@ class ConfigSLMYOLO:
     # 训练控制参数
     VIS_INTERVAL = 5
     SAVE_INTERVAL = 10
+    VAL_INTERVAL = 5  # 验证间隔，每5轮验证一次
     
     # 检测参数
     CONF_THRESH = 0.5
@@ -126,7 +129,10 @@ class ConfigSLMYOLO:
         print(f"阶段2轮数: {cls.PHASE2_EPOCHS}")
         print(f"阶段3轮数: {cls.PHASE3_EPOCHS}")
         print(f"类别数量: {cls.NUM_CLASSES}")
-        print(f"学习率: {cls.LEARNING_RATE}")
+        print(f"光学部分学习率: {cls.OPTICAL_LEARNING_RATE}")
+        print(f"检测头学习率: {cls.DETECTOR_LEARNING_RATE}")
+        print(f"光学部分权重衰减: {cls.OPTICAL_WEIGHT_DECAY}")
+        print(f"检测头权重衰减: {cls.DETECTOR_WEIGHT_DECAY}")
         print("="*80)
 
 # =========================================================
@@ -440,7 +446,26 @@ class YOLODataset(Dataset):
 # =========================================================
 # 损失函数
 # =========================================================
+class MultiScaleMSELoss(nn.Module):
+    """多尺度MSE损失函数（阶段1使用）"""
+    def __init__(self):
+        super().__init__()
+        self.pool1 = nn.AvgPool2d(8)
+        self.pool2 = nn.AvgPool2d(32)
+        self.loss_full_weight = 0.02
+        self.loss_low1_weight = 1.0
+        self.loss_low2_weight = 0.5
+
+    def forward(self, student_output, teacher_output):
+        loss_full = F.mse_loss(student_output, teacher_output)
+        loss_low1 = F.mse_loss(self.pool1(student_output), self.pool1(teacher_output))
+        loss_low2 = F.mse_loss(self.pool2(student_output), self.pool2(teacher_output))
+        return (loss_full * self.loss_full_weight + 
+                loss_low1 * self.loss_low1_weight + 
+                loss_low2 * self.loss_low2_weight)
+
 class YOLOLoss(nn.Module):
+    """YOLO检测损失函数（阶段2和阶段3使用）"""
     def __init__(self, anchors, num_classes, strides):
         super().__init__()
         self.anchors = torch.tensor(anchors, dtype=torch.float32)
@@ -541,14 +566,20 @@ class YOLOLoss(nn.Module):
         
         return total_loss
 
-class TeacherStudentLoss(nn.Module):
-    """教师-学生网络损失函数"""
-    def __init__(self):
+class CombinedLoss(nn.Module):
+    """组合损失函数（阶段2使用）"""
+    def __init__(self, anchors, num_classes, strides):
         super().__init__()
-        self.mse_loss = nn.MSELoss()
+        self.teacher_student_loss = MultiScaleMSELoss()
+        self.yolo_loss = YOLOLoss(anchors, num_classes, strides)
+        self.teacher_student_weight = 0.5
+        self.yolo_weight = 0.5
     
-    def forward(self, student_output, teacher_output):
-        return self.mse_loss(student_output, teacher_output)
+    def forward(self, teacher_output, optical_output, predictions, targets):
+        teacher_student_loss = self.teacher_student_loss(optical_output, teacher_output)
+        yolo_loss = self.yolo_loss(predictions, targets)
+        return (self.teacher_student_weight * teacher_student_loss + 
+                self.yolo_weight * yolo_loss)
 
 # =========================================================
 # 模型组合类
@@ -666,9 +697,57 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
 # =========================================================
 # 可视化函数
 # =========================================================
-def save_visualization(epoch, model_type, input_images, teacher_features, optical_features, 
-                      ground_truth, predictions, save_dir, prefix="train"):
-    """保存可视化结果"""
+def save_phase1_visualization(epoch, input_images, teacher_features, optical_features, save_dir, prefix="train"):
+    """阶段1可视化：类似optical_teacher.py的可视化"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    num_samples = min(ConfigSLMYOLO.VIS_BATCH_SIZE, len(input_images))
+    indices = torch.randperm(len(input_images))[:num_samples]
+    
+    fig, axes = plt.subplots(num_samples, 3, figsize=(18, 6 * num_samples))
+    if num_samples == 1:
+        axes = axes.reshape(1, -1)
+    
+    with torch.no_grad():
+        for i, idx in enumerate(indices):
+            # 第一列：输入图像
+            img_tensor = input_images[idx].cpu()
+            if img_tensor.dim() == 4:
+                img_tensor = img_tensor.squeeze(0)
+            
+            if img_tensor.shape[0] == 1:
+                img_np = img_tensor.squeeze(0).numpy()
+                img_np = np.stack([img_np] * 3, axis=-1)
+            else:
+                img_np = img_tensor.numpy().transpose(1, 2, 0)
+            
+            img_np = (img_np * 255).astype(np.uint8)
+            axes[i, 0].imshow(img_np)
+            axes[i, 0].set_title(f"Input {i+1}")
+            axes[i, 0].axis("off")
+            
+            # 第二列：教师特征
+            teacher_np = teacher_features[idx].squeeze(0).cpu().numpy()
+            teacher_np = enhance_feature_for_display(teacher_np)
+            axes[i, 1].imshow(teacher_np, cmap="hot")
+            axes[i, 1].set_title(f"Teacher Feature {i+1}")
+            axes[i, 1].axis("off")
+            
+            # 第三列：光学特征
+            optical_np = optical_features[idx].squeeze(0).cpu().numpy()
+            optical_np = enhance_feature_for_display(optical_np)
+            axes[i, 2].imshow(optical_np, cmap="hot")
+            axes[i, 2].set_title(f"Optical Feature {i+1}")
+            axes[i, 2].axis("off")
+    
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, f"phase1_{prefix}_epoch_{epoch:03d}.png")
+    plt.savefig(save_path, dpi=ConfigSLMYOLO.VIS_DPI)
+    plt.close()
+
+def save_phase2_visualization(epoch, input_images, teacher_features, optical_features, 
+                             ground_truth, predictions, save_dir, prefix="train"):
+    """阶段2可视化：输入图像+真实框，光学特征，教师约束，预测结果"""
     os.makedirs(save_dir, exist_ok=True)
     
     num_samples = min(ConfigSLMYOLO.VIS_BATCH_SIZE, len(input_images))
@@ -683,17 +762,15 @@ def save_visualization(epoch, model_type, input_images, teacher_features, optica
             # 第一列：输入图像 + 真实框
             img_tensor = input_images[idx].cpu()
             if img_tensor.dim() == 4:
-                img_tensor = img_tensor.squeeze(0)  # 如果是批次维度，去掉批次
+                img_tensor = img_tensor.squeeze(0)
             
-            # 确保是3通道图像 (C, H, W)
-            if img_tensor.shape[0] == 1:  # 如果是灰度图
-                img_np = img_tensor.squeeze(0).numpy()  # 去掉通道维度
-                img_np = np.stack([img_np] * 3, axis=-1)  # 转换为3通道
+            if img_tensor.shape[0] == 1:
+                img_np = img_tensor.squeeze(0).numpy()
+                img_np = np.stack([img_np] * 3, axis=-1)
             else:
-                img_np = img_tensor.numpy().transpose(1, 2, 0)  # (C, H, W) -> (H, W, C)
+                img_np = img_tensor.numpy().transpose(1, 2, 0)
             
             img_np = (img_np * 255).astype(np.uint8)
-            
             axes[i, 0].imshow(img_np)
             axes[i, 0].set_title(f"Input + GT {i+1}")
             axes[i, 0].axis("off")
@@ -756,9 +833,128 @@ def save_visualization(epoch, model_type, input_images, teacher_features, optica
                                           facecolor=color, alpha=0.7))
     
     plt.tight_layout()
-    save_path = os.path.join(save_dir, f"{model_type}_{prefix}_epoch_{epoch:03d}.png")
+    save_path = os.path.join(save_dir, f"phase2_{prefix}_epoch_{epoch:03d}.png")
     plt.savefig(save_path, dpi=ConfigSLMYOLO.VIS_DPI)
     plt.close()
+
+def save_phase3_visualization(epoch, input_images, optical_features, ground_truth, 
+                             predictions, save_dir, prefix="train"):
+    """阶段3可视化：类似optical_teacher_yolo.py的可视化"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    num_samples = min(ConfigSLMYOLO.VIS_BATCH_SIZE, len(input_images))
+    indices = torch.randperm(len(input_images))[:num_samples]
+    
+    fig, axes = plt.subplots(num_samples, 3, figsize=(18, 6 * num_samples))
+    if num_samples == 1:
+        axes = axes.reshape(1, -1)
+    
+    with torch.no_grad():
+        for i, idx in enumerate(indices):
+            # 第一列：输入图像 + 真实框
+            img_tensor = input_images[idx].cpu()
+            if img_tensor.dim() == 4:
+                img_tensor = img_tensor.squeeze(0)
+            
+            if img_tensor.shape[0] == 1:
+                img_np = img_tensor.squeeze(0).numpy()
+                img_np = np.stack([img_np] * 3, axis=-1)
+            else:
+                img_np = img_tensor.numpy().transpose(1, 2, 0)
+            
+            img_np = (img_np * 255).astype(np.uint8)
+            axes[i, 0].imshow(img_np)
+            axes[i, 0].set_title(f"Input + GT {i+1}")
+            axes[i, 0].axis("off")
+            
+            # 绘制真实边界框
+            for target_idx in range(len(ground_truth[idx])):
+                cls_id, x_center, y_center, width, height = ground_truth[idx][target_idx]
+                cls_id = int(cls_id.item())
+                
+                x1 = int((x_center - width / 2) * ConfigSLMYOLO.IMG_SIZE)
+                y1 = int((y_center - height / 2) * ConfigSLMYOLO.IMG_SIZE)
+                w = int(width * ConfigSLMYOLO.IMG_SIZE)
+                h = int(height * ConfigSLMYOLO.IMG_SIZE)
+                
+                rect = patches.Rectangle((x1, y1), w, h, linewidth=2, 
+                                        edgecolor='green', facecolor='none')
+                axes[i, 0].add_patch(rect)
+                axes[i, 0].text(x1, y1 - 5, ConfigSLMYOLO.CLASS_NAMES[cls_id], 
+                              color='green', fontsize=10, fontweight='bold')
+            
+            # 第二列：光学特征
+            optical_np = optical_features[idx].squeeze(0).cpu().numpy()
+            optical_np = enhance_feature_for_display(optical_np)
+            axes[i, 1].imshow(optical_np, cmap="hot")
+            axes[i, 1].set_title(f"Optical Feature {i+1}")
+            axes[i, 1].axis("off")
+            
+            # 第三列：预测结果（置信度分类框）
+            axes[i, 2].imshow(img_np)
+            axes[i, 2].set_title(f"Predictions {i+1}")
+            axes[i, 2].axis("off")
+            
+            # 绘制预测边界框
+            if len(predictions[idx]) > 0:
+                for det in predictions[idx]:
+                    x_center, y_center, w, h, conf, cls_id = det
+                    cls_id = int(cls_id)
+                    
+                    x1 = int(x_center - w / 2)
+                    y1 = int(y_center - h / 2)
+                    w = int(w)
+                    h = int(h)
+                    
+                    color = plt.cm.tab20(cls_id / max(ConfigSLMYOLO.NUM_CLASSES, 1))
+                    rect = patches.Rectangle((x1, y1), w, h, linewidth=2, 
+                                            edgecolor=color, facecolor='none')
+                    axes[i, 2].add_patch(rect)
+                    
+                    label = f"{ConfigSLMYOLO.CLASS_NAMES[cls_id]}: {conf:.2f}"
+                    axes[i, 2].text(x1, y1 - 5, label, 
+                                  color=color, fontsize=10, fontweight='bold',
+                                  bbox=dict(boxstyle='round,pad=0.3', 
+                                          facecolor=color, alpha=0.7))
+    
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, f"phase3_{prefix}_epoch_{epoch:03d}.png")
+    plt.savefig(save_path, dpi=ConfigSLMYOLO.VIS_DPI)
+    plt.close()
+
+# =========================================================
+# 验证函数
+# =========================================================
+def validate(phase, teacher_optical_model, optical_yolo_model, val_loader, 
+            phase1_loss, phase2_loss, phase3_loss, device):
+    """验证函数，计算验证集损失"""
+    teacher_optical_model.eval()
+    optical_yolo_model.eval()
+    total_loss = 0
+    
+    with torch.no_grad():
+        for images, targets in val_loader:
+            images = images.to(device)
+            targets = [target.to(device) for target in targets]
+            
+            if phase == "phase1":
+                # 阶段1验证：只计算教师-光学损失
+                teacher_features, optical_features = teacher_optical_model(images)
+                loss = phase1_loss(optical_features, teacher_features)
+            elif phase == "phase2":
+                # 阶段2验证：计算组合损失
+                teacher_features, optical_features = teacher_optical_model(images)
+                detections = optical_yolo_model(images)
+                loss = phase2_loss(teacher_features, optical_features, detections, targets)
+            else:
+                # 阶段3验证：计算YOLO检测损失
+                detections = optical_yolo_model(images)
+                loss = phase3_loss(detections, targets)
+            
+            total_loss += loss.item()
+    
+    avg_loss = total_loss / len(val_loader)
+    return avg_loss
 
 # =========================================================
 # 训练函数
@@ -792,12 +988,21 @@ def train():
     optical_yolo_model = OpticalYOLOModel(optical_student, detector).to(device)
     
     # 初始化损失函数
-    teacher_student_loss = TeacherStudentLoss().to(device)
-    yolo_loss = YOLOLoss(ConfigSLMYOLO.ANCHORS, ConfigSLMYOLO.NUM_CLASSES, ConfigSLMYOLO.STRIDES).to(device)
+    phase1_loss = MultiScaleMSELoss().to(device)  # 阶段1：教师-光学层损失
+    phase2_loss = CombinedLoss(ConfigSLMYOLO.ANCHORS, ConfigSLMYOLO.NUM_CLASSES, ConfigSLMYOLO.STRIDES).to(device)  # 阶段2：组合损失
+    phase3_loss = YOLOLoss(ConfigSLMYOLO.ANCHORS, ConfigSLMYOLO.NUM_CLASSES, ConfigSLMYOLO.STRIDES).to(device)  # 阶段3：YOLO检测损失
     
-    # 初始化优化器
-    optimizer_optical = optim.Adam(optical_student.parameters(), lr=ConfigSLMYOLO.LEARNING_RATE)
-    optimizer_detector = optim.Adam(detector.parameters(), lr=ConfigSLMYOLO.LEARNING_RATE)
+    # 初始化优化器（使用不同的学习率）
+    optimizer_optical = optim.Adam(
+        optical_student.parameters(), 
+        lr=ConfigSLMYOLO.OPTICAL_LEARNING_RATE,
+        weight_decay=ConfigSLMYOLO.OPTICAL_WEIGHT_DECAY
+    )
+    optimizer_detector = optim.Adam(
+        detector.parameters(), 
+        lr=ConfigSLMYOLO.DETECTOR_LEARNING_RATE,
+        weight_decay=ConfigSLMYOLO.DETECTOR_WEIGHT_DECAY
+    )
     
     # 自定义collate函数处理不同数量的边界框
     def yolo_collate_fn(batch):
@@ -820,6 +1025,19 @@ def train():
     train_loader = DataLoader(train_dataset, batch_size=ConfigSLMYOLO.BATCH_SIZE, 
                              shuffle=True, collate_fn=yolo_collate_fn)
     
+    # 加载验证集（如果存在）
+    try:
+        val_dataset = YOLODataset(split="val")
+        val_loader = DataLoader(val_dataset, batch_size=ConfigSLMYOLO.BATCH_SIZE, 
+                               shuffle=False, collate_fn=yolo_collate_fn)
+        log_to_file(f"训练集大小: {len(train_dataset)}, 验证集大小: {len(val_dataset)}")
+        has_validation = True
+    except Exception as e:
+        log_to_file(f"警告: 验证集加载失败: {e}")
+        log_to_file("将仅使用训练集进行训练")
+        has_validation = False
+        val_loader = None
+    
     # 训练循环
     log_to_file("开始训练...")
     
@@ -840,7 +1058,7 @@ def train():
                 optimizer_optical.zero_grad()
                 
                 teacher_features, optical_features = teacher_optical_model(images)
-                loss = teacher_student_loss(optical_features, teacher_features)
+                loss = phase1_loss(optical_features, teacher_features)
                 
                 loss.backward()
                 optimizer_optical.step()
@@ -851,16 +1069,12 @@ def train():
                 optimizer_optical.zero_grad()
                 optimizer_detector.zero_grad()
                 
-                # 教师约束损失
+                # 获取教师特征和光学特征
                 teacher_features, optical_features = teacher_optical_model(images)
-                constraint_loss = teacher_student_loss(optical_features, teacher_features)
-                
-                # 检测头损失
+                # 获取检测结果
                 detections = optical_yolo_model(images)
-                detection_loss = yolo_loss(detections, targets)
-                
                 # 组合损失
-                loss = constraint_loss + detection_loss
+                loss = phase2_loss(teacher_features, optical_features, detections, targets)
                 
                 loss.backward()
                 optimizer_optical.step()
@@ -873,7 +1087,7 @@ def train():
                 optimizer_detector.zero_grad()
                 
                 detections = optical_yolo_model(images)
-                loss = yolo_loss(detections, targets)
+                loss = phase3_loss(detections, targets)
                 
                 loss.backward()
                 optimizer_optical.step()
@@ -882,6 +1096,13 @@ def train():
         
         avg_loss = total_loss / len(train_loader)
         log_to_file(f"Epoch {epoch+1} 平均损失: {avg_loss:.6f}")
+        
+        # 验证集验证（如果存在验证集）
+        if has_validation and (epoch + 1) % ConfigSLMYOLO.VAL_INTERVAL == 0:
+            log_to_file("进行验证集验证...")
+            val_loss = validate(phase, teacher_optical_model, optical_yolo_model, 
+                              val_loader, phase1_loss, phase2_loss, phase3_loss, device)
+            log_to_file(f"Epoch {epoch+1} 验证损失: {val_loss:.6f}")
         
         # 保存模型
         if (epoch + 1) % ConfigSLMYOLO.SAVE_INTERVAL == 0 or epoch + 1 == ConfigSLMYOLO.EPOCHS:
@@ -924,14 +1145,27 @@ def train():
                 detections = optical_yolo_model(sample_images)
                 pred_results = decode_detections(detections)
                 
-                # 保存可视化
-                save_visualization(
-                    epoch + 1, phase, sample_images, teacher_features, 
-                    optical_features, sample_targets, pred_results, 
-                    ConfigSLMYOLO.VISUALIZATION_DIR
-                )
+                # 根据阶段选择不同的可视化函数
+                if phase == "phase1":
+                    # 阶段1：类似optical_teacher.py的可视化
+                    save_phase1_visualization(
+                        epoch + 1, sample_images, teacher_features, optical_features,
+                        ConfigSLMYOLO.VISUALIZATION_DIR
+                    )
+                elif phase == "phase2":
+                    # 阶段2：输入图+真实框，光学特征，约束，预测结果
+                    save_phase2_visualization(
+                        epoch + 1, sample_images, teacher_features, optical_features,
+                        sample_targets, pred_results, ConfigSLMYOLO.VISUALIZATION_DIR
+                    )
+                else:
+                    # 阶段3：类似optical_teacher_yolo.py的可视化
+                    save_phase3_visualization(
+                        epoch + 1, sample_images, optical_features, sample_targets,
+                        pred_results, ConfigSLMYOLO.VISUALIZATION_DIR
+                    )
             
-            log_to_file(f"可视化结果已保存到: {ConfigSLMYOLO.VISUALIZATION_DIR}")
+            log_to_file(f"{phase_desc}可视化结果已保存到: {ConfigSLMYOLO.VISUALIZATION_DIR}")
     
     log_to_file("训练完成！")
 
