@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from torchvision.ops import nms
 import os
 import cv2
 import numpy as np
@@ -27,6 +28,7 @@ class ConfigSLMYOLO:
     
     # 输出路径配置
     OUTPUT_DIR = r"output\OpticalTeacherYOLO_SLM"
+    TEACHER_CHECKPOINT = r"output\OpticalTeacherYOLO\teacher_best.pth"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -172,6 +174,69 @@ def log_to_file(message, also_print=True):
     
     if also_print:
         print(log_message)
+
+def extract_state_dict(checkpoint):
+    if not isinstance(checkpoint, dict):
+        return checkpoint
+
+    for key in ("teacher_state_dict", "model_state_dict", "state_dict", "model"):
+        if key in checkpoint:
+            return checkpoint[key]
+    return checkpoint
+
+def load_teacher_checkpoint(teacher, checkpoint_path, device):
+    if not checkpoint_path:
+        return False, "Teacher checkpoint: not configured"
+    if not os.path.exists(checkpoint_path):
+        return False, f"Teacher checkpoint not found: {checkpoint_path}"
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True) # 仅加载模型权重 兼容性：如果您的模型包含自定义对象，weights_only=True 可能无法加载 原本是没有这个参数
+    state_dict = extract_state_dict(checkpoint)
+    teacher_state = teacher.state_dict()
+    compatible_state = {}
+
+    for key, value in state_dict.items():
+        normalized_key = key[8:] if key.startswith("teacher.") else key
+        if normalized_key in teacher_state and teacher_state[normalized_key].shape == value.shape:
+            compatible_state[normalized_key] = value
+
+    if len(compatible_state) == 0:
+        return False, f"No compatible ConvTeacher weights found in: {checkpoint_path}"
+
+    teacher.load_state_dict({**teacher_state, **compatible_state}, strict=False)
+    return True, f"Loaded {len(compatible_state)} teacher tensors from: {checkpoint_path}"
+
+def xywh_to_xyxy(boxes):
+    half_w = boxes[:, 2] / 2
+    half_h = boxes[:, 3] / 2
+    return torch.stack([
+        boxes[:, 0] - half_w,
+        boxes[:, 1] - half_h,
+        boxes[:, 0] + half_w,
+        boxes[:, 1] + half_h
+    ], dim=1)
+
+def apply_classwise_nms(detections, nms_thresh, max_det):
+    if len(detections) == 0:
+        return np.zeros((0, 6), dtype=np.float32)
+
+    det_tensor = torch.as_tensor(detections, dtype=torch.float32)
+    boxes_xyxy = xywh_to_xyxy(det_tensor[:, :4])
+    scores = det_tensor[:, 4]
+    class_ids = det_tensor[:, 5]
+    kept = []
+
+    for cls_id in class_ids.unique(sorted=False):
+        cls_mask = class_ids == cls_id
+        keep_indices = nms(boxes_xyxy[cls_mask], scores[cls_mask], nms_thresh)
+        kept.append(det_tensor[cls_mask][keep_indices])
+
+    if len(kept) == 0:
+        return np.zeros((0, 6), dtype=np.float32)
+
+    det_tensor = torch.cat(kept, dim=0)
+    det_tensor = det_tensor[det_tensor[:, 4].argsort(descending=True)]
+    return det_tensor[:max_det].cpu().numpy()
 
 def enhance_feature_for_display(feature_map):
     """增强特征图显示效果"""
@@ -566,6 +631,117 @@ class YOLOLoss(nn.Module):
         
         return total_loss
 
+def yolo_loss_forward_fixed(self, predictions, targets):
+    total_loss = 0
+    batch_size = predictions[0].shape[0]
+    prepared_scales = []
+
+    for i, pred in enumerate(predictions):
+        _, _, grid_h, grid_w = pred.shape
+        pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
+        prepared_scales.append({
+            "pred_boxes": pred[..., :4],
+            "pred_obj": pred[..., 4],
+            "pred_cls": pred[..., 5:],
+            "target_boxes": torch.zeros_like(pred[..., :4]),
+            "target_obj": torch.zeros_like(pred[..., 4]),
+            "target_cls": torch.zeros_like(pred[..., 5:]),
+            "grid_h": grid_h,
+            "grid_w": grid_w,
+            "anchors": self.anchors[i].to(pred.device)
+        })
+
+    for b in range(batch_size):
+        if len(targets[b]) == 0:
+            continue
+
+        current_targets = targets[b].to(predictions[0].device)
+        if current_targets.dim() == 1:
+            current_targets = current_targets.unsqueeze(0)
+
+        for target in current_targets:
+            cls_id = int(target[0].item())
+            tx = target[1]
+            ty = target[2]
+            tw = target[3] * ConfigSLMYOLO.IMG_SIZE
+            th = target[4] * ConfigSLMYOLO.IMG_SIZE
+
+            best_scale_idx = 0
+            best_anchor_idx = 0
+            best_iou = -1.0
+
+            for scale_idx, scale_data in enumerate(prepared_scales):
+                for anchor_idx in range(3):
+                    anchor_w, anchor_h = scale_data["anchors"][anchor_idx]
+                    inter = torch.minimum(tw, anchor_w) * torch.minimum(th, anchor_h)
+                    union = tw * th + anchor_w * anchor_h - inter + 1e-6
+                    iou = (inter / union).item()
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_scale_idx = scale_idx
+                        best_anchor_idx = anchor_idx
+
+            scale_data = prepared_scales[best_scale_idx]
+            gx = tx * scale_data["grid_w"]
+            gy = ty * scale_data["grid_h"]
+            grid_x = max(0, min(int(gx.item()), scale_data["grid_w"] - 1))
+            grid_y = max(0, min(int(gy.item()), scale_data["grid_h"] - 1))
+            anchor_w, anchor_h = scale_data["anchors"][best_anchor_idx]
+
+            scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 0] = gx - grid_x
+            scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 1] = gy - grid_y
+            scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 2] = torch.log(tw / anchor_w + 1e-6)
+            scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 3] = torch.log(th / anchor_h + 1e-6)
+            scale_data["target_obj"][b, grid_y, grid_x, best_anchor_idx] = 1.0
+            scale_data["target_cls"][b, grid_y, grid_x, best_anchor_idx, cls_id] = 1.0
+
+    for scale_data in prepared_scales:
+        pred_boxes = scale_data["pred_boxes"]
+        pred_obj = scale_data["pred_obj"]
+        pred_cls = scale_data["pred_cls"]
+        target_boxes = scale_data["target_boxes"]
+        target_obj = scale_data["target_obj"]
+        target_cls = scale_data["target_cls"]
+
+        obj_mask = target_obj > 0.5
+        noobj_mask = target_obj <= 0.5
+
+        if obj_mask.sum() > 0:
+            pred_xy = torch.sigmoid(pred_boxes[..., :2])
+            pred_wh = pred_boxes[..., 2:4]
+            target_xy = target_boxes[..., :2]
+            target_wh = target_boxes[..., 2:4]
+
+            xy_loss = self.mse_loss(pred_xy[obj_mask], target_xy[obj_mask])
+            wh_loss = self.mse_loss(pred_wh[obj_mask], target_wh[obj_mask])
+            box_loss = xy_loss + wh_loss
+            obj_loss = self.bce_loss(pred_obj[obj_mask], target_obj[obj_mask])
+            cls_loss = self.bce_loss(pred_cls[obj_mask], target_cls[obj_mask])
+        else:
+            box_loss = torch.tensor(0.0, device=pred_boxes.device)
+            obj_loss = torch.tensor(0.0, device=pred_boxes.device)
+            cls_loss = torch.tensor(0.0, device=pred_boxes.device)
+
+        if noobj_mask.sum() > 0:
+            noobj_loss = self.bce_loss(pred_obj[noobj_mask], target_obj[noobj_mask])
+        else:
+            noobj_loss = torch.tensor(0.0, device=pred_boxes.device)
+
+        scale_loss = (self.box_weight * box_loss +
+                     self.obj_weight * obj_loss +
+                     self.obj_weight * 0.5 * noobj_loss +
+                     self.cls_weight * cls_loss)
+
+        if torch.isnan(scale_loss) or torch.isinf(scale_loss):
+            scale_loss = torch.tensor(0.0, device=pred_boxes.device)
+            print("Warning: invalid detection loss encountered, reset to 0")
+
+        total_loss += scale_loss
+
+    return total_loss
+
+YOLOLoss.forward = yolo_loss_forward_fixed
+
 class CombinedLoss(nn.Module):
     """组合损失函数（阶段2使用）"""
     def __init__(self, anchors, num_classes, strides):
@@ -619,7 +795,8 @@ class TeacherOpticalModel(nn.Module):
             self.optical_student = optical_student
 
     def forward(self, x):
-        teacher_features = self.teacher(x)
+        with torch.no_grad():
+            teacher_features = self.teacher(x)
         optical_features = self.optical_student(x)
         return teacher_features, optical_features
 
@@ -670,12 +847,12 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
                         
                         tx, ty, tw, th = bbox_pred[b, gh, gw, a]
                         
-                        x_center = (gw + tx.item()) * stride
-                        y_center = (gh + ty.item()) * stride
+                        x_center = (gw + torch.sigmoid(tx).item()) * stride
+                        y_center = (gh + torch.sigmoid(ty).item()) * stride
                         
                         anchor_w, anchor_h = anchor_set[a]
-                        w = anchor_w * torch.exp(tw).item()
-                        h = anchor_h * torch.exp(th).item()
+                        w = anchor_w * torch.exp(torch.clamp(tw, min=-8.0, max=8.0)).item()
+                        h = anchor_h * torch.exp(torch.clamp(th, min=-8.0, max=8.0)).item()
                         
                         x_center = max(0, min(x_center, img_size - 1))
                         y_center = max(0, min(y_center, img_size - 1))
@@ -686,11 +863,7 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
     
     for b in range(batch_size):
         if len(detections[b]) > 0:
-            detections[b] = np.array(detections[b])
-            sorted_indices = detections[b][:, 4].argsort()[::-1]
-            detections[b] = detections[b][sorted_indices]
-            if len(detections[b]) > max_det:
-                detections[b] = detections[b][:max_det]
+            detections[b] = apply_classwise_nms(detections[b], nms_thresh, max_det)
     
     return detections
 
@@ -973,8 +1146,15 @@ def train():
     
     # 初始化教师网络
     teacher = ConvTeacher().to(device)
+    teacher_loaded, teacher_message = load_teacher_checkpoint(teacher, ConfigSLMYOLO.TEACHER_CHECKPOINT, device)
+    log_to_file(teacher_message)
+    if not teacher_loaded:
+        raise FileNotFoundError(
+            f"Unable to start SLM training without a trained teacher checkpoint: {ConfigSLMYOLO.TEACHER_CHECKPOINT}"
+        )
     for p in teacher.parameters():
         p.requires_grad = False
+    teacher.eval()
     
     # 初始化光学学生网络
     optical_student = OpticalStudent().to(device)
@@ -1048,6 +1228,7 @@ def train():
         total_loss = 0
         teacher_optical_model.train()
         optical_yolo_model.train()
+        teacher_optical_model.teacher.eval()
         
         for batch_idx, (images, targets) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
             images = images.to(device)

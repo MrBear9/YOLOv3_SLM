@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from torchvision.ops import nms
 import os
 import cv2
 import numpy as np
@@ -51,17 +52,396 @@ def log_to_file(message, also_print=True):
     if also_print:
         print(log_message)
 
-# 从optical_teacher.py导入其他必要的类
-from optical_teacher import (
-    SLMLayer,
-    ASMPropagation,
-    OpticalStudent,
-    ConvTeacher,
-    LightConvBlock,
-    YOLOLightHead,
-    enhance_feature_for_display,
-    decode_detections
-)
+# =========================================================
+# 光学层（相位 + 振幅调制）
+# =========================================================
+class SLMLayer(nn.Module):
+    def __init__(self, resolution, mode="phase"):
+        super().__init__()
+        assert mode in ["phase", "amp_phase"]
+        self.mode = mode
+
+        self.phase_raw = nn.Parameter(
+            torch.rand(1, 1, *resolution) * 2 * np.pi
+        )
+
+        if self.mode == "amp_phase":
+            self.amp_raw = nn.Parameter(
+                torch.rand(1, 1, *resolution)
+            )
+        else:
+            self.register_parameter("amp_raw", None)
+
+    def forward(self, field):
+        phase = torch.remainder(self.phase_raw, 2 * np.pi)
+        mod = torch.exp(1j * phase)
+
+        if self.mode == "amp_phase":
+            amp = torch.sigmoid(self.amp_raw)
+            mod = mod * amp
+
+        return field * mod
+
+class ASMPropagation(nn.Module):
+    def __init__(self, distance, wavelength=None, pixel_size=None, resolution=None):
+        super().__init__()
+        if wavelength is None:
+            wavelength = Config.WAVELENGTH
+        if pixel_size is None:
+            pixel_size = Config.PIXEL_SIZE
+        if resolution is None:
+            resolution = Config.RESOLUTION
+        fx = torch.fft.fftfreq(resolution[0], pixel_size)
+        fy = torch.fft.fftfreq(resolution[1], pixel_size)
+        FX, FY = torch.meshgrid(fx, fy, indexing='ij')
+        k2 = 1 / wavelength**2 - FX**2 - FY**2
+        k2 = torch.clamp(k2, min=0)
+        H = torch.exp(1j * 2 * np.pi * distance * torch.sqrt(k2))
+        self.register_buffer("H", H)
+
+    def forward(self, field):
+        return torch.fft.ifft2(torch.fft.fft2(field) * self.H)
+
+# =========================================================
+# 学生网络（多层光学传播）
+# =========================================================
+class OpticalStudent(nn.Module):
+    def __init__(self, resolution=None, mode=None):
+        super().__init__()
+        if resolution is None:
+            resolution = Config.RESOLUTION
+        if mode is None:
+            mode = Config.SLM_MODE
+        self.slm1 = SLMLayer(resolution, mode)
+        self.prop1 = ASMPropagation(Config.PROP_DISTANCE_1)
+        self.slm2 = SLMLayer(resolution, mode)
+        self.prop2 = ASMPropagation(Config.PROP_DISTANCE_2)
+        self.enable_norm = False
+
+    def forward(self, intensity):
+        amp = torch.sqrt(intensity.clamp(min=0)+1e-8)
+        field = torch.complex(amp, torch.zeros_like(amp))
+        field = self.prop1(self.slm1(field))
+        field = self.prop2(self.slm2(field))
+        out = torch.abs(field)**2
+        if self.enable_norm:
+            out = out / (out.mean(dim=[2,3], keepdim=True) + 1e-6)
+        return out
+
+# =========================================================
+# 教师网络（卷积-仿YOLOV3）
+# =========================================================
+class ConvTeacher(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.SiLU()
+        )
+
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.SiLU()
+        )
+
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU()
+        )
+
+        self.refine = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+            nn.Conv2d(64, 32, kernel_size=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.SiLU()
+        )
+
+        self.project = nn.Conv2d(32, 1, kernel_size=1, bias=False)
+
+    def forward(self, x):
+        if x.shape[1] > 1:
+            x = x.mean(dim=1, keepdim=True)
+
+        f = self.conv1(x)
+        f = self.conv2(f)
+        f = self.conv3(f)
+        f = self.refine(f)
+        f = self.project(f)
+        f = torch.abs(f)
+        f = F.interpolate(
+            f, size=x.shape[-2:], mode="bilinear", align_corners=False
+        )
+        return torch.sigmoid(f)
+
+# =========================================================
+# 轻量化卷积块
+# =========================================================
+class LightConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
+        super(LightConvBlock, self).__init__()
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size, stride, padding, groups=in_channels, bias=False)
+        self.pointwise = nn.Conv2d(in_channels, out_channels, 1, 1, 0, bias=False)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        x = self.bn(x)
+        x = self.act(x)
+        return x
+
+# =========================================================
+# 轻量化检测头
+# =========================================================
+class YOLOLightHead(nn.Module):
+    def __init__(self, in_channels=1, out_channels=27):
+        super(YOLOLightHead, self).__init__()
+        base_ch = 32
+
+        self.init_conv = LightConvBlock(in_channels, base_ch, kernel_size=3, stride=1)
+
+        self.down_to_p5 = nn.Sequential(
+            LightConvBlock(base_ch, base_ch * 2, stride=2),
+            LightConvBlock(base_ch * 2, base_ch * 4, stride=2),
+            LightConvBlock(base_ch * 4, base_ch * 8, stride=2),
+            LightConvBlock(base_ch * 8, base_ch * 8, stride=2),
+            LightConvBlock(base_ch * 8, base_ch * 8, stride=2)
+        )
+
+        self.up_p5_to_p4 = nn.Upsample(scale_factor=2, mode='nearest')
+        self.fuse_p4 = LightConvBlock(base_ch * 8 + base_ch * 8, base_ch * 4)
+
+        self.up_p4_to_p3 = nn.Upsample(scale_factor=2, mode='nearest')
+        self.fuse_p3 = LightConvBlock(base_ch * 4 + base_ch * 8, base_ch * 2)
+
+        self.head_p5 = nn.Conv2d(base_ch * 8, out_channels, 1)
+        self.head_p4 = nn.Conv2d(base_ch * 4, out_channels, 1)
+        self.head_p3 = nn.Conv2d(base_ch * 2, out_channels, 1)
+
+    def forward(self, x):
+        x_init = self.init_conv(x)
+
+        x320 = self.down_to_p5[0](x_init)
+        x160 = self.down_to_p5[1](x320)
+        x80 = self.down_to_p5[2](x160)
+        x40 = self.down_to_p5[3](x80)
+        p5 = self.down_to_p5[4](x40)
+
+        p5_up = self.up_p5_to_p4(p5)
+        p4_fuse = torch.cat([p5_up, x40], dim=1)
+        p4 = self.fuse_p4(p4_fuse)
+
+        p4_up = self.up_p4_to_p3(p4)
+        p3_fuse = torch.cat([p4_up, x80], dim=1)
+        p3 = self.fuse_p3(p3_fuse)
+
+        p5_out = self.head_p5(p5)
+        p4_out = self.head_p4(p4)
+        p3_out = self.head_p3(p3)
+
+        return p3_out, p4_out, p5_out
+
+# =========================================================
+# 辅助函数
+# =========================================================
+def enhance_feature_for_display(feature_map):
+    feature_map = np.asarray(feature_map, dtype=np.float32)
+    low = np.percentile(feature_map, 2)
+    high = np.percentile(feature_map, 98)
+    if high - low < 1e-6:
+        return np.zeros_like(feature_map)
+    
+    feature_map = np.clip((feature_map - low) / (high - low), 0.0, 1.0)
+    return np.power(feature_map, 0.8)
+
+def xywh_to_xyxy(boxes):
+    half_w = boxes[:, 2] / 2
+    half_h = boxes[:, 3] / 2
+    return torch.stack([
+        boxes[:, 0] - half_w,
+        boxes[:, 1] - half_h,
+        boxes[:, 0] + half_w,
+        boxes[:, 1] + half_h
+    ], dim=1)
+
+def apply_classwise_nms(detections, nms_thresh, max_det):
+    if len(detections) == 0:
+        return np.zeros((0, 6), dtype=np.float32)
+
+    det_tensor = torch.as_tensor(detections, dtype=torch.float32)
+    boxes_xyxy = xywh_to_xyxy(det_tensor[:, :4])
+    scores = det_tensor[:, 4]
+    class_ids = det_tensor[:, 5]
+    kept = []
+
+    for cls_id in class_ids.unique(sorted=False):
+        cls_mask = class_ids == cls_id
+        keep_indices = nms(boxes_xyxy[cls_mask], scores[cls_mask], nms_thresh)
+        kept.append(det_tensor[cls_mask][keep_indices])
+
+    if len(kept) == 0:
+        return np.zeros((0, 6), dtype=np.float32)
+
+    det_tensor = torch.cat(kept, dim=0)
+    det_tensor = det_tensor[det_tensor[:, 4].argsort(descending=True)]
+    return det_tensor[:max_det].cpu().numpy()
+
+def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, img_size=None):
+    """
+    解码YOLO检测结果，返回边界框坐标、置信度和类别ID
+    
+    参数:
+        preds: 预测结果列表 [p3, p4, p5]
+        conf_thresh: 置信度阈值
+        nms_thresh: NMS阈值
+        max_det: 最大检测数量
+        img_size: 图像尺寸
+    
+    返回:
+        detections: 每个样本的检测结果列表，每个检测为 [x_center, y_center, w, h, conf, cls_id]
+    """
+    if conf_thresh is None:
+        conf_thresh = Config.CONF_THRESH
+    if nms_thresh is None:
+        nms_thresh = Config.NMS_THRESH
+    if max_det is None:
+        max_det = Config.MAX_DET
+    if img_size is None:
+        img_size = Config.IMG_SIZE
+    
+    batch_size = preds[0].shape[0]
+    detections = [[] for _ in range(batch_size)]
+    strides = [8, 16, 32]
+    anchors = Config.ANCHORS
+    
+    for i, pred in enumerate(preds):
+        grid_h, grid_w = pred.shape[2], pred.shape[3]
+        stride = strides[i]
+        anchor_set = anchors[i]
+        
+        # 重塑预测为 (batch_size, grid_h, grid_w, 3, 5+num_classes)
+        pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
+        
+        # 应用sigmoid激活函数
+        obj_conf = torch.sigmoid(pred[..., 4])  # 目标置信度
+        cls_conf = torch.sigmoid(pred[..., 5:])  # 类别置信度
+        bbox_pred = pred[..., :4]  # 边界框预测 (tx, ty, tw, th)
+        
+        for b in range(batch_size):
+            for gh in range(grid_h):
+                for gw in range(grid_w):
+                    for a in range(3):
+                        # 获取目标置信度
+                        obj_score = obj_conf[b, gh, gw, a].item()
+                        if obj_score < conf_thresh:
+                            continue
+                        
+                        # 获取类别置信度和类别ID
+                        cls_scores = cls_conf[b, gh, gw, a]
+                        cls_score, cls_id = cls_scores.max(dim=-1)
+                        final_conf = obj_score * cls_score.item()
+                        
+                        if final_conf < conf_thresh:
+                            continue
+                        
+                        # 解码边界框坐标 (YOLO格式)
+                        tx, ty, tw, th = bbox_pred[b, gh, gw, a]
+                        
+                        # 转换为绝对坐标
+                        x_center = (gw + torch.sigmoid(tx).item()) * stride
+                        y_center = (gh + torch.sigmoid(ty).item()) * stride
+                        
+                        # 解码宽度和高度
+                        anchor_w, anchor_h = anchor_set[a]
+                        w = anchor_w * torch.exp(torch.clamp(tw, min=-8.0, max=8.0)).item()
+                        h = anchor_h * torch.exp(torch.clamp(th, min=-8.0, max=8.0)).item()
+                        
+                        # 限制边界框在图像范围内
+                        x_center = max(0, min(x_center, img_size - 1))
+                        y_center = max(0, min(y_center, img_size - 1))
+                        w = max(1, min(w, img_size))
+                        h = max(1, min(h, img_size))
+                        
+                        detections[b].append([x_center, y_center, w, h, final_conf, cls_id.item()])
+    
+    # 按置信度排序并限制最大检测数量
+    for b in range(batch_size):
+        if len(detections[b]) > 0:
+            detections[b] = np.array(detections[b])
+            # 按置信度降序排序
+            sorted_indices = detections[b][:, 4].argsort()[::-1]
+            detections[b] = detections[b][sorted_indices]
+            # 限制最大检测数量
+            if len(detections[b]) > max_det:
+                detections[b] = detections[b][:max_det]
+    
+    return detections
+
+def decode_detections_fixed(preds, conf_thresh=None, nms_thresh=None, max_det=None, img_size=None):
+    if conf_thresh is None:
+        conf_thresh = Config.CONF_THRESH
+    if nms_thresh is None:
+        nms_thresh = Config.NMS_THRESH
+    if max_det is None:
+        max_det = Config.MAX_DET
+    if img_size is None:
+        img_size = Config.IMG_SIZE
+
+    batch_size = preds[0].shape[0]
+    detections = [[] for _ in range(batch_size)]
+
+    for i, pred in enumerate(preds):
+        grid_h, grid_w = pred.shape[2], pred.shape[3]
+        stride = Config.STRIDES[i]
+        anchor_set = Config.ANCHORS[i]
+        pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
+
+        obj_conf = torch.sigmoid(pred[..., 4])
+        cls_conf = torch.sigmoid(pred[..., 5:])
+        bbox_pred = pred[..., :4]
+
+        for b in range(batch_size):
+            for gh in range(grid_h):
+                for gw in range(grid_w):
+                    for a in range(3):
+                        obj_score = obj_conf[b, gh, gw, a].item()
+                        if obj_score < conf_thresh:
+                            continue
+
+                        cls_scores = cls_conf[b, gh, gw, a]
+                        cls_score, cls_id = cls_scores.max(dim=-1)
+                        final_conf = obj_score * cls_score.item()
+                        if final_conf < conf_thresh:
+                            continue
+
+                        tx, ty, tw, th = bbox_pred[b, gh, gw, a]
+                        x_center = (gw + torch.sigmoid(tx).item()) * stride
+                        y_center = (gh + torch.sigmoid(ty).item()) * stride
+
+                        anchor_w, anchor_h = anchor_set[a]
+                        w = anchor_w * torch.exp(torch.clamp(tw, min=-8.0, max=8.0)).item()
+                        h = anchor_h * torch.exp(torch.clamp(th, min=-8.0, max=8.0)).item()
+
+                        x_center = max(0, min(x_center, img_size - 1))
+                        y_center = max(0, min(y_center, img_size - 1))
+                        w = max(1, min(w, img_size))
+                        h = max(1, min(h, img_size))
+                        detections[b].append([x_center, y_center, w, h, final_conf, cls_id.item()])
+
+    for b in range(batch_size):
+        if len(detections[b]) > 0:
+            detections[b] = apply_classwise_nms(detections[b], nms_thresh, max_det)
+
+    return detections
+
+decode_detections = decode_detections_fixed
 
 class ConfigYOLO:
     YAML_PATH = r"data\military\data.yaml"
@@ -132,6 +512,9 @@ class ConfigYOLO:
     LEARNING_RATE = 5e-4
     WEIGHT_DECAY = 1e-5
     OPTIMIZER = "Adam"
+    TEACHER_CHECKPOINT = None
+    FREEZE_TEACHER = False
+    SAVE_TEACHER_WEIGHTS = True
     
     VIS_INTERVAL = 5 # visualization interval in epochs
     
@@ -178,6 +561,76 @@ init_log_file()
 log_to_file(f"Log file path: {Config.LOG_FILE}")
 log_to_file(f"Visualization save path: {Config.LOG_ROOT_DIR.replace('\\logs', '')}")
 log_to_file(f"Class info: {Config.CLASS_NAMES}, Num classes: {Config.NUM_CLASSES}")
+
+# 记录完整的参数配置到日志文件
+def log_all_parameters():
+    """记录所有训练参数到日志文件"""
+    log_to_file("="*80)
+    log_to_file("光学教师YOLO训练参数配置")
+    log_to_file("="*80)
+    
+    log_to_file("\n【数据集参数】")
+    log_to_file(f"  YAML路径: {Config.YAML_PATH}")
+    log_to_file(f"  类别数量: {Config.NUM_CLASSES}")
+    log_to_file(f"  类别名称: {Config.CLASS_NAMES}")
+    
+    log_to_file("\n【训练参数】")
+    log_to_file(f"  设备: {Config.DEVICE}")
+    log_to_file(f"  图像尺寸: {Config.IMG_SIZE}")
+    log_to_file(f"  批次大小: {Config.BATCH_SIZE}")
+    log_to_file(f"  训练轮数: {Config.EPOCHS}")
+    
+    log_to_file("\n【损失权重配置】")
+    log_to_file(f"  基础边界框权重: {Config.BOX_WEIGHT_BASE}")
+    log_to_file(f"  基础目标性权重: {Config.OBJ_WEIGHT_BASE}")
+    log_to_file(f"  基础非目标权重: {Config.NOOBJ_WEIGHT_BASE}")
+    log_to_file(f"  基础分类权重: {Config.CLS_WEIGHT_BASE}")
+    log_to_file(f"  位置优先阶段轮数: {Config.POSITION_PHASE_EPOCHS}")
+    log_to_file(f"  平衡过渡阶段轮数: {Config.BALANCE_PHASE_EPOCHS}")
+    
+    log_to_file("\n【锚框设置】")
+    log_to_file(f"  步长: {Config.STRIDES}")
+    log_to_file(f"  P3锚框(小目标): {Config.ANCHORS[0]}")
+    log_to_file(f"  P4锚框(中目标): {Config.ANCHORS[1]}")
+    log_to_file(f"  P5锚框(大目标): {Config.ANCHORS[2]}")
+    log_to_file(f"  IOU阈值: {Config.IOU_THRESHOLD}")
+    
+    log_to_file("\n【优化器参数】")
+    log_to_file(f"  优化器: {Config.OPTIMIZER}")
+    log_to_file(f"  学习率: {Config.LEARNING_RATE}")
+    log_to_file(f"  权重衰减: {Config.WEIGHT_DECAY}")
+    
+    log_to_file("\n【检测参数】")
+    log_to_file(f"  置信度阈值: {Config.CONF_THRESH}")
+    log_to_file(f"  NMS阈值: {Config.NMS_THRESH}")
+    log_to_file(f"  最大检测数量: {Config.MAX_DET}")
+    
+    log_to_file("\n【可视化参数】")
+    log_to_file(f"  可视化间隔: {Config.VIS_INTERVAL} 轮")
+    log_to_file(f"  可视化批次大小: {Config.VIS_BATCH_SIZE}")
+    log_to_file(f"  可视化DPI: {Config.VIS_DPI}")
+    
+    log_to_file("\n【路径设置】")
+    log_to_file(f"  教师输出目录: {Config.TEACHER_OUTPUT_DIR}")
+    log_to_file(f"  日志根目录: {Config.LOG_ROOT_DIR}")
+    log_to_file(f"  日志文件: {Config.LOG_FILE}")
+    log_to_file(f"  时间戳: {Config.TIMESTAMP}")
+    
+    # 计算模型参数数量
+    teacher = ConvTeacher()
+    detector = YOLOLightHead(in_channels=1, out_channels=Config.get_detector_output_channels())
+    
+    log_to_file("\n【模型参数统计】")
+    log_to_file(f"  教师网络可训练参数: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
+    log_to_file(f"  检测头可训练参数: {sum(p.numel() for p in detector.parameters() if p.requires_grad):,}")
+    log_to_file(f"  检测头输出通道数: {Config.get_detector_output_channels()}")
+    
+    log_to_file("\n" + "="*80)
+    log_to_file("参数配置记录完成")
+    log_to_file("="*80 + "\n")
+
+# 在训练开始前记录所有参数
+log_all_parameters()
 
 class YOLODataset(Dataset):
     def __init__(self, yaml_path=None, split="train"):
@@ -351,6 +804,114 @@ class YOLOLoss(nn.Module):
         
         return total_loss
 
+def yolo_loss_forward_fixed(self, predictions, targets):
+    total_loss = 0
+    batch_size = predictions[0].shape[0]
+    prepared_scales = []
+
+    for i, pred in enumerate(predictions):
+        _, _, grid_h, grid_w = pred.shape
+        pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
+        prepared_scales.append({
+            "pred_boxes": pred[..., :4],
+            "pred_obj": pred[..., 4],
+            "pred_cls": pred[..., 5:],
+            "target_boxes": torch.zeros_like(pred[..., :4]),
+            "target_obj": torch.zeros_like(pred[..., 4]),
+            "target_cls": torch.zeros_like(pred[..., 5:]),
+            "grid_h": grid_h,
+            "grid_w": grid_w,
+            "anchors": self.anchors[i].to(pred.device)
+        })
+
+    for b in range(batch_size):
+        if len(targets[b]) == 0:
+            continue
+
+        current_targets = targets[b].to(predictions[0].device)
+        for target in current_targets:
+            cls_id = int(target[0].item())
+            tx = target[1]
+            ty = target[2]
+            tw = target[3] * Config.IMG_SIZE
+            th = target[4] * Config.IMG_SIZE
+
+            best_scale_idx = 0
+            best_anchor_idx = 0
+            best_iou = -1.0
+
+            for scale_idx, scale_data in enumerate(prepared_scales):
+                for anchor_idx in range(3):
+                    anchor_w, anchor_h = scale_data["anchors"][anchor_idx]
+                    inter = torch.minimum(tw, anchor_w) * torch.minimum(th, anchor_h)
+                    union = tw * th + anchor_w * anchor_h - inter + 1e-6
+                    iou = (inter / union).item()
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_scale_idx = scale_idx
+                        best_anchor_idx = anchor_idx
+
+            scale_data = prepared_scales[best_scale_idx]
+            gx = tx * scale_data["grid_w"]
+            gy = ty * scale_data["grid_h"]
+            grid_x = max(0, min(int(gx.item()), scale_data["grid_w"] - 1))
+            grid_y = max(0, min(int(gy.item()), scale_data["grid_h"] - 1))
+            anchor_w, anchor_h = scale_data["anchors"][best_anchor_idx]
+
+            scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 0] = gx - grid_x
+            scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 1] = gy - grid_y
+            scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 2] = torch.log(tw / anchor_w + 1e-6)
+            scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 3] = torch.log(th / anchor_h + 1e-6)
+            scale_data["target_obj"][b, grid_y, grid_x, best_anchor_idx] = 1.0
+            scale_data["target_cls"][b, grid_y, grid_x, best_anchor_idx, cls_id] = 1.0
+
+    for scale_data in prepared_scales:
+        pred_boxes = scale_data["pred_boxes"]
+        pred_obj = scale_data["pred_obj"]
+        pred_cls = scale_data["pred_cls"]
+        target_boxes = scale_data["target_boxes"]
+        target_obj = scale_data["target_obj"]
+        target_cls = scale_data["target_cls"]
+
+        obj_mask = target_obj > 0.5
+        noobj_mask = target_obj <= 0.5
+
+        if obj_mask.sum() > 0:
+            pred_xy = torch.sigmoid(pred_boxes[..., :2])
+            pred_wh = pred_boxes[..., 2:4]
+            target_xy = target_boxes[..., :2]
+            target_wh = target_boxes[..., 2:4]
+
+            xy_loss = self.mse_loss(pred_xy[obj_mask], target_xy[obj_mask])
+            wh_loss = self.mse_loss(pred_wh[obj_mask], target_wh[obj_mask])
+            box_loss = xy_loss + wh_loss
+            obj_loss = self.bce_loss(pred_obj[obj_mask], target_obj[obj_mask])
+            cls_loss = self.bce_loss(pred_cls[obj_mask], target_cls[obj_mask])
+        else:
+            box_loss = torch.tensor(0.0, device=pred_boxes.device)
+            obj_loss = torch.tensor(0.0, device=pred_boxes.device)
+            cls_loss = torch.tensor(0.0, device=pred_boxes.device)
+
+        if noobj_mask.sum() > 0:
+            noobj_loss = self.bce_loss(pred_obj[noobj_mask], target_obj[noobj_mask])
+        else:
+            noobj_loss = torch.tensor(0.0, device=pred_boxes.device)
+
+        scale_loss = (self.box_weight * box_loss +
+                     self.obj_weight * obj_loss +
+                     self.noobj_weight * noobj_loss +
+                     self.cls_weight * cls_loss)
+
+        if torch.isnan(scale_loss) or torch.isinf(scale_loss):
+            scale_loss = torch.tensor(0.0, device=pred_boxes.device)
+            print("Warning: Infinite or NaN loss value. Setting to 0.")
+
+        total_loss += scale_loss
+
+    return total_loss
+
+YOLOLoss.forward = yolo_loss_forward_fixed
+
 def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train", device=None):
     """
     保存检测结果可视化图像
@@ -497,16 +1058,76 @@ class TeacherWithDetector(nn.Module):
         detections = self.detector(features)
         return detections
 
+def extract_state_dict(checkpoint):
+    if not isinstance(checkpoint, dict):
+        return checkpoint
+
+    for key in ("teacher_state_dict", "model_state_dict", "state_dict", "model"):
+        if key in checkpoint:
+            return checkpoint[key]
+    return checkpoint
+
+def load_teacher_checkpoint(teacher, checkpoint_path, device):
+    if not checkpoint_path:
+        return False, "Teacher checkpoint: not configured"
+    if not os.path.exists(checkpoint_path):
+        return False, f"Teacher checkpoint not found: {checkpoint_path}"
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = extract_state_dict(checkpoint)
+    teacher_state = teacher.state_dict()
+    compatible_state = {}
+
+    for key, value in state_dict.items():
+        normalized_key = key[8:] if key.startswith("teacher.") else key
+        if normalized_key in teacher_state and teacher_state[normalized_key].shape == value.shape:
+            compatible_state[normalized_key] = value
+
+    if len(compatible_state) == 0:
+        return False, f"No compatible ConvTeacher weights found in: {checkpoint_path}"
+
+    teacher.load_state_dict({**teacher_state, **compatible_state}, strict=False)
+    return True, f"Loaded {len(compatible_state)} teacher tensors from: {checkpoint_path}"
+
+def load_teacher_checkpoint_safe(teacher, checkpoint_path, device):
+    if not checkpoint_path:
+        return False, "Teacher checkpoint: not configured"
+    if not os.path.exists(checkpoint_path):
+        return False, f"Teacher checkpoint not found: {checkpoint_path}"
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = extract_state_dict(checkpoint)
+    teacher_state = teacher.state_dict()
+    compatible_state = {}
+
+    for key, value in state_dict.items():
+        normalized_key = key[8:] if key.startswith("teacher.") else key
+        if normalized_key in teacher_state and teacher_state[normalized_key].shape == value.shape:
+            compatible_state[normalized_key] = value
+
+    if len(compatible_state) == 0:
+        return False, f"No compatible ConvTeacher weights found in: {checkpoint_path}"
+
+    teacher.load_state_dict({**teacher_state, **compatible_state}, strict=False)
+    return True, f"Loaded {len(compatible_state)} teacher tensors from: {checkpoint_path}"
+
 def train():
     device = Config.DEVICE
     log_to_file(f"使用设备: {device}")
     
     log_to_file("初始化教师网络（ConvTeacher）...")
     teacher = ConvTeacher()
-    
+    loaded_teacher, teacher_message = load_teacher_checkpoint_safe(teacher, Config.TEACHER_CHECKPOINT, device)
+    log_to_file(teacher_message)
+
+    freeze_teacher = Config.FREEZE_TEACHER and loaded_teacher
+    if Config.FREEZE_TEACHER and not loaded_teacher:
+        log_to_file("Teacher checkpoint not found, not freezing teacher.")
+
     for p in teacher.parameters():
-        p.requires_grad = False
-    log_to_file("教师网络参数已冻结")
+        p.requires_grad = not freeze_teacher
+    log_to_file(f"Teacher status: {'frozen' if freeze_teacher else 'trainable'}")
+    log_to_file("Teacher parameter setup applied") # 应用教师参数设置
     
     log_to_file("初始化检测头（YOLOLightHead）...")
     detector = YOLOLightHead(in_channels=1, 
@@ -516,7 +1137,7 @@ def train():
     model = TeacherWithDetector(teacher=teacher, detector=detector).to(device)
     
     for p in model.teacher.parameters():
-        p.requires_grad = False
+        p.requires_grad = not freeze_teacher
     for p in model.detector.parameters():
         p.requires_grad = True
     
@@ -526,8 +1147,9 @@ def train():
                              shuffle=True, collate_fn=lambda x: x)
     log_to_file(f"训练集大小: {len(train_dataset)}")
     
-    optimizer = torch.optim.Adam(model.detector.parameters(), 
-                                lr=Config.LEARNING_RATE, 
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.Adam(trainable_params,
+                                lr=Config.LEARNING_RATE,
                                 weight_decay=Config.WEIGHT_DECAY)
     
     criterion = YOLOLoss(anchors=Config.ANCHORS, 
@@ -536,6 +1158,10 @@ def train():
     
     vis_dir = os.path.join(Config.TEACHER_OUTPUT_DIR, "visualizations")
     os.makedirs(vis_dir, exist_ok=True)
+    teacher_best_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "teacher_best.pth")
+    teacher_final_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "teacher_final.pth")
+    joint_best_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "teacher_detector_best.pth")
+    joint_final_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "teacher_detector_final.pth")
     
     loss_curve = []
     best_loss = float('inf')
@@ -579,6 +1205,14 @@ def train():
             best_loss = avg_loss
             best_model_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_best.pth")
             torch.save(model.detector.state_dict(), best_model_path)
+            if Config.SAVE_TEACHER_WEIGHTS:
+                torch.save(model.teacher.state_dict(), teacher_best_path)
+                torch.save({
+                    "teacher_state_dict": model.teacher.state_dict(),
+                    "detector_state_dict": model.detector.state_dict(),
+                    "epoch": epoch,
+                    "loss": best_loss,
+                }, joint_best_path)
             log_to_file(f"Epoch {epoch}: 保存最佳模型 (Loss: {best_loss:.6f})", also_print=False)
         
         if epoch % Config.VIS_INTERVAL == 0:
@@ -598,6 +1232,16 @@ def train():
 
     model_save_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_final.pth")
     torch.save(model.detector.state_dict(), model_save_path)
+    if Config.SAVE_TEACHER_WEIGHTS:
+        torch.save(model.teacher.state_dict(), teacher_final_path)
+        torch.save({
+            "teacher_state_dict": model.teacher.state_dict(),
+            "detector_state_dict": model.detector.state_dict(),
+            "epoch": Config.EPOCHS - 1,
+            "loss": loss_curve[-1] if len(loss_curve) > 0 else None,
+        }, joint_final_path)
+        log_to_file(f"Teacher best weights saved to: {teacher_best_path}")
+        log_to_file(f"Teacher final weights saved to: {teacher_final_path}")
     
     log_to_file("="*60)
     log_to_file("训练完成！")

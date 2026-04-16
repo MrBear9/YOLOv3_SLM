@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from torchvision.ops import nms
 import os
 import cv2
 import numpy as np
@@ -35,7 +36,8 @@ class Config:
     OBJ_WEIGHT = 1.0 # 目标检测损失权重（降低，避免过度关注目标存在性）
     NOOBJ_WEIGHT = 0.5 # 非目标损失权重（降低，减少背景误检的影响）
     CLS_WEIGHT = 0.15 # 分类损失权重
-    OPTICAL_CONSTRAINT_WEIGHT = 0.05  # 光学约束损失权重（降低，避免过度约束）
+    PHASE1_TEACHER_WEIGHT = 1.0  # 阶段1只做教师约束时的损失权重
+    TEACHER_CONSTRAINT_WEIGHT = 0.05  # 阶段2联合训练时的教师约束权重
     
     # 差异化学习率设置
     OPTICAL_LR_RATIO = 0.1  # 相位层学习率比例 10%（相对于主学习率），相位层对学习率敏感度较低
@@ -47,9 +49,9 @@ class Config:
     # 锚框设置（针对军事目标优化）
     STRIDES = [8, 16, 32]
     ANCHORS = [
-        [[10,13], [16,30], [33,23]],   # P3: 小目标（军人）
-        [[30,61], [62,45], [59,119]],  # P4: 中目标（坦克、战机）
-        [[116,90], [156,198], [373,326]] # P5: 大目标（军舰）
+        [[26,23], [47,49], [100,67]],   # P3: 小目标 / 较小目标
+        [[103,169], [203,107], [351,177]],  # P4: 中目标 / 长条目标
+        [[241,354], [534,299], [568,528]]  # P5: 大目标 / 超大目标（军舰等）
     ]
     
     # 路径设置
@@ -60,11 +62,15 @@ class Config:
     SAVE_DIR = os.path.join(OPTICAL_YOLO_OUTPUT_DIR, "models")
     LOG_DIR = os.path.join(OPTICAL_YOLO_OUTPUT_DIR, "logs")
     VISUALIZATION_DIR = os.path.join(OPTICAL_YOLO_OUTPUT_DIR, "visualizations")
+    TEACHER_CHECKPOINT = r"output\OpticalTeacherYOLO\teacher_best.pth"
     
     # 训练策略
     ENABLE_NORM_AFTER_EPOCH = 0  # 从训练开始就保持光学输出尺度稳定
-    ENABLE_CONSTRAINT_AFTER_EPOCH = 10  # 检测头先学基础表征，再逐步加入光学约束
-    CONSTRAINT_WARMUP_EPOCHS = 10  # 光学约束线性预热，避免验证损失突然抬升
+    PHASE1_EPOCHS = 10  # 阶段1：教师约束光学层
+    PHASE2_EPOCHS = 90  # 阶段2：教师约束 + 光学层 + 检测头
+    TEACHER_WARMUP_EPOCHS = 10  # 阶段2中教师约束的线性预热
+    TEACHER_INIT_MODE = "checkpoint_or_random"  # checkpoint | checkpoint_or_random | random
+    FREEZE_TEACHER = True
     VISUALIZE_EVERY = 5  # 每5轮可视化一次
     SAVE_EVERY = 10  # 每10轮保存一次模型
     EARLY_STOPPING_PATIENCE = 12  # 早停耐心轮数，12轮没有改进则早停
@@ -78,6 +84,14 @@ class Config:
     
     # 批次选择设置
     VISUALIZE_BATCH_INDEX = -1  # 可视化批次索引，-1表示随机选择，0-N表示指定批次
+
+    @classmethod
+    def get_current_phase(cls, epoch):
+        if epoch < cls.PHASE1_EPOCHS:
+            return "phase1", "教师约束光学层"
+        if epoch < cls.PHASE1_EPOCHS + cls.PHASE2_EPOCHS:
+            return "phase2", "教师约束 + 光学层 + 检测头"
+        return "phase3", "光学层 + 检测头"
 
 # =========================================================
 # 数据集类
@@ -174,6 +188,8 @@ class OpticalYOLOv3Trainer:
         optical_params = []
         other_params = []
         for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
             if 'phase_raw' in name or 'amp_raw' in name:
                 optical_params.append(param)
             else:
@@ -232,7 +248,11 @@ class OpticalYOLOv3Trainer:
             num_classes=self.num_classes,
             img_size=self.config.IMG_SIZE,
             optical_mode="phase",  # 使用纯相位调制
-            enable_constraint=False,  # 约束损失按训练策略延后启用
+            enable_constraint=True,
+            teacher_checkpoint=self.config.TEACHER_CHECKPOINT,
+            teacher_init_mode=self.config.TEACHER_INIT_MODE,
+            freeze_teacher=self.config.FREEZE_TEACHER,
+            teacher_device=self.device,
             slm1_vortex_charge=self.config.SLM1_VORTEX_CHARGE if self.config.USE_VORTEX_INIT else 0,
             slm2_vortex_charge=self.config.SLM2_VORTEX_CHARGE if self.config.USE_VORTEX_INIT else 0,
             vortex_perturbation=self.config.VORTEX_PERTURBATION
@@ -248,6 +268,7 @@ class OpticalYOLOv3Trainer:
                 f"SLM2 charge={self.config.SLM2_VORTEX_CHARGE}, "
                 f"perturbation={self.config.VORTEX_PERTURBATION}"
             )
+        print(f"Teacher 配置: {model.teacher_status_message}")
         
         return model
 
@@ -297,14 +318,37 @@ class OpticalYOLOv3Trainer:
         
         return imgs, target_tensor
 
-    def get_constraint_weight(self, epoch):
-        """线性预热光学约束，避免在某一轮突然改变优化目标。"""
-        if epoch < self.config.ENABLE_CONSTRAINT_AFTER_EPOCH:
-            return 0.0
+    def set_phase_mode(self, phase):
+        """按阶段切换 teacher 约束和检测头训练状态。"""
+        enable_teacher_constraint = phase in {"phase1", "phase2"}
+        detector_trainable = phase != "phase1"
 
-        warmup_epochs = max(1, self.config.CONSTRAINT_WARMUP_EPOCHS)
-        progress = min(1.0, (epoch - self.config.ENABLE_CONSTRAINT_AFTER_EPOCH + 1) / warmup_epochs)
-        return self.config.OPTICAL_CONSTRAINT_WEIGHT * progress
+        self.model.enable_constraint_loss(enable_teacher_constraint)
+        for param in self.model.detector.parameters():
+            param.requires_grad = detector_trainable
+        if detector_trainable:
+            self.model.detector.train()
+        else:
+            self.model.detector.eval()
+
+        for param in self.model.optical_frontend.parameters():
+            param.requires_grad = True
+
+        if hasattr(self.model, "teacher") and self.config.FREEZE_TEACHER:
+            self.model.teacher.eval()
+
+    def get_constraint_weight(self, epoch, phase):
+        """阶段1使用纯教师约束，阶段2使用带预热的联合约束。"""
+        if phase == "phase1":
+            return self.config.PHASE1_TEACHER_WEIGHT
+
+        if phase == "phase2":
+            warmup_epochs = max(1, self.config.TEACHER_WARMUP_EPOCHS)
+            phase_epoch = epoch - self.config.PHASE1_EPOCHS
+            progress = min(1.0, (phase_epoch + 1) / warmup_epochs)
+            return self.config.TEACHER_CONSTRAINT_WEIGHT * progress
+
+        return 0.0
 
     def normalize_feature_map(self, feature_map):
         """按样本做min-max归一化，使光学约束与可视化都落在稳定范围。"""
@@ -334,12 +378,14 @@ class OpticalYOLOv3Trainer:
 
     def train_epoch(self, train_loader, epoch):
         """训练一个epoch"""
+        phase, _ = self.config.get_current_phase(epoch)
         self.model.train()
+        self.set_phase_mode(phase)
         total_loss = 0.0
         num_batches = len(train_loader)
         
         # 进度条
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{self.config.EPOCHS}")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{self.config.EPOCHS} [{phase}]")
         
         for batch_idx, (imgs, targets) in enumerate(pbar):
             imgs = imgs.to(self.device, non_blocking=True)
@@ -350,22 +396,25 @@ class OpticalYOLOv3Trainer:
             p3, p4, p5, optical_feature, constraint_target = self.model(imgs)
             preds = [p3, p4, p5]
             
-            # 多尺度损失计算
-            loss = 0
-            for i, pred in enumerate(preds):
-                stride = self.config.STRIDES[i]
-                anchors = self.config.ANCHORS[i]
-                gt = build_target(targets, anchors, stride, self.num_classes, 
-                                 self.config.IMG_SIZE, self.device)
-                total_l, box_l, obj_l, cls_l = self.criterion(pred, gt, batch_size)
-                loss += total_l
+            detection_loss = torch.zeros((), device=self.device)
+            if phase != "phase1":
+                for i, pred in enumerate(preds):
+                    stride = self.config.STRIDES[i]
+                    anchors = self.config.ANCHORS[i]
+                    gt = build_target(targets, anchors, stride, self.num_classes, self.config.IMG_SIZE, self.device)
+                    total_l, _, _, _ = self.criterion(pred, gt, batch_size)
+                    detection_loss = detection_loss + total_l
             
-            # 光学约束损失（如果启用）
-            constraint_weight = self.get_constraint_weight(epoch)
+            teacher_constraint_loss = torch.zeros((), device=self.device)
+            constraint_weight = self.get_constraint_weight(epoch, phase)
             if constraint_target is not None and constraint_weight > 0:
                 normalized_optical = self.normalize_feature_map(optical_feature)
-                optical_constraint_loss = self.optical_constraint_criterion(normalized_optical, constraint_target)
-                loss += constraint_weight * optical_constraint_loss
+                teacher_constraint_loss = self.optical_constraint_criterion(normalized_optical, constraint_target)
+
+            if phase == "phase1":
+                loss = constraint_weight * teacher_constraint_loss
+            else:
+                loss = detection_loss + constraint_weight * teacher_constraint_loss
             
             # 反向传播
             self.optimizer.zero_grad()
@@ -377,13 +426,15 @@ class OpticalYOLOv3Trainer:
             # 更新进度条
             postfix = {
                 "loss": f"{loss.item():.4f}",
-                "avg_loss": f"{total_loss/(batch_idx+1):.4f}"
+                "avg_loss": f"{total_loss/(batch_idx+1):.4f}",
+                "phase": phase,
             }
             
-            # 显示光学约束损失（如果存在）
-            if constraint_target is not None and constraint_weight > 0:
-                postfix["optical_constraint"] = f"{optical_constraint_loss.item():.4f}"
-                postfix["constraint_w"] = f"{constraint_weight:.3f}"
+            if phase != "phase1":
+                postfix["det"] = f"{detection_loss.item():.4f}"
+            if constraint_weight > 0:
+                postfix["teacher"] = f"{teacher_constraint_loss.item():.4f}"
+                postfix["teacher_w"] = f"{constraint_weight:.3f}"
             
             pbar.set_postfix(postfix)
         
@@ -394,7 +445,9 @@ class OpticalYOLOv3Trainer:
 
     def validate(self, val_loader, epoch):
         """验证模型"""
+        phase, _ = self.config.get_current_phase(epoch)
         self.model.eval()
+        self.set_phase_mode(phase)
         total_loss = 0.0
         num_batches = len(val_loader)
         
@@ -408,22 +461,25 @@ class OpticalYOLOv3Trainer:
                 p3, p4, p5, optical_feature, constraint_target = self.model(imgs)
                 preds = [p3, p4, p5]
                 
-                # 多尺度损失计算
-                loss = 0
-                for i, pred in enumerate(preds):
-                    stride = self.config.STRIDES[i]
-                    anchors = self.config.ANCHORS[i]
-                    gt = build_target(targets, anchors, stride, self.num_classes, 
-                                     self.config.IMG_SIZE, self.device)
-                    total_l, _, _, _ = self.criterion(pred, gt, batch_size)
-                    loss += total_l
+                detection_loss = torch.zeros((), device=self.device)
+                if phase != "phase1":
+                    for i, pred in enumerate(preds):
+                        stride = self.config.STRIDES[i]
+                        anchors = self.config.ANCHORS[i]
+                        gt = build_target(targets, anchors, stride, self.num_classes, self.config.IMG_SIZE, self.device)
+                        total_l, _, _, _ = self.criterion(pred, gt, batch_size)
+                        detection_loss = detection_loss + total_l
                 
-                # 光学约束损失（如果启用）
-                constraint_weight = self.get_constraint_weight(epoch)
+                teacher_constraint_loss = torch.zeros((), device=self.device)
+                constraint_weight = self.get_constraint_weight(epoch, phase)
                 if constraint_target is not None and constraint_weight > 0:
                     normalized_optical = self.normalize_feature_map(optical_feature)
-                    optical_constraint_loss = self.optical_constraint_criterion(normalized_optical, constraint_target)
-                    loss += constraint_weight * optical_constraint_loss
+                    teacher_constraint_loss = self.optical_constraint_criterion(normalized_optical, constraint_target)
+
+                if phase == "phase1":
+                    loss = constraint_weight * teacher_constraint_loss
+                else:
+                    loss = detection_loss + constraint_weight * teacher_constraint_loss
                 
                 total_loss += loss.item()
         
@@ -444,6 +500,7 @@ class OpticalYOLOv3Trainer:
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
             'config': self.config.__dict__,
+            'teacher_status_message': getattr(self.model, 'teacher_status_message', ''),
             'class_names': self.class_names,
             'num_classes': self.num_classes
         }
@@ -505,14 +562,14 @@ class OpticalYOLOv3Trainer:
                                 )
                                 width = float(
                                     torch.clamp(
-                                        torch.exp(torch.clamp(bw, min=-4.0, max=4.0)) * anchor_w,
+                                        torch.exp(torch.clamp(bw, min=-8.0, max=8.0)) * anchor_w,
                                         1,
                                         self.config.IMG_SIZE
                                     ).item()
                                 )
                                 height = float(
                                     torch.clamp(
-                                        torch.exp(torch.clamp(bh, min=-4.0, max=4.0)) * anchor_h,
+                                        torch.exp(torch.clamp(bh, min=-8.0, max=8.0)) * anchor_h,
                                         1,
                                         self.config.IMG_SIZE
                                     ).item()
@@ -524,45 +581,48 @@ class OpticalYOLOv3Trainer:
         for batch_detections in detections:
             if batch_detections:
                 batch_detections = torch.tensor(batch_detections, dtype=torch.float32)
-                keep = self.non_max_suppression(batch_detections, nms_thresh)
+                keep = self.non_max_suppression(batch_detections, nms_thresh, max_det=max_det)
                 kept = batch_detections[keep]
-                if kept.shape[0] > max_det:
-                    kept = kept[torch.argsort(kept[:, 4], descending=True)[:max_det]]
                 final_detections.append(kept.tolist())
             else:
                 final_detections.append([])
         
         return final_detections
     
-    def non_max_suppression(self, detections, nms_thresh):
-        """非极大值抑制"""
+    def xywh_to_xyxy(self, boxes):
+        half_w = boxes[:, 2] / 2
+        half_h = boxes[:, 3] / 2
+        return torch.stack([
+            boxes[:, 0] - half_w,
+            boxes[:, 1] - half_h,
+            boxes[:, 0] + half_w,
+            boxes[:, 1] + half_h
+        ], dim=1)
+
+    def non_max_suppression(self, detections, nms_thresh, max_det=None):
+        """按类别执行 NMS，避免不同类别之间互相抑制。"""
         if len(detections) == 0:
             return []
-        
-        # 按置信度排序
-        confidences = detections[:, 4]
-        sorted_indices = torch.argsort(confidences, descending=True)
-        
+
+        boxes_xyxy = self.xywh_to_xyxy(detections[:, :4])
+        scores = detections[:, 4]
+        class_ids = detections[:, 5]
         keep = []
-        while len(sorted_indices) > 0:
-            # 取置信度最高的检测
-            current_idx = sorted_indices[0]
-            keep.append(current_idx.item())
-            
-            if len(sorted_indices) == 1:
-                break
-            
-            # 计算与剩余检测的IoU
-            current_box = detections[current_idx, :4]
-            other_boxes = detections[sorted_indices[1:], :4]
-            
-            ious = self.calculate_iou(current_box.unsqueeze(0), other_boxes)
-            
-            # 移除重叠度高的检测
-            keep_indices = torch.where(ious < nms_thresh)[0]
-            sorted_indices = sorted_indices[keep_indices + 1]
-        
-        return keep
+
+        for cls_id in class_ids.unique(sorted=False):
+            cls_mask = class_ids == cls_id
+            cls_indices = torch.where(cls_mask)[0]
+            cls_keep = nms(boxes_xyxy[cls_mask], scores[cls_mask], nms_thresh)
+            keep.append(cls_indices[cls_keep])
+
+        if not keep:
+            return []
+
+        keep = torch.cat(keep)
+        keep = keep[scores[keep].argsort(descending=True)]
+        if max_det is not None:
+            keep = keep[:max_det]
+        return keep.tolist()
     
     def calculate_iou(self, box1, box2):
         """计算IoU"""
@@ -712,7 +772,7 @@ class OpticalYOLOv3Trainer:
         return precision, recall, f1_score
 
     def visualize_results(self, dataloader, epoch):
-        """可视化训练结果 - 包含边界框、类别标签和置信度"""
+        """四列可视化：输入+GT、光学特征、教师约束、输出预测。"""
         self.model.eval()
         
         # 获取指定批次的数据
@@ -737,7 +797,6 @@ class OpticalYOLOv3Trainer:
         with torch.no_grad():
             p3, p4, p5, optical_feat, constraint_target = self.model(imgs.to(self.device))
             
-            # 解码检测结果（添加置信度显示）
             detections = self.decode_detections(
                 [p3, p4, p5],
                 self.config.VIS_CONF_THRESH,
@@ -745,60 +804,37 @@ class OpticalYOLOv3Trainer:
                 max_det=self.config.VIS_MAX_DETECTIONS
             )
         
-        # 创建可视化（根据是否启用约束调整布局）
         num_rows = min(4, imgs.shape[0])
-        if constraint_target is not None:
-            fig, axes = plt.subplots(
-                num_rows,
-                6,
-                figsize=(18, 3.6 * num_rows),
-                squeeze=False,
-                gridspec_kw={'width_ratios': [1.45, 1, 1, 1, 1, 1]}
-            )
-            optical_col, constraint_col, p3_col, p4_col, p5_col = 1, 2, 3, 4, 5
-        else:
-            fig, axes = plt.subplots(
-                num_rows,
-                5,
-                figsize=(15.5, 3.6 * num_rows),
-                squeeze=False,
-                gridspec_kw={'width_ratios': [1.45, 1, 1, 1, 1]}
-            )
-            optical_col, constraint_col, p3_col, p4_col, p5_col = 1, None, 2, 3, 4
+        fig, axes = plt.subplots(
+            num_rows,
+            4,
+            figsize=(17.5, 4.2 * num_rows),
+            squeeze=False,
+            gridspec_kw={'width_ratios': [1.45, 1, 1, 1.45]}
+        )
         
         for idx in range(num_rows):
-            # 输入图像（带边界框和标签）
             img_np = imgs[idx].permute(1, 2, 0).cpu().numpy()
-            img_np = (img_np * 255).astype(np.uint8)  # 转换为0-255范围
-            
-            # 绘制图像
+            img_np = (img_np * 255).astype(np.uint8)
+
             axes[idx, 0].imshow(img_np)
-            
-            # 绘制真实边界框和类别标签
             h, w = img_np.shape[:2]
             target_data = targets[idx]
-            
-            # 统计检测到的目标数量
-            obj_count = 0
+
+            gt_count = 0
             for t_idx in range(target_data.shape[0]):
                 target = target_data[t_idx]
-                if target[4] == 0:  # 跳过空目标
+                if target[4] <= 0:
                     continue
-                    
+
                 cls_id, cx, cy, bw, bh = target.cpu().numpy()
-                
-                # 转换为像素坐标
-                x1 = int((cx - bw/2) * w)
-                y1 = int((cy - bh/2) * h)
-                x2 = int((cx + bw/2) * w)
-                y2 = int((cy + bh/2) * h)
-                
-                # 绘制边界框
-                rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, 
-                                   fill=False, edgecolor='red', linewidth=2)
+                x1 = int((cx - bw / 2) * w)
+                y1 = int((cy - bh / 2) * h)
+                x2 = int((cx + bw / 2) * w)
+                y2 = int((cy + bh / 2) * h)
+
+                rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor='lime', linewidth=2)
                 axes[idx, 0].add_patch(rect)
-                
-                # 添加类别标签
                 class_name = self.class_names.get(int(cls_id), f"Class {int(cls_id)}")
                 text_y = max(2, y1 - 10)
                 axes[idx, 0].text(
@@ -806,13 +842,30 @@ class OpticalYOLOv3Trainer:
                     text_y,
                     class_name,
                     color='white',
-                    bbox=dict(facecolor='red', alpha=0.85, pad=1.5),
+                    bbox=dict(facecolor='green', alpha=0.85, pad=1.5),
                     fontsize=7
                 )
-                
-                obj_count += 1
-            
-            # 绘制模型检测结果（带置信度）
+                gt_count += 1
+
+            axes[idx, 0].set_title(f"Input + GT {idx + 1} ({gt_count})")
+            axes[idx, 0].axis('off')
+
+            optical_np = self.enhance_feature_for_display(
+                self.normalize_feature_map(optical_feat[idx:idx + 1]).squeeze().cpu().numpy()
+            )
+            axes[idx, 1].imshow(optical_np, cmap='inferno')
+            axes[idx, 1].set_title("Optical Feature")
+            axes[idx, 1].axis('off')
+
+            if constraint_target is not None:
+                constraint_np = self.enhance_feature_for_display(constraint_target[idx].squeeze().cpu().numpy())
+            else:
+                constraint_np = np.zeros_like(optical_np)
+            axes[idx, 2].imshow(constraint_np, cmap='inferno')
+            axes[idx, 2].set_title("Teacher Constraint")
+            axes[idx, 2].axis('off')
+
+            axes[idx, 3].imshow(img_np)
             raw_detections = detections[idx] if idx < len(detections) else []
             img_detections = sorted(
                 raw_detections,
@@ -821,70 +874,27 @@ class OpticalYOLOv3Trainer:
             )[:self.config.VIS_MAX_DETECTIONS]
             for det in img_detections:
                 x, y, w, h, conf, cls_id = det[:6]
-                
-                # 转换为像素坐标（x/y为中心点）
                 x1 = int(max(0, x - w / 2))
                 y1 = int(max(0, y - h / 2))
                 x2 = int(min(self.config.IMG_SIZE, x + w / 2))
                 y2 = int(min(self.config.IMG_SIZE, y + h / 2))
-                
-                # 绘制检测框（绿色，带置信度）
-                rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1, 
-                                   fill=False, edgecolor='green', linewidth=2, linestyle='--')
-                axes[idx, 0].add_patch(rect)
-                
-                # 添加置信度标签
+
+                color = plt.cm.tab20(int(cls_id) / max(self.num_classes, 1))
+                rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, edgecolor=color, linewidth=2)
+                axes[idx, 3].add_patch(rect)
+
                 class_name_det = self.class_names.get(int(cls_id), f"Class {int(cls_id)}")
-                text_y = min(self.config.IMG_SIZE - 12, max(2, y1 + 2))
-                axes[idx, 0].text(
+                text_y = max(2, y1 - 10)
+                axes[idx, 3].text(
                     x1,
                     text_y,
                     f"{class_name_det} {conf:.2f}",
                     color='white',
-                    bbox=dict(facecolor='green', alpha=0.85, pad=1.5),
+                    bbox=dict(facecolor=color, alpha=0.85, pad=1.5),
                     fontsize=7
                 )
-            
-            axes[idx, 0].set_title(
-                f"Input {idx+1} (真实: {obj_count}, 显示检测: {len(img_detections)}/{len(raw_detections)})"
-            )
-            axes[idx, 0].axis('off')
-            
-            # 光学特征
-            optical_np = self.enhance_feature_for_display(
-                self.normalize_feature_map(optical_feat[idx:idx + 1]).squeeze().cpu().numpy()
-            )
-            im = axes[idx, optical_col].imshow(optical_np, cmap='inferno')
-            axes[idx, optical_col].set_title("Optical Feature")
-            axes[idx, optical_col].axis('off')
-            plt.colorbar(im, ax=axes[idx, optical_col], fraction=0.035, pad=0.01)
-            
-            # 光学约束目标（如果存在）
-            if constraint_target is not None:
-                constraint_np = self.enhance_feature_for_display(constraint_target[idx].squeeze().cpu().numpy())
-                im = axes[idx, constraint_col].imshow(constraint_np, cmap='inferno')
-                axes[idx, constraint_col].set_title("Constraint Target")
-                axes[idx, constraint_col].axis('off')
-                plt.colorbar(im, ax=axes[idx, constraint_col], fraction=0.035, pad=0.01)
-            
-            # 多尺度响应图：显示 obj * cls 的响应，而不是直接均值化原始logit
-            p3_np = self.enhance_feature_for_display(self.prediction_response_map(p3[idx]))
-            im = axes[idx, p3_col].imshow(p3_np, cmap='inferno', interpolation='nearest')
-            axes[idx, p3_col].set_title("P3 (80×80)")
-            axes[idx, p3_col].axis('off')
-            plt.colorbar(im, ax=axes[idx, p3_col], fraction=0.035, pad=0.01)
-            
-            p4_np = self.enhance_feature_for_display(self.prediction_response_map(p4[idx]))
-            im = axes[idx, p4_col].imshow(p4_np, cmap='inferno', interpolation='nearest')
-            axes[idx, p4_col].set_title("P4 (40×40)")
-            axes[idx, p4_col].axis('off')
-            plt.colorbar(im, ax=axes[idx, p4_col], fraction=0.035, pad=0.01)
-            
-            p5_np = self.enhance_feature_for_display(self.prediction_response_map(p5[idx]))
-            im = axes[idx, p5_col].imshow(p5_np, cmap='inferno', interpolation='nearest')
-            axes[idx, p5_col].set_title("P5 (20×20)")
-            axes[idx, p5_col].axis('off')
-            plt.colorbar(im, ax=axes[idx, p5_col], fraction=0.035, pad=0.01)
+            axes[idx, 3].set_title(f"Output + Pred {idx + 1} ({len(img_detections)})")
+            axes[idx, 3].axis('off')
         
         fig.subplots_adjust(left=0.02, right=0.99, top=0.95, bottom=0.02, wspace=0.08, hspace=0.18)
         vis_path = os.path.join(self.config.VISUALIZATION_DIR, f"visualization_epoch_{epoch+1}.png")
@@ -938,7 +948,8 @@ class OpticalYOLOv3Trainer:
             f.write(f"BOX_WEIGHT: {self.config.BOX_WEIGHT}\n")
             f.write(f"OBJ_WEIGHT: {self.config.OBJ_WEIGHT}\n")
             f.write(f"CLS_WEIGHT: {self.config.CLS_WEIGHT}\n")
-            f.write(f"OPTICAL_CONSTRAINT_WEIGHT: {self.config.OPTICAL_CONSTRAINT_WEIGHT}\n\n")
+            f.write(f"PHASE1_TEACHER_WEIGHT: {self.config.PHASE1_TEACHER_WEIGHT}\n")
+            f.write(f"TEACHER_CONSTRAINT_WEIGHT: {self.config.TEACHER_CONSTRAINT_WEIGHT}\n\n")
             
             f.write("-"*80 + "\n")
             f.write("光学设置\n")
@@ -947,6 +958,14 @@ class OpticalYOLOv3Trainer:
             f.write(f"SLM1_VORTEX_CHARGE: {self.config.SLM1_VORTEX_CHARGE}\n")
             f.write(f"SLM2_VORTEX_CHARGE: {self.config.SLM2_VORTEX_CHARGE}\n")
             f.write(f"VORTEX_PERTURBATION: {self.config.VORTEX_PERTURBATION}\n\n")
+
+            f.write("-"*80 + "\n")
+            f.write("教师设置\n")
+            f.write("-"*80 + "\n")
+            f.write(f"TEACHER_CHECKPOINT: {self.config.TEACHER_CHECKPOINT}\n")
+            f.write(f"TEACHER_INIT_MODE: {self.config.TEACHER_INIT_MODE}\n")
+            f.write(f"FREEZE_TEACHER: {self.config.FREEZE_TEACHER}\n")
+            f.write(f"TEACHER_STATUS: {getattr(self.model, 'teacher_status_message', '')}\n\n")
             
             f.write("-"*80 + "\n")
             f.write("锚框设置\n")
@@ -971,8 +990,9 @@ class OpticalYOLOv3Trainer:
             f.write("训练策略\n")
             f.write("-"*80 + "\n")
             f.write(f"ENABLE_NORM_AFTER_EPOCH: {self.config.ENABLE_NORM_AFTER_EPOCH}\n")
-            f.write(f"ENABLE_CONSTRAINT_AFTER_EPOCH: {self.config.ENABLE_CONSTRAINT_AFTER_EPOCH}\n")
-            f.write(f"CONSTRAINT_WARMUP_EPOCHS: {self.config.CONSTRAINT_WARMUP_EPOCHS}\n")
+            f.write(f"PHASE1_EPOCHS: {self.config.PHASE1_EPOCHS}\n")
+            f.write(f"PHASE2_EPOCHS: {self.config.PHASE2_EPOCHS}\n")
+            f.write(f"TEACHER_WARMUP_EPOCHS: {self.config.TEACHER_WARMUP_EPOCHS}\n")
             f.write(f"VISUALIZE_EVERY: {self.config.VISUALIZE_EVERY}\n")
             f.write(f"SAVE_EVERY: {self.config.SAVE_EVERY}\n")
             f.write(f"EARLY_STOPPING_PATIENCE: {self.config.EARLY_STOPPING_PATIENCE}\n")
@@ -1001,7 +1021,7 @@ class OpticalYOLOv3Trainer:
         
         print(f"配置参数已保存: {self.config_log_path}")
 
-    def log_training_epoch(self, epoch, train_loss, val_loss, precision, recall, f1_score, lr, constraint_weight=0.0):
+    def log_training_epoch(self, epoch, phase, train_loss, val_loss, precision, recall, f1_score, lr, constraint_weight=0.0):
         """记录每个epoch的训练日志到txt文件"""
         with open(self.training_log_path, 'a', encoding='utf-8') as f:
             if epoch == 0:
@@ -1010,10 +1030,10 @@ class OpticalYOLOv3Trainer:
                 f.write("="*80 + "\n\n")
                 f.write(f"训练开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
                 f.write("-"*80 + "\n")
-                f.write(f"{'Epoch':<8} {'Train Loss':<12} {'Val Loss':<12} {'Precision':<10} {'Recall':<10} {'F1':<10} {'LR':<12} {'Constraint W':<12}\n")
+                f.write(f"{'Epoch':<8} {'Phase':<10} {'Train Loss':<12} {'Val Loss':<12} {'Precision':<10} {'Recall':<10} {'F1':<10} {'LR':<12} {'Teacher W':<12}\n")
                 f.write("-"*80 + "\n")
             
-            f.write(f"{epoch+1:<8} {train_loss:<12.4f} {val_loss:<12.4f} {precision:<10.3f} {recall:<10.3f} {f1_score:<10.3f} {lr:<12.6f} {constraint_weight:<12.4f}\n")
+            f.write(f"{epoch+1:<8} {phase:<10} {train_loss:<12.4f} {val_loss:<12.4f} {precision:<10.3f} {recall:<10.3f} {f1_score:<10.3f} {lr:<12.6f} {constraint_weight:<12.4f}\n")
     
     def save_training_summary(self, total_time, best_epoch, best_val_loss):
         """保存训练总结到txt文件"""
@@ -1090,23 +1110,24 @@ class OpticalYOLOv3Trainer:
         torch.cuda.empty_cache()
         
         for epoch in range(self.config.EPOCHS):
+            phase, phase_desc = self.config.get_current_phase(epoch)
             print(f"\n{'='*50}")
             print(f"Epoch {epoch+1}/{self.config.EPOCHS}")
+            print(f"阶段: {phase_desc}")
             print(f"{'='*50}")
             
-            # 训练策略调整
             if epoch >= self.config.ENABLE_NORM_AFTER_EPOCH:
                 self.model.enable_normalization(True)
                 print("已启用光学输出归一化")
             else:
                 self.model.enable_normalization(False)
-            
-            # 启用光学约束（在训练稳定后）
-            if epoch >= self.config.ENABLE_CONSTRAINT_AFTER_EPOCH:
-                self.model.enable_constraint_loss(True)
-                print(f"已启用光学约束损失，当前权重: {self.get_constraint_weight(epoch):.4f}")
+
+            self.set_phase_mode(phase)
+            teacher_weight = self.get_constraint_weight(epoch, phase)
+            if phase in {"phase1", "phase2"}:
+                print(f"已启用教师约束，当前权重: {teacher_weight:.4f}")
             else:
-                self.model.enable_constraint_loss(False)
+                print("当前阶段不使用教师约束")
             
             # 训练一个epoch
             train_loss = self.train_epoch(train_loader, epoch)
@@ -1118,22 +1139,17 @@ class OpticalYOLOv3Trainer:
             self.scheduler.step(val_loss)
             current_lr = self.optimizer.param_groups[0]['lr']
             
-            # 计算检测指标（从第5轮开始）
-            if epoch >= 5:
-                # 使用完整验证集计算检测指标
+            if phase != "phase1":
                 precision, recall, f1_score = self.calculate_full_detection_metrics(val_loader)
-                
                 self.precisions.append(precision)
                 self.recalls.append(recall)
                 self.f1_scores.append(f1_score)
             else:
                 precision = recall = f1_score = 0
             
-            # 记录训练日志
-            constraint_weight = self.get_constraint_weight(epoch)
-            self.log_training_epoch(epoch, train_loss, val_loss, precision, recall, f1_score, current_lr, constraint_weight)
+            self.log_training_epoch(epoch, phase, train_loss, val_loss, precision, recall, f1_score, current_lr, teacher_weight)
             
-            if epoch < 5:
+            if phase == "phase1":
                 print(f"训练损失: {train_loss:.4f}, 验证损失: {val_loss:.4f}, 学习率: {current_lr:.6f}")
             else:
                 print(f"训练损失: {train_loss:.4f}, 验证损失: {val_loss:.4f}, "

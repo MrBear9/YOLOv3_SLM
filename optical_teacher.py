@@ -13,6 +13,37 @@ from tqdm import tqdm
 from datetime import datetime
 from PIL import Image
 
+def extract_state_dict(checkpoint):
+    if not isinstance(checkpoint, dict):
+        return checkpoint
+
+    for key in ("teacher_state_dict", "model_state_dict", "state_dict", "model"):
+        if key in checkpoint:
+            return checkpoint[key]
+    return checkpoint
+
+def load_teacher_checkpoint(teacher, checkpoint_path, device):
+    if not checkpoint_path:
+        return False, "Teacher checkpoint: not configured"
+    if not os.path.exists(checkpoint_path):
+        return False, f"Teacher checkpoint not found: {checkpoint_path}"
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = extract_state_dict(checkpoint)
+    teacher_state = teacher.state_dict()
+    compatible_state = {}
+
+    for key, value in state_dict.items():
+        normalized_key = key[8:] if key.startswith("teacher.") else key
+        if normalized_key in teacher_state and teacher_state[normalized_key].shape == value.shape:
+            compatible_state[normalized_key] = value
+
+    if len(compatible_state) == 0:
+        return False, f"No compatible ConvTeacher weights found in: {checkpoint_path}"
+
+    teacher.load_state_dict({**teacher_state, **compatible_state}, strict=False)
+    return True, f"Loaded {len(compatible_state)} teacher tensors from: {checkpoint_path}"
+
 # =========================================================
 # 读取data.yaml获取类别信息
 # =========================================================
@@ -42,6 +73,7 @@ class Config:
     
     # 输出路径配置
     TEACHER_OUTPUT_DIR = r"output\OpticalTeacher"
+    TEACHER_CHECKPOINT = r"output\OpticalTeacherYOLO\teacher_best.pth" # path to teacher checkpoint
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -737,8 +769,14 @@ def train():
     log_to_file(f"使用设备: {device}")
     
     log_to_file("初始化教师网络（ConvTeacher）...")
-    teacher = ConvTeacher()
-    
+    teacher = ConvTeacher().to(device)
+    teacher_loaded, teacher_message = load_teacher_checkpoint(teacher, Config.TEACHER_CHECKPOINT, device)
+    log_to_file(teacher_message)
+    if not teacher_loaded:
+        raise FileNotFoundError(
+            f"Unable to start optical training without a trained teacher checkpoint: {Config.TEACHER_CHECKPOINT}"
+        )
+
     for p in teacher.parameters():
         p.requires_grad = False
     log_to_file("教师网络参数已冻结")

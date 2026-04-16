@@ -1,18 +1,53 @@
+import os
+from contextlib import nullcontext
+
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-import yaml
-import os
-from torchvision import transforms
-from PIL import Image
-import matplotlib.pyplot as plt
 
-# =========================================================
-# 光学层（相位调制 + 角谱传播）
-# =========================================================
+
+def extract_state_dict(checkpoint):
+    if not isinstance(checkpoint, dict):
+        return checkpoint
+
+    for key in ("teacher_state_dict", "model_state_dict", "state_dict", "model"):
+        if key in checkpoint:
+            return checkpoint[key]
+    return checkpoint
+
+
+def load_teacher_checkpoint(teacher, checkpoint_path, device="cpu"):
+    if not checkpoint_path:
+        return False, "Teacher checkpoint: not configured"
+    if not os.path.exists(checkpoint_path):
+        return False, f"Teacher checkpoint not found: {checkpoint_path}"
+
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    state_dict = extract_state_dict(checkpoint)
+    teacher_state = teacher.state_dict()
+    compatible_state = {}
+
+    for key, value in state_dict.items():
+        normalized_key = key[8:] if key.startswith("teacher.") else key
+        if normalized_key in teacher_state and teacher_state[normalized_key].shape == value.shape:
+            compatible_state[normalized_key] = value
+
+    if len(compatible_state) == 0:
+        return False, f"No compatible ConvTeacher weights found in: {checkpoint_path}"
+
+    teacher.load_state_dict({**teacher_state, **compatible_state}, strict=False)
+    return True, f"Loaded {len(compatible_state)} teacher tensors from: {checkpoint_path}"
+
+
 class SLMLayer(nn.Module):
-    """空间光调制器层 - 相位调制"""
+    """Spatial light modulator layer with optional vortex initialization."""
+
     def __init__(self, resolution, mode="phase", vortex_charge=0, vortex_perturbation=0.1):
         super().__init__()
         assert mode in ["phase", "amp_phase"]
@@ -20,26 +55,21 @@ class SLMLayer(nn.Module):
         self.vortex_charge = vortex_charge
         self.vortex_perturbation = vortex_perturbation
 
-        # 相位参数初始化 [0, 2π]
         self.phase_raw = nn.Parameter(self._init_phase(resolution))
 
-        # 可选振幅调制
         if self.mode == "amp_phase":
-            self.amp_raw = nn.Parameter(
-                torch.rand(1, 1, *resolution)
-            )
+            self.amp_raw = nn.Parameter(torch.rand(1, 1, *resolution))
         else:
             self.register_parameter("amp_raw", None)
 
     def _init_phase(self, resolution):
-        """使用涡旋相位加小随机扰动初始化，退化场景下回落到随机相位。"""
         if self.vortex_charge == 0:
             return torch.rand(1, 1, *resolution) * 2 * np.pi
 
         height, width = resolution
         y = torch.linspace(-1.0, 1.0, height)
         x = torch.linspace(-1.0, 1.0, width)
-        yy, xx = torch.meshgrid(y, x, indexing='ij')
+        yy, xx = torch.meshgrid(y, x, indexing="ij")
 
         theta = torch.atan2(yy, xx)
         vortex_phase = self.vortex_charge * theta
@@ -49,97 +79,134 @@ class SLMLayer(nn.Module):
         return init_phase.unsqueeze(0).unsqueeze(0)
 
     def forward(self, field):
-        # 相位调制
         phase = torch.remainder(self.phase_raw, 2 * np.pi)
         mod = torch.exp(1j * phase)
 
-        # 可选振幅调制
         if self.mode == "amp_phase":
             amp = torch.sigmoid(self.amp_raw)
             mod = mod * amp
 
         return field * mod
 
+
 class ASMPropagation(nn.Module):
-    """角谱传播模型"""
+    """Angular spectrum propagation."""
+
     def __init__(self, distance, wavelength, pixel_size, resolution):
         super().__init__()
-        # 计算频域传递函数
         fx = torch.fft.fftfreq(resolution[0], pixel_size)
         fy = torch.fft.fftfreq(resolution[1], pixel_size)
-        FX, FY = torch.meshgrid(fx, fy, indexing='ij')
+        FX, FY = torch.meshgrid(fx, fy, indexing="ij")
         k2 = 1 / wavelength**2 - FX**2 - FY**2
         k2 = torch.clamp(k2, min=0)
         H = torch.exp(1j * 2 * np.pi * distance * torch.sqrt(k2))
         self.register_buffer("H", H)
 
     def forward(self, field):
-        # 傅里叶光学传播：FFT → 频域相乘 → IFFT
         return torch.fft.ifft2(torch.fft.fft2(field) * self.H)
 
-# =========================================================
-# 光学前端（两层相位调制）
-# =========================================================
+
+class ConvTeacher(nn.Module):
+    """Teacher network that generates a dense constraint map."""
+
+    def __init__(self):
+        super().__init__()
+
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.SiLU(),
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.SiLU(),
+        )
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+        )
+        self.refine = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+            nn.Conv2d(64, 32, kernel_size=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.SiLU(),
+        )
+        self.project = nn.Conv2d(32, 1, kernel_size=1, bias=False)
+
+    def forward(self, x):
+        if x.shape[1] > 1:
+            x = x.mean(dim=1, keepdim=True)
+
+        f = self.conv1(x)
+        f = self.conv2(f)
+        f = self.conv3(f)
+        f = self.refine(f)
+        f = self.project(f)
+        f = torch.abs(f)
+        f = F.interpolate(f, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        return torch.sigmoid(f)
+
+
 class OpticalFrontend(nn.Module):
-    """光学前端 - 两层相位调制系统"""
+    """Two-layer optical frontend."""
+
     def __init__(
         self,
         resolution=(640, 640),
         mode="phase",
         slm1_vortex_charge=0,
         slm2_vortex_charge=0,
-        vortex_perturbation=0.1
+        vortex_perturbation=0.1,
     ):
         super().__init__()
         self.slm1 = SLMLayer(
             resolution,
             mode,
             vortex_charge=slm1_vortex_charge,
-            vortex_perturbation=vortex_perturbation
+            vortex_perturbation=vortex_perturbation,
         )
-        self.prop1 = ASMPropagation(0.01, 532e-9, 6.4e-6, resolution)  # 10mm传播
+        self.prop1 = ASMPropagation(0.01, 532e-9, 6.4e-6, resolution)
         self.slm2 = SLMLayer(
             resolution,
             mode,
             vortex_charge=slm2_vortex_charge,
-            vortex_perturbation=vortex_perturbation
+            vortex_perturbation=vortex_perturbation,
         )
-        self.prop2 = ASMPropagation(0.02, 532e-9, 6.4e-6, resolution)  # 20mm传播
+        self.prop2 = ASMPropagation(0.02, 532e-9, 6.4e-6, resolution)
         self.enable_norm = False
 
     def forward(self, intensity):
-        """输入强度图，输出调制后的强度图"""
-        # 强度转振幅场
         amp = torch.sqrt(intensity.clamp(min=0) + 1e-8)
         field = torch.complex(amp, torch.zeros_like(amp))
-        
-        # 两层光学调制
+
         field = self.prop1(self.slm1(field))
         field = self.prop2(self.slm2(field))
-        
-        # 输出强度图
-        out = torch.abs(field)**2
-        
-        # 可选归一化
+
+        out = torch.abs(field) ** 2
         if self.enable_norm:
             out = out / (out.mean(dim=[2, 3], keepdim=True) + 1e-6)
-        
         return out
 
-# =========================================================
-# 轻量化卷积块（YOLOv3检测头组件）
-# =========================================================
+
 class LightConvBlock(nn.Module):
-    """轻量化卷积块：深度可分离卷积 + BN + SiLU"""
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
-        super(LightConvBlock, self).__init__()
-        # 深度卷积（逐通道卷积）
-        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size, 
-                                 stride, padding, groups=in_channels, bias=False)
-        # 点卷积（1×1卷积）
+        super().__init__()
+        self.depthwise = nn.Conv2d(
+            in_channels,
+            in_channels,
+            kernel_size,
+            stride,
+            padding,
+            groups=in_channels,
+            bias=False,
+        )
         self.pointwise = nn.Conv2d(in_channels, out_channels, 1, 1, 0, bias=False)
         self.bn = nn.BatchNorm2d(out_channels)
-        self.act = nn.SiLU()  # 轻量化激活函数
+        self.act = nn.SiLU()
 
     def forward(self, x):
         x = self.depthwise(x)
@@ -148,190 +215,160 @@ class LightConvBlock(nn.Module):
         x = self.act(x)
         return x
 
-# =========================================================
-# YOLOv3检测头（多尺度特征生成）
-# =========================================================
+
 class YOLOLightHead(nn.Module):
-    """轻量化YOLOv3检测头 - 基于FPN的多尺度特征生成"""
+    """Lightweight FPN-style detector head."""
+
     def __init__(self, in_channels=1, out_channels=27):
-        super(YOLOLightHead, self).__init__()
-        # 基础通道数（轻量化设计）
+        super().__init__()
         base_ch = 32
 
-        # 1. 初始特征提取
         self.init_conv = LightConvBlock(in_channels, base_ch, kernel_size=3, stride=1)
-
-        # 2. 下采样生成P5（20×20）：640→320→160→80→40→20
         self.down_to_p5 = nn.Sequential(
-            LightConvBlock(base_ch, base_ch * 2, stride=2),  # 640→320, 32→64
-            LightConvBlock(base_ch * 2, base_ch * 4, stride=2),  # 320→160, 64→128
-            LightConvBlock(base_ch * 4, base_ch * 8, stride=2),  # 160→80, 128→256
-            LightConvBlock(base_ch * 8, base_ch * 8, stride=2),  # 80→40, 256→256
-            LightConvBlock(base_ch * 8, base_ch * 8, stride=2)   # 40→20, 256→256
+            LightConvBlock(base_ch, base_ch * 2, stride=2),
+            LightConvBlock(base_ch * 2, base_ch * 4, stride=2),
+            LightConvBlock(base_ch * 4, base_ch * 8, stride=2),
+            LightConvBlock(base_ch * 8, base_ch * 8, stride=2),
+            LightConvBlock(base_ch * 8, base_ch * 8, stride=2),
         )
-
-        # 3. P5上采样 + 融合生成P4（40×40）
-        self.up_p5_to_p4 = nn.Upsample(scale_factor=2, mode='nearest')
+        self.up_p5_to_p4 = nn.Upsample(scale_factor=2, mode="nearest")
         self.fuse_p4 = LightConvBlock(base_ch * 8 + base_ch * 8, base_ch * 4)
 
-        # 4. P4上采样 + 融合生成P3（80×80）
-        self.up_p4_to_p3 = nn.Upsample(scale_factor=2, mode='nearest')
+        self.up_p4_to_p3 = nn.Upsample(scale_factor=2, mode="nearest")
         self.fuse_p3 = LightConvBlock(base_ch * 4 + base_ch * 8, base_ch * 2)
 
-        # 5. 各尺度检测头输出
-        self.head_p5 = nn.Conv2d(base_ch * 8, out_channels, 1)  # P5: 20×20×27
-        self.head_p4 = nn.Conv2d(base_ch * 4, out_channels, 1)  # P4: 40×40×27
-        self.head_p3 = nn.Conv2d(base_ch * 2, out_channels, 1)  # P3: 80×80×27
+        self.head_p5 = nn.Conv2d(base_ch * 8, out_channels, 1)
+        self.head_p4 = nn.Conv2d(base_ch * 4, out_channels, 1)
+        self.head_p3 = nn.Conv2d(base_ch * 2, out_channels, 1)
 
     def forward(self, x):
-        """前向传播：输入光学特征图，输出三尺度检测结果"""
-        # 初始特征提取
-        x_init = self.init_conv(x)  # [B, 32, 640, 640]
+        x_init = self.init_conv(x)
 
-        # 分步下采样，保存中间特征
-        x320 = self.down_to_p5[0](x_init)  # [B, 64, 320, 320]
-        x160 = self.down_to_p5[1](x320)    # [B, 128, 160, 160]
-        x80 = self.down_to_p5[2](x160)     # [B, 256, 80, 80]
-        x40 = self.down_to_p5[3](x80)      # [B, 256, 40, 40]
-        p5 = self.down_to_p5[4](x40)       # [B, 256, 20, 20] → P5
+        x320 = self.down_to_p5[0](x_init)
+        x160 = self.down_to_p5[1](x320)
+        x80 = self.down_to_p5[2](x160)
+        x40 = self.down_to_p5[3](x80)
+        p5 = self.down_to_p5[4](x40)
 
-        # 生成P4（上采样 + 特征融合）
         p5_up = self.up_p5_to_p4(p5)
         p4_fuse = torch.cat([p5_up, x40], dim=1)
-        p4 = self.fuse_p4(p4_fuse)         # [B, 256, 40, 40] → P4
+        p4 = self.fuse_p4(p4_fuse)
 
-        # 生成P3（上采样 + 特征融合）
         p4_up = self.up_p4_to_p3(p4)
         p3_fuse = torch.cat([p4_up, x80], dim=1)
-        p3 = self.fuse_p3(p3_fuse)         # [B, 128, 80, 80] → P3
+        p3 = self.fuse_p3(p3_fuse)
 
-        # 检测头输出
-        p5_out = self.head_p5(p5)  # [B, 27, 20, 20]
-        p4_out = self.head_p4(p4)  # [B, 27, 40, 40]
-        p3_out = self.head_p3(p3)  # [B, 27, 80, 80]
-
+        p5_out = self.head_p5(p5)
+        p4_out = self.head_p4(p4)
+        p3_out = self.head_p3(p3)
         return p3_out, p4_out, p5_out
 
-# =========================================================
-# 光学层约束机制（类似MultiScaleTeacher）
-# =========================================================
-class OpticalConstraint(nn.Module):
-    """光学层约束机制 - 引导光学调制学习边缘和纹理特征"""
-    def __init__(self):
-        super(OpticalConstraint, self).__init__()
-        
-        # 高斯低通滤波器（平滑约束）
-        self.gauss_kernel = nn.Conv2d(1, 1, kernel_size=15, padding=7, bias=False)
-        grid = torch.arange(15) - 7
-        X, Y = torch.meshgrid(grid, grid, indexing='ij')
-        sigma = 3.0
-        g = torch.exp(-(X**2 + Y**2)/(2*sigma**2))
-        g = g/g.sum()
-        self.gauss_kernel.weight.data = g.unsqueeze(0).unsqueeze(0)
-        
-        # Sobel边缘检测器（边缘约束）
-        sobel_x = torch.tensor([[-1,0,1],[-2,0,2],[-1,0,1]], dtype=torch.float32)
-        self.sobel = nn.Conv2d(1, 1, kernel_size=3, padding=1, bias=False)
-        self.sobel.weight.data = sobel_x.unsqueeze(0).unsqueeze(0)
-        
-        # 固定参数，不参与训练
-        for p in self.parameters():
-            p.requires_grad = False
 
-    def forward(self, x):
-        """计算光学特征约束"""
-        # 高斯低通特征
-        low_pass = self.gauss_kernel(x)
-        
-        # Sobel边缘特征
-        edge = torch.abs(self.sobel(x))
-        edge = F.avg_pool2d(edge, 4)  # 降采样去高频
-        edge = F.interpolate(edge, x.shape[-2:])  # 恢复原尺寸
-        
-        # 组合特征（类似MultiScaleTeacher的输出）
-        combined = torch.sigmoid(low_pass + edge)
-        
-        return combined
-
-# =========================================================
-# 完整光学YOLOv3系统（带约束）
-# =========================================================
 class OpticalYOLOv3(nn.Module):
-    """完整的光学YOLOv3系统：光学前端 + YOLOv3检测头 + 光学约束"""
+    """Optical frontend + detector head + ConvTeacher constraint."""
+
     def __init__(
         self,
         num_classes=4,
         img_size=640,
         optical_mode="phase",
         enable_constraint=True,
+        teacher=None,
+        teacher_checkpoint=None,
+        teacher_init_mode="checkpoint_or_random",
+        freeze_teacher=True,
+        teacher_device="cpu",
         slm1_vortex_charge=0,
         slm2_vortex_charge=0,
-        vortex_perturbation=0.1
+        vortex_perturbation=0.1,
     ):
-        super(OpticalYOLOv3, self).__init__()
+        super().__init__()
         self.img_size = img_size
         self.enable_constraint = enable_constraint
-        
-        # 光学前端（两层相位调制）
+        self.freeze_teacher = freeze_teacher
+        self.teacher_checkpoint = teacher_checkpoint
+        self.teacher_init_mode = teacher_init_mode
+        self.teacher_loaded = False
+        self.teacher_status_message = ""
+
         self.optical_frontend = OpticalFrontend(
-            resolution=(img_size, img_size), 
+            resolution=(img_size, img_size),
             mode=optical_mode,
             slm1_vortex_charge=slm1_vortex_charge,
             slm2_vortex_charge=slm2_vortex_charge,
-            vortex_perturbation=vortex_perturbation
+            vortex_perturbation=vortex_perturbation,
         )
-        
-        # YOLOv3检测头（输出通道数 = 3×(4+1+num_classes)）
+
         out_channels = 3 * (4 + 1 + num_classes)
-        self.detector = YOLOLightHead(
-            in_channels=1, 
-            out_channels=out_channels
-        )
-        
-        # 始终构建约束模块，只通过开关控制是否参与损失与可视化。
-        self.optical_constraint = OpticalConstraint()
-        
-        # 类别信息
+        self.detector = YOLOLightHead(in_channels=1, out_channels=out_channels)
+
+        self.teacher = teacher if teacher is not None else ConvTeacher()
         self.num_classes = num_classes
+        self._initialize_teacher(teacher_device)
+
+    def _initialize_teacher(self, device):
+        init_mode = self.teacher_init_mode.lower()
+        if init_mode not in {"checkpoint", "checkpoint_or_random", "random"}:
+            raise ValueError(
+                "teacher_init_mode must be one of: checkpoint, checkpoint_or_random, random"
+            )
+
+        status_messages = []
+        if init_mode in {"checkpoint", "checkpoint_or_random"}:
+            loaded, message = load_teacher_checkpoint(self.teacher, self.teacher_checkpoint, device=device)
+            self.teacher_loaded = loaded
+            status_messages.append(message)
+            if not loaded and init_mode == "checkpoint":
+                raise FileNotFoundError(message)
+        else:
+            status_messages.append("Teacher initialized from random weights.")
+
+        if not self.teacher_loaded and init_mode == "checkpoint_or_random":
+            status_messages.append("Teacher fallback: random initialization.")
+
+        for param in self.teacher.parameters():
+            param.requires_grad = not self.freeze_teacher
+
+        if self.freeze_teacher:
+            self.teacher.eval()
+
+        status_messages.append(f"Teacher status: {'frozen' if self.freeze_teacher else 'trainable'}")
+        self.teacher_status_message = " | ".join(status_messages)
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.freeze_teacher:
+            self.teacher.eval()
+        return self
 
     def forward(self, x):
-        """端到端前向传播"""
-        # 输入：RGB图像 [B, 3, H, W]
-        # 转换为灰度强度图
         if x.shape[1] == 3:
-            intensity = x.mean(dim=1, keepdim=True)  # [B, 1, H, W]
+            intensity = x.mean(dim=1, keepdim=True)
         else:
             intensity = x
-        
-        # 光学调制
-        optical_feature = self.optical_frontend(intensity)  # [B, 1, H, W]
-        
-        # 计算光学约束目标（如果启用）
+
+        optical_feature = self.optical_frontend(intensity)
+
         if self.enable_constraint:
-            constraint_target = self.optical_constraint(intensity)
+            teacher_context = torch.no_grad() if self.freeze_teacher else nullcontext()
+            with teacher_context:
+                constraint_target = self.teacher(intensity)
         else:
             constraint_target = None
-        
-        # 目标检测
-        p3, p4, p5 = self.detector(optical_feature)  # 三尺度检测结果
-        
+
+        p3, p4, p5 = self.detector(optical_feature)
         return p3, p4, p5, optical_feature, constraint_target
 
     def enable_normalization(self, enable=True):
-        """启用/禁用光学输出归一化"""
         self.optical_frontend.enable_norm = enable
 
     def enable_constraint_loss(self, enable=True):
-        """启用/禁用光学约束损失"""
         self.enable_constraint = enable
 
-# =========================================================
-# 损失函数（YOLOv3多尺度损失）
-# =========================================================
+
 class YOLOLoss(nn.Module):
-    """YOLOv3多尺度损失函数"""
     def __init__(self, box_weight=0.05, obj_weight=1.5, noobj_weight=0.5, cls_weight=0.15):
-        super(YOLOLoss, self).__init__()
+        super().__init__()
         self.mse = nn.MSELoss()
         self.smooth_l1 = nn.SmoothL1Loss()
         self.bce = nn.BCEWithLogitsLoss()
@@ -341,11 +378,8 @@ class YOLOLoss(nn.Module):
         self.cls_weight = cls_weight
 
     def forward(self, pred, target, batch_size):
-        """计算多尺度损失"""
-        # 调整预测张量形状
         pred = pred.permute(0, 2, 3, 1).reshape(batch_size, pred.shape[2], pred.shape[3], 3, -1)
 
-        # 正负样本掩码
         obj_mask = target[..., 4] == 1
         noobj_mask = target[..., 4] == 0
 
@@ -353,7 +387,6 @@ class YOLOLoss(nn.Module):
             pred_pos = pred[obj_mask]
             target_pos = target[obj_mask]
 
-            # xy 使用网格内偏移，wh 使用相对 anchor 的 log 编码。
             xy_loss = self.bce(pred_pos[:, 0:2], target_pos[:, 0:2])
             wh_loss = self.smooth_l1(pred_pos[:, 2:4], target_pos[:, 2:4])
             box_loss = xy_loss + wh_loss
@@ -370,21 +403,12 @@ class YOLOLoss(nn.Module):
         else:
             noobj_loss = pred[..., 4].sum() * 0.0
 
-        # 使用独立的noobj_weight，避免负样本淹没正样本梯度
         obj_loss = obj_loss_pos + self.noobj_weight * noobj_loss
-
-        # 加权总和
-        total_loss = (self.box_weight * box_loss + 
-                     self.obj_weight * obj_loss + 
-                     self.cls_weight * cls_loss)
-        
+        total_loss = self.box_weight * box_loss + self.obj_weight * obj_loss + self.cls_weight * cls_loss
         return total_loss, box_loss, obj_loss, cls_loss
 
-# =========================================================
-# 目标构建工具函数
-# =========================================================
+
 def build_target(targets, anchors, stride, num_classes, img_size, device):
-    """构建YOLO格式的训练目标"""
     batch_size = targets.shape[0]
     h, w = img_size // stride, img_size // stride
     num_anchors = len(anchors)
@@ -406,9 +430,8 @@ def build_target(targets, anchors, stride, num_classes, img_size, device):
             i = min(w - 1, max(0, int(gx.item())))
             j = min(h - 1, max(0, int(gy.item())))
 
-            # 选择最佳锚框
             best_idx = 0
-            best_iou = 0
+            best_iou = 0.0
             for a_idx, (aw, ah) in enumerate(anchors):
                 aw_s = aw / stride
                 ah_s = ah / stride
@@ -419,7 +442,6 @@ def build_target(targets, anchors, stride, num_classes, img_size, device):
                     best_iou = iou
                     best_idx = a_idx
 
-            # 填充目标张量
             aw, ah = anchors[best_idx]
             aw_s = aw / stride
             ah_s = ah / stride
@@ -434,89 +456,79 @@ def build_target(targets, anchors, stride, num_classes, img_size, device):
 
     return target_tensor
 
-# =========================================================
-# 可视化工具
-# =========================================================
+
 def visualize_optical_detection(model, dataloader, device, save_path="optical_detection.png", num_samples=4):
-    """可视化光学调制结果和检测特征"""
     model.eval()
-    
-    # 获取样本数据
+
     samples = []
     for batch in dataloader:
-        imgs, targets = zip(*batch)
-        imgs = torch.stack(imgs).to(device)
-        samples = list(zip(imgs, targets))[:num_samples]
+        if isinstance(batch, (list, tuple)) and len(batch) == 2:
+            imgs, targets = batch
+            if isinstance(imgs, (list, tuple)):
+                imgs = torch.stack(imgs)
+            for idx in range(min(num_samples, len(imgs))):
+                samples.append((imgs[idx].to(device), targets[idx]))
+        else:
+            batch_items = list(batch)[:num_samples]
+            imgs, targets = zip(*batch_items)
+            imgs = torch.stack(imgs).to(device)
+            samples.extend(list(zip(imgs, targets)))
         break
 
-    # 创建可视化画布
-    fig, axes = plt.subplots(num_samples, 5, figsize=(20, 4*num_samples))
-    if num_samples == 1:
+    fig, axes = plt.subplots(len(samples), 4, figsize=(16, 4 * max(1, len(samples))))
+    if len(samples) == 1:
         axes = axes.reshape(1, -1)
 
     for idx, (img, target) in enumerate(samples):
         with torch.no_grad():
-            # 模型推理
-            p3, p4, p5, optical_feat = model(img.unsqueeze(0))
-            
-            # 转换为numpy用于可视化
-            img_np = img.permute(1, 2, 0).cpu().numpy()
-            optical_np = optical_feat.squeeze().cpu().numpy()
-            p3_np = p3.squeeze().abs().mean(dim=0).cpu().numpy()
-            p4_np = p4.squeeze().abs().mean(dim=0).cpu().numpy()
-            p5_np = p5.squeeze().abs().mean(dim=0).cpu().numpy()
+            p3, p4, p5, optical_feat, constraint_target = model(img.unsqueeze(0))
 
-        # 第1列：输入图像
+        img_np = img.permute(1, 2, 0).cpu().numpy()
+        optical_np = optical_feat.squeeze().cpu().numpy()
+        teacher_np = (
+            constraint_target.squeeze().cpu().numpy()
+            if constraint_target is not None
+            else np.zeros_like(optical_np)
+        )
+        prediction_np = torch.sigmoid(p3[0, 4::(5 + model.num_classes)]).max(dim=0).values.cpu().numpy()
+
         axes[idx, 0].imshow(img_np)
-        axes[idx, 0].set_title(f"Input {idx+1}")
-        axes[idx, 0].axis('off')
+        axes[idx, 0].set_title(f"Input {idx + 1}")
+        axes[idx, 0].axis("off")
 
-        # 第2列：光学调制特征
-        axes[idx, 1].imshow(optical_np, cmap='hot')
+        axes[idx, 1].imshow(optical_np, cmap="hot")
         axes[idx, 1].set_title("Optical Feature")
-        axes[idx, 1].axis('off')
+        axes[idx, 1].axis("off")
 
-        # 第3-5列：多尺度检测特征
-        axes[idx, 2].imshow(p3_np, cmap='hot')
-        axes[idx, 2].set_title("P3 (80×80)")
-        axes[idx, 2].axis('off')
+        axes[idx, 2].imshow(teacher_np, cmap="hot")
+        axes[idx, 2].set_title("Teacher Constraint")
+        axes[idx, 2].axis("off")
 
-        axes[idx, 3].imshow(p4_np, cmap='hot')
-        axes[idx, 3].set_title("P4 (40×40)")
-        axes[idx, 3].axis('off')
-
-        axes[idx, 4].imshow(p5_np, cmap='hot')
-        axes[idx, 4].set_title("P5 (20×20)")
-        axes[idx, 4].axis('off')
+        axes[idx, 3].imshow(prediction_np, cmap="hot")
+        axes[idx, 3].set_title("Prediction Response")
+        axes[idx, 3].axis("off")
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close()
-    print(f"可视化结果已保存至: {save_path}")
+    print(f"Visualization saved to: {save_path}")
 
-# =========================================================
-# 测试代码
-# =========================================================
+
 if __name__ == "__main__":
-    # 设备设置
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"使用设备: {device}")
-    
-    # 创建模型实例
+    print(f"Using device: {device}")
+
     model = OpticalYOLOv3(num_classes=4, img_size=640, optical_mode="phase").to(device)
-    
-    # 测试前向传播
     x = torch.randn(2, 3, 640, 640).to(device)
-    p3, p4, p5, optical_feat = model(x)
-    
-    print(f"输入形状: {x.shape}")
-    print(f"光学特征形状: {optical_feat.shape}")
-    print(f"P3检测输出形状: {p3.shape}")
-    print(f"P4检测输出形状: {p4.shape}")
-    print(f"P5检测输出形状: {p5.shape}")
-    
-    # 统计参数量
+    p3, p4, p5, optical_feat, constraint_target = model(x)
+
+    print(f"Input shape: {x.shape}")
+    print(f"Optical feature shape: {optical_feat.shape}")
+    if constraint_target is not None:
+        print(f"Teacher constraint shape: {constraint_target.shape}")
+    print(f"P3 shape: {p3.shape}")
+    print(f"P4 shape: {p4.shape}")
+    print(f"P5 shape: {p5.shape}")
+
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"模型总参数量: {total_params:,}")
-    
-    print("光学YOLOv3系统创建成功！")
+    print(f"Trainable parameters: {total_params:,}")
