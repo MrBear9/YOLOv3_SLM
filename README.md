@@ -1,15 +1,17 @@
 # 光学YOLOv3_SLM项目
 
-一个基于光学传播模型和YOLOv3的先进目标检测系统，结合了光学调制和深度学习技术。
+一个基于光学传播模型和YOLOv3的先进目标检测系统，结合了空间光调制器(SLM)和教师-学生知识蒸馏技术。
 
 ## 项目概述
 
 本项目实现了一个创新的光学-深度学习混合目标检测系统，主要特点包括：
 
-- **光学前端调制**：使用空间光调制器(SLM)进行光学特征提取
-- **YOLOv3检测头**：基于YOLOv3的多尺度目标检测
-- **光学约束机制**：类似MultiScaleTeacher的边缘和纹理引导
+- **光学前端调制**：两层SLM相位调制 + 角谱传播(ASM)的光学特征提取
+- **YOLOv3检测头**：轻量化的多尺度目标检测架构
+- **教师约束机制**：基于ConvTeacher的知识蒸馏约束
+- **涡旋相位初始化**：支持涡旋相位调制和随机扰动
 - **多数据集支持**：支持军事目标、Fashion-MNIST等数据集
+- **差异化学习率**：光学层和检测头的独立学习率配置
 
 ## 项目结构
 
@@ -17,59 +19,88 @@
 YOLOv3_SLM/
 ├── data/                           # 数据集目录
 │   ├── military/                  # 军事目标数据集
-│   │   ├── test/images/           # 测试图像
+│   │   ├── test/images/           # 测试图像（包含大量军事目标图像）
 │   │   └── data.yaml              # 数据集配置
 │   └── fashion_mnist/             # Fashion-MNIST数据集
-│       ├── FashionMNIST/raw/       # 原始数据
+│       ├── FashionMNIST/raw/       # 原始数据文件
 │       └── data.yaml              # 数据集配置
-├── output/                        # 输出目录
-│   └── fashion_mnist_models/      # 训练模型
+├── .gitignore                     # Git忽略文件
 ├── Optical_class.py               # 光学YOLOv3核心实现
 ├── train_optical_yolo.py          # 通用训练脚本
-├── train_fashion_mnist.py         # Fashion-MNIST训练脚本
+├── optical_teacher_yolo_slm.py    # 光学教师YOLO-SLM实现
+├── optical_teacher_yolo.py        # 光学教师YOLO实现
+├── optical_teacher.py             # 光学教师模型
 ├── test_Phase_weight.py           # 相位层提取工具
+├── tain_optical.py                # 光学训练脚本
 ├── last.py                        # 原始YOLOv3_SLM实现
+├── teacher.py                     # 教师模型实现
 └── README.md                      # 项目说明
 ```
 
 ## 核心功能模块
 
-### 1. 光学前端调制 (OpticalFrontend)
+### 1. 空间光调制器层 (SLMLayer)
 
 ```python
-class OpticalFrontend(nn.Module):
-    """光学前端：两层相位调制 + 角谱传播"""
+class SLMLayer(nn.Module):
+    """空间光调制器层，支持相位和振幅调制"""
 ```
 
 **功能特性：**
-- 两层相位调制器(SLM1, SLM2)
-- 角谱传播方法(ASM)模拟光学传播
-- 支持相位和振幅调制模式
-- 可配置的光学参数（波长、传播距离等）
+- 支持纯相位调制和振幅-相位混合调制
+- 涡旋相位初始化（可配置涡旋电荷）
+- 随机扰动避免过强先验
+- 复数场调制：field * exp(1j * phase)
 
-### 2. 光学YOLOv3系统 (OpticalYOLOv3)
+### 2. 角谱传播 (ASMPropagation)
 
 ```python
-class OpticalYOLOv3(nn.Module):
-    """完整的光学YOLOv3系统：光学前端 + YOLOv3检测头"""
+class ASMPropagation(nn.Module):
+    """角谱传播方法模拟光学传播过程"""
+```
+
+**传播特性：**
+- 基于傅里叶变换的光学传播模拟
+- 可配置波长、传播距离、像素尺寸
+- 频域传递函数计算
+
+### 3. 光学前端系统 (OpticalFrontend)
+
+```python
+class OpticalFrontend(nn.Module):
+    """两层SLM光学前端：SLM1 → 传播1 → SLM2 → 传播2"""
 ```
 
 **架构特点：**
-- **光学前端**：输入图像 → 光学调制 → 光学特征
-- **检测头**：YOLOLightHead，三尺度检测(P3/P4/P5)
-- **光学约束**：边缘和纹理特征引导
+- 两层SLM调制器串联
+- 中间光学传播过程
+- 强度到复数场的转换
+- 可选的归一化处理
 
-### 3. 光学约束机制 (OpticalConstraint)
+### 4. 教师网络 (ConvTeacher)
 
 ```python
-class OpticalConstraint(nn.Module):
-    """光学层约束机制 - 引导光学调制学习边缘和纹理特征"""
+class ConvTeacher(nn.Module):
+    """教师网络生成密集约束图"""
 ```
 
-**约束组件：**
-- **高斯低通滤波器**：平滑约束，学习低频特征
-- **Sobel边缘检测器**：边缘约束，学习高频特征
-- **特征组合**：类似MultiScaleTeacher的输出格式
+**网络结构：**
+- 三层卷积下采样 + 上采样恢复
+- 输出与输入相同分辨率的约束图
+- 支持预训练权重加载
+
+### 5. 光学YOLOv3系统 (OpticalYOLOv3)
+
+```python
+class OpticalYOLOv3(nn.Module):
+    """完整的光学YOLOv3系统：光学前端 + 检测头 + 教师约束"""
+```
+
+**完整架构：**
+- **光学前端**：输入图像 → 光学调制 → 光学特征
+- **检测头**：YOLOLightHead，三尺度检测(P3/P4/P5)
+- **教师约束**：ConvTeacher生成目标特征约束
+- **知识蒸馏**：教师-学生模式的联合训练
 
 ## 安装和依赖
 
@@ -83,7 +114,7 @@ class OpticalConstraint(nn.Module):
 ```bash
 pip install torch torchvision torchaudio
 pip install opencv-python matplotlib tqdm
-pip install numpy pillow scipy
+pip install numpy pillow scipy pyyaml
 pip install albumentations (可选)
 ```
 
@@ -96,9 +127,14 @@ pip install albumentations (可选)
 python train_optical_yolo.py
 ```
 
-**Fashion-MNIST时尚物品检测：**
+**光学教师模型训练：**
 ```bash
-python train_fashion_mnist.py
+python optical_teacher_yolo.py
+```
+
+**光学教师SLM模型训练：**
+```bash
+python optical_teacher_yolo_slm.py
 ```
 
 ### 2. 提取光学相位层
@@ -113,21 +149,33 @@ python test_Phase_weight.py
 
 ```python
 # 光学参数
-OPTICAL_MODE = "phase"           # 调制模式：phase/amplitude
+OPTICAL_MODE = "phase"           # 调制模式：phase/amp_phase
 WAVELENGTH = 532e-9             # 波长(米)
-PROPAGATION_DISTANCE = 0.1       # 传播距离(米)
+PROPAGATION_DISTANCE = 0.01      # 传播距离(米)
+PIXEL_SIZE = 6.4e-6             # 像素尺寸(米)
+
+# 涡旋初始化
+USE_VORTEX_INIT = True          # 是否使用涡旋初始化
+SLM1_VORTEX_CHARGE = 1          # SLM1涡旋电荷
+SLM2_VORTEX_CHARGE = -1         # SLM2涡旋电荷
+VORTEX_PERTURBATION = 0.12      # 涡旋相位扰动
 
 # 训练参数
 EPOCHS = 100                    # 训练轮次
-LEARNING_RATE = 0.001           # 学习率
+LEARNING_RATE = 1e-3            # 学习率
 BATCH_SIZE = 8                  # 批次大小
 IMG_SIZE = 640                  # 输入图像尺寸
 
 # 损失权重
 BOX_WEIGHT = 0.05               # 边界框损失权重
-OBJ_WEIGHT = 1.5                # 目标性损失权重
+OBJ_WEIGHT = 1.0                # 目标性损失权重
 CLS_WEIGHT = 0.15               # 分类损失权重
-OPTICAL_CONSTRAINT_WEIGHT = 0.1 # 光学约束损失权重
+TEACHER_CONSTRAINT_WEIGHT = 0.05 # 教师约束损失权重
+
+# 教师网络配置
+TEACHER_CHECKPOINT = None       # 教师模型权重路径
+TEACHER_INIT_MODE = "checkpoint_or_random" # 初始化模式
+FREEZE_TEACHER = True          # 是否冻结教师网络
 ```
 
 ## 数据集配置
@@ -165,22 +213,45 @@ names:
 nc: 10
 ```
 
-## 训练过程监控
+## 训练流程
 
-### 实时训练指标
+### 1. 两阶段训练策略
+
+**阶段1：教师约束训练**
+- 主要优化光学层参数
+- 使用教师网络生成目标特征约束
+- 损失函数：教师约束损失 + 检测损失
+
+**阶段2：联合训练**
+- 同时优化光学层和检测头
+- 教师网络作为特征引导
+- 损失函数：检测损失 + 教师约束损失
+
+### 2. 差异化学习率
+
+```python
+# 光学层使用较低学习率
+optical_lr = LEARNING_RATE * OPTICAL_LR_RATIO  # 通常为0.1
+# 检测头使用标准学习率
+detector_lr = LEARNING_RATE
+```
+
+### 3. 实时训练监控
 
 ```
 Epoch 6/100, Train Loss: 0.1234, Val Loss: 0.1456, 
 Precision: 0.856, Recall: 0.789, F1: 0.821, LR: 0.000900
+Teacher Status: Loaded 32 teacher tensors from: checkpoint.pth | Teacher status: frozen
 ```
 
-### 可视化输出
+### 4. 可视化输出
 
 训练过程中会生成以下可视化内容：
 - **输入图像**：带真实标注和模型检测结果
 - **光学特征**：光学调制后的特征图
-- **约束目标**：光学层学习的目标特征
-- **多尺度特征**：P3/P4/P5检测特征图
+- **教师约束**：教师网络生成的目标特征图
+- **多尺度检测**：P3/P4/P5检测特征图
+- **相位分布**：SLM层的相位调制图
 
 ## 模型输出格式
 
@@ -197,6 +268,28 @@ Precision: 0.856, Recall: 0.789, F1: 0.821, LR: 0.000900
 ```
 
 ### 相位层提取
+
+使用 `test_Phase_weight.py` 可以提取和可视化SLM层的相位分布：
+- SLM1相位调制图
+- SLM2相位调制图  
+- 光学传播过程中的场分布
+
+## 技术特点
+
+### 1. 光学优势
+- **物理可解释性**：基于真实光学传播模型
+- **计算效率**：光学前端替代部分卷积计算
+- **特征增强**：光学调制增强目标相关特征
+
+### 2. 深度学习集成
+- **端到端训练**：光学层和检测头联合优化
+- **知识蒸馏**：教师网络引导光学特征学习
+- **多尺度检测**：YOLOv3架构的成熟检测能力
+
+### 3. 可扩展性
+- **模块化设计**：各组件可独立替换
+- **参数可配置**：支持多种光学和训练配置
+- **多数据集支持**：易于扩展到不同应用场景
 
 使用 `test_Phase_weight.py` 可以提取训练后的光学相位层：
 
