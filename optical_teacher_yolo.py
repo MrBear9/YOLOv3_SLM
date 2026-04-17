@@ -459,10 +459,10 @@ class ConfigYOLO:
     EPOCHS = 100
     
     # 动态损失权重配置（先位置后分类策略）
-    BOX_WEIGHT_BASE = 0.62     # 基础边界框权重
-    OBJ_WEIGHT_BASE = 1.0     # 基础目标性权重
-    NOOBJ_WEIGHT_BASE = 0.3   # 基础非目标权重
-    CLS_WEIGHT_BASE = 0.08    # 基础分类权重
+    BOX_WEIGHT_BASE = 0.8     # 基础边界框权重
+    OBJ_WEIGHT_BASE = 0.8     # 基础目标性权重
+    NOOBJ_WEIGHT_BASE = 0.05   # 基础非目标权重
+    CLS_WEIGHT_BASE = 0.3    # 基础分类权重
     
     # 阶段划分参数
     POSITION_PHASE_EPOCHS = 20  # 位置优先阶段轮数

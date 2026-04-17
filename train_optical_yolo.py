@@ -32,10 +32,10 @@ class Config:
     WEIGHT_DECAY = 1e-5
     
     # 损失权重
-    BOX_WEIGHT = 0.05 # 目标框损失权重
-    OBJ_WEIGHT = 1.0 # 目标检测损失权重（降低，避免过度关注目标存在性）
-    NOOBJ_WEIGHT = 0.5 # 非目标损失权重（降低，减少背景误检的影响）
-    CLS_WEIGHT = 0.15 # 分类损失权重
+    BOX_WEIGHT = 0.8 # 目标框损失权重
+    OBJ_WEIGHT = 0.8 # 目标检测损失权重（降低，避免过度关注目标存在性）
+    NOOBJ_WEIGHT = 0.05 # 非目标损失权重（降低，减少背景误检的影响）
+    CLS_WEIGHT = 0.3 # 分类损失权重
     PHASE1_TEACHER_WEIGHT = 1.0  # 阶段1只做教师约束时的损失权重
     TEACHER_CONSTRAINT_WEIGHT = 0.05  # 阶段2联合训练时的教师约束权重
     
@@ -211,6 +211,12 @@ class OpticalYOLOv3Trainer:
         self.val_losses = []
         self.best_val_loss = float('inf')
         self.no_improve_epochs = 0
+        self.phase_history = {
+            "phase1": {"epochs": [], "train": [], "val": []},
+            "phase2": {"epochs": [], "train": [], "val": []},
+            "phase3": {"epochs": [], "train": [], "val": []},
+        }
+        self.best_detection_epoch = None
         
         # 检测指标
         self.precisions = []
@@ -439,8 +445,6 @@ class OpticalYOLOv3Trainer:
             pbar.set_postfix(postfix)
         
         avg_loss = total_loss / num_batches
-        self.train_losses.append(avg_loss)
-        
         return avg_loss
 
     def validate(self, val_loader, epoch):
@@ -484,8 +488,6 @@ class OpticalYOLOv3Trainer:
                 total_loss += loss.item()
         
         avg_loss = total_loss / num_batches
-        self.val_losses.append(avg_loss)
-        
         return avg_loss
 
     def save_model(self, epoch, val_loss, is_best=False):
@@ -499,6 +501,7 @@ class OpticalYOLOv3Trainer:
             'scheduler_state_dict': self.scheduler.state_dict(),
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
+            'phase_history': self.phase_history,
             'config': self.config.__dict__,
             'teacher_status_message': getattr(self.model, 'teacher_status_message', ''),
             'class_names': self.class_names,
@@ -903,21 +906,46 @@ class OpticalYOLOv3Trainer:
         print(f"可视化结果已保存: {vis_path}")
 
     def plot_training_history(self):
-        """绘制训练历史"""
-        plt.figure(figsize=(10, 6))
-        plt.plot(self.train_losses, label='Training Loss')
-        if self.val_losses:
-            plt.plot(self.val_losses, label='Validation Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Training History')
-        plt.legend()
-        plt.grid(True)
-        
-        history_path = os.path.join(self.config.VISUALIZATION_DIR, "training_history.png")
-        plt.savefig(history_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"训练历史图已保存: {history_path}")
+        """分阶段绘制训练历史，避免阶段1与后续联合训练共用同一纵轴。"""
+
+        def save_phase_curve(phases, filename, title):
+            plt.figure(figsize=(10, 6))
+            has_data = False
+
+            for phase in phases:
+                epochs = self.phase_history[phase]["epochs"]
+                train_losses = self.phase_history[phase]["train"]
+                val_losses = self.phase_history[phase]["val"]
+                if not epochs:
+                    continue
+
+                has_data = True
+                plt.plot(epochs, train_losses, marker='o', label=f'{phase} Train')
+                plt.plot(epochs, val_losses, marker='s', linestyle='--', label=f'{phase} Val')
+
+            if not has_data:
+                plt.close()
+                return None
+
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title(title)
+            plt.legend()
+            plt.grid(True)
+
+            history_path = os.path.join(self.config.VISUALIZATION_DIR, filename)
+            plt.savefig(history_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            return history_path
+
+        saved_paths = [
+            save_phase_curve(["phase1"], "training_history_phase1.png", "Phase 1 Training History"),
+            save_phase_curve(["phase2", "phase3"], "training_history_phase23.png", "Phase 2-3 Training History"),
+        ]
+
+        for path in saved_paths:
+            if path:
+                print(f"训练历史图已保存: {path}")
 
     def save_config_to_txt(self):
         """将训练配置参数保存为txt文件"""
@@ -1049,8 +1077,12 @@ class OpticalYOLOv3Trainer:
             f.write("训练统计\n")
             f.write("-"*80 + "\n")
             f.write(f"总Epoch数: {len(self.train_losses)}\n")
-            f.write(f"最佳Epoch: {best_epoch + 1}\n")
-            f.write(f"最佳验证损失: {best_val_loss:.4f}\n")
+            if best_epoch is not None:
+                f.write(f"最佳Epoch: {best_epoch + 1}\n")
+                f.write(f"最佳验证损失: {best_val_loss:.4f}\n")
+            else:
+                f.write("最佳Epoch: 未进入阶段2/3，未计算\n")
+                f.write("最佳验证损失: 未进入阶段2/3，未计算\n")
             f.write(f"最终训练损失: {self.train_losses[-1]:.4f}\n")
             f.write(f"最终验证损失: {self.val_losses[-1]:.4f}\n\n")
             
@@ -1068,13 +1100,17 @@ class OpticalYOLOv3Trainer:
             f.write("-"*80 + "\n")
             f.write("损失曲线统计\n")
             f.write("-"*80 + "\n")
-            f.write(f"训练损失范围: [{min(self.train_losses):.4f}, {max(self.train_losses):.4f}]\n")
-            f.write(f"训练损失均值: {np.mean(self.train_losses):.4f}\n")
-            f.write(f"训练损失标准差: {np.std(self.train_losses):.4f}\n")
-            if self.val_losses:
-                f.write(f"验证损失范围: [{min(self.val_losses):.4f}, {max(self.val_losses):.4f}]\n")
-                f.write(f"验证损失均值: {np.mean(self.val_losses):.4f}\n")
-                f.write(f"验证损失标准差: {np.std(self.val_losses):.4f}\n")
+            for phase in ("phase1", "phase2", "phase3"):
+                train_hist = self.phase_history[phase]["train"]
+                val_hist = self.phase_history[phase]["val"]
+                if not train_hist:
+                    continue
+                f.write(f"{phase} 训练损失范围: [{min(train_hist):.4f}, {max(train_hist):.4f}]\n")
+                f.write(f"{phase} 训练损失均值: {np.mean(train_hist):.4f}\n")
+                f.write(f"{phase} 训练损失标准差: {np.std(train_hist):.4f}\n")
+                f.write(f"{phase} 验证损失范围: [{min(val_hist):.4f}, {max(val_hist):.4f}]\n")
+                f.write(f"{phase} 验证损失均值: {np.mean(val_hist):.4f}\n")
+                f.write(f"{phase} 验证损失标准差: {np.std(val_hist):.4f}\n")
             f.write("\n")
             
             f.write("-"*80 + "\n")
@@ -1134,9 +1170,17 @@ class OpticalYOLOv3Trainer:
             
             # 验证
             val_loss = self.validate(val_loader, epoch)
+            self.phase_history[phase]["epochs"].append(epoch + 1)
+            self.phase_history[phase]["train"].append(train_loss)
+            self.phase_history[phase]["val"].append(val_loss)
             
-            # 学习率调度
-            self.scheduler.step(val_loss)
+            # 总体历史保留用于日志与兼容旧检查点
+            self.train_losses.append(train_loss)
+            self.val_losses.append(val_loss)
+
+            # 学习率调度从阶段2开始，避免阶段1教师约束影响联合训练节奏
+            if phase != "phase1":
+                self.scheduler.step(val_loss)
             current_lr = self.optimizer.param_groups[0]['lr']
             
             if phase != "phase1":
@@ -1156,14 +1200,18 @@ class OpticalYOLOv3Trainer:
                       f"精确率: {precision:.3f}, 召回率: {recall:.3f}, F1: {f1_score:.3f}, "
                       f"学习率: {current_lr:.6f}")
             
-            # 保存最佳模型
-            if val_loss < self.best_val_loss - self.config.EARLY_STOPPING_MIN_DELTA:
-                self.best_val_loss = val_loss
+            # 最佳模型与早停从阶段2开始统计
+            if phase == "phase1":
                 self.no_improve_epochs = 0
-                self.save_model(epoch, val_loss, is_best=True)
-                print("新的最佳模型已保存!")
             else:
-                self.no_improve_epochs += 1
+                if val_loss < self.best_val_loss - self.config.EARLY_STOPPING_MIN_DELTA:
+                    self.best_val_loss = val_loss
+                    self.best_detection_epoch = epoch
+                    self.no_improve_epochs = 0
+                    self.save_model(epoch, val_loss, is_best=True)
+                    print("新的最佳模型已保存!")
+                else:
+                    self.no_improve_epochs += 1
             
             # 定期保存和可视化
             if (epoch + 1) % self.config.SAVE_EVERY == 0:
@@ -1176,19 +1224,22 @@ class OpticalYOLOv3Trainer:
             if (epoch + 1) % 5 == 0:
                 torch.cuda.empty_cache()
 
-            if self.no_improve_epochs >= self.config.EARLY_STOPPING_PATIENCE:
+            if phase != "phase1" and self.no_improve_epochs >= self.config.EARLY_STOPPING_PATIENCE:
                 print(f"验证损失连续 {self.no_improve_epochs} 轮未改善，提前停止训练。")
                 break
         
         # 训练结束
         end_time = time.time()
         training_time = end_time - start_time
-        best_epoch = len(self.train_losses) - self.no_improve_epochs - 1
+        best_epoch = self.best_detection_epoch
         
         print(f"\n{'='*50}")
         print("训练完成!")
         print(f"总训练时间: {training_time/60:.2f} 分钟")
-        print(f"最佳验证损失: {self.best_val_loss:.4f}")
+        if best_epoch is not None:
+            print(f"最佳验证损失: {self.best_val_loss:.4f}")
+        else:
+            print("最佳验证损失: 未进入阶段2/3，未计算")
         print(f"模型保存在: {self.config.SAVE_DIR}")
         print(f"日志保存在: {self.config.LOG_DIR}")
         
