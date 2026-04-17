@@ -33,6 +33,8 @@ class ConfigSLMYOLO:
     LOG_FILE = None
     TIMESTAMP = None
     VISUALIZATION_DIR = None
+    IS_INITIALIZED = False
+    LOG_INITIALIZED = False
     
     # 训练参数
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -47,8 +49,8 @@ class ConfigSLMYOLO:
     
     # 损失权重
     BOX_WEIGHT = 0.8
-    OBJ_WEIGHT = 1.0
-    CLS_WEIGHT = 0.15
+    OBJ_WEIGHT = 0.8
+    CLS_WEIGHT = 0.3
     
     # 锚框设置
     STRIDES = [8, 16, 32]
@@ -93,6 +95,8 @@ class ConfigSLMYOLO:
     @classmethod
     def initialize(cls):
         """初始化配置"""
+        if cls.IS_INITIALIZED and cls.LOG_FILE is not None:
+            return
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
         os.makedirs(cls.OUTPUT_DIR, exist_ok=True)
         cls.LOG_ROOT_DIR = os.path.join(cls.OUTPUT_DIR, "logs")
@@ -101,6 +105,8 @@ class ConfigSLMYOLO:
         os.makedirs(cls.VISUALIZATION_DIR, exist_ok=True)
         cls.TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
         cls.LOG_FILE = os.path.join(cls.LOG_ROOT_DIR, f"training_log_{cls.TIMESTAMP}.txt")
+        cls.IS_INITIALIZED = True
+        cls.LOG_INITIALIZED = False
     
     @classmethod
     def get_detector_output_channels(cls):
@@ -156,6 +162,8 @@ def load_class_names(yaml_path):
 
 def init_log_file():
     """初始化日志文件"""
+    if ConfigSLMYOLO.LOG_INITIALIZED and ConfigSLMYOLO.LOG_FILE and os.path.exists(ConfigSLMYOLO.LOG_FILE):
+        return
     os.makedirs(ConfigSLMYOLO.LOG_ROOT_DIR, exist_ok=True)
     with open(ConfigSLMYOLO.LOG_FILE, 'w', encoding='utf-8') as f:
         f.write("=" * 80 + "\n")
@@ -163,6 +171,7 @@ def init_log_file():
         f.write("=" * 80 + "\n")
         f.write(f"训练开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write("=" * 80 + "\n\n")
+    ConfigSLMYOLO.LOG_INITIALIZED = True
 
 def log_to_file(message, also_print=True):
     """记录消息到文件"""
@@ -1129,6 +1138,38 @@ def validate(phase, teacher_optical_model, optical_yolo_model, val_loader,
     avg_loss = total_loss / len(val_loader)
     return avg_loss
 
+def save_phase_loss_curves(phase_histories, output_dir):
+    loss_curve_dir = os.path.join(output_dir, "loss_curves")
+    os.makedirs(loss_curve_dir, exist_ok=True)
+
+    phase_titles = {
+        "phase1": "Phase 1 Loss Curve",
+        "phase2": "Phase 2 Loss Curve",
+        "phase3": "Phase 3 Loss Curve",
+    }
+
+    for phase_name, history in phase_histories.items():
+        if len(history["train_epochs"]) == 0:
+            continue
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(history["train_epochs"], history["train_loss"], label="Train Loss", linewidth=2)
+
+        if len(history["val_epochs"]) > 0:
+            plt.plot(history["val_epochs"], history["val_loss"], label="Val Loss", linewidth=2)
+
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title(phase_titles.get(phase_name, f"{phase_name} Loss Curve"))
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(
+            os.path.join(loss_curve_dir, f"{phase_name}_loss_curve.png"),
+            dpi=ConfigSLMYOLO.VIS_DPI
+        )
+        plt.close()
+
 # =========================================================
 # 训练函数
 # =========================================================
@@ -1140,6 +1181,8 @@ def train():
     ConfigSLMYOLO.print_config()
     
     device = ConfigSLMYOLO.DEVICE
+    log_to_file(f"Log file path: {ConfigSLMYOLO.LOG_FILE}")
+    log_to_file(f"Visualization save path: {ConfigSLMYOLO.OUTPUT_DIR}")
     log_to_file(f"使用设备: {device}")
     
     log_to_file("初始化模型组件...")
@@ -1220,6 +1263,11 @@ def train():
     
     # 训练循环
     log_to_file("开始训练...")
+    phase_histories = {
+        "phase1": {"train_epochs": [], "train_loss": [], "val_epochs": [], "val_loss": []},
+        "phase2": {"train_epochs": [], "train_loss": [], "val_epochs": [], "val_loss": []},
+        "phase3": {"train_epochs": [], "train_loss": [], "val_epochs": [], "val_loss": []},
+    }
     
     for epoch in range(ConfigSLMYOLO.EPOCHS):
         phase, phase_desc = ConfigSLMYOLO.get_current_phase(epoch)
@@ -1276,6 +1324,8 @@ def train():
                 total_loss += loss.item()
         
         avg_loss = total_loss / len(train_loader)
+        phase_histories[phase]["train_epochs"].append(epoch + 1)
+        phase_histories[phase]["train_loss"].append(avg_loss)
         log_to_file(f"Epoch {epoch+1} 平均损失: {avg_loss:.6f}")
         
         # 验证集验证（如果存在验证集）
@@ -1283,7 +1333,11 @@ def train():
             log_to_file("进行验证集验证...")
             val_loss = validate(phase, teacher_optical_model, optical_yolo_model, 
                               val_loader, phase1_loss, phase2_loss, phase3_loss, device)
+            phase_histories[phase]["val_epochs"].append(epoch + 1)
+            phase_histories[phase]["val_loss"].append(val_loss)
             log_to_file(f"Epoch {epoch+1} 验证损失: {val_loss:.6f}")
+
+        save_phase_loss_curves(phase_histories, ConfigSLMYOLO.OUTPUT_DIR)
         
         # 保存模型
         if (epoch + 1) % ConfigSLMYOLO.SAVE_INTERVAL == 0 or epoch + 1 == ConfigSLMYOLO.EPOCHS:
@@ -1348,6 +1402,8 @@ def train():
             
             log_to_file(f"{phase_desc}可视化结果已保存到: {ConfigSLMYOLO.VISUALIZATION_DIR}")
     
+    save_phase_loss_curves(phase_histories, ConfigSLMYOLO.OUTPUT_DIR)
+    log_to_file(f"Phase loss curves saved to: {os.path.join(ConfigSLMYOLO.OUTPUT_DIR, 'loss_curves')}")
     log_to_file("训练完成！")
 
 if __name__ == "__main__":
