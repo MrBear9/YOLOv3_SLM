@@ -15,12 +15,12 @@ import time
 from datetime import datetime
 
 # 导入光学YOLOv3模型
-from Optical_class import OpticalYOLOv3, YOLOLoss, build_target
+from Optical_class import ConfigYOLO as BaseConfigYOLO, OpticalYOLOv3, YOLOLoss, build_target
 
 # =========================================================
 # 配置参数
 # =========================================================
-class Config:
+class ConfigYOLO(BaseConfigYOLO):
     # 设备设置
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
@@ -79,11 +79,65 @@ class Config:
     # 检测阈值
     CONF_THRESH = 0.5  # 置信度阈值 # 平衡精度和召回率
     NMS_THRESH = 0.4   # 非极大值抑制阈值 # 适中的去重强度
+    AGNOSTIC_NMS = True
+    DECODE_MAX_DETECTIONS = 100
     VIS_CONF_THRESH = 0.6  # 可视化时使用更严格的阈值，避免框和标签堆叠，只显示高质量的检测结果
     VIS_MAX_DETECTIONS = 8  # 可视化时最多显示8个检测框
     
     # 批次选择设置
     VISUALIZE_BATCH_INDEX = -1  # 可视化批次索引，-1表示随机选择，0-N表示指定批次
+
+    LOG_TABLE_EPOCH_WIDTH = 8
+    LOG_TABLE_PHASE_WIDTH = 18
+    LOG_TABLE_LOSS_WIDTH = 13
+    LOG_TABLE_METRIC_WIDTH = 11
+    LOG_TABLE_LR_WIDTH = 12
+    LOG_TABLE_TEACHER_WIDTH = 12
+    LOG_TABLE_BEST_WIDTH = 8
+    LOG_TABLE_BEST_MARK = "Yes"
+
+    @classmethod
+    def _iter_config_items(cls):
+        seen = set()
+        for base in reversed(cls.__mro__):
+            if base is object:
+                continue
+            for key, value in base.__dict__.items():
+                if key.startswith("_") or key in seen or callable(value) or isinstance(value, (classmethod, staticmethod, property)):
+                    continue
+                seen.add(key)
+                yield key, value
+
+    @classmethod
+    def to_dict(cls):
+        return {key: value for key, value in cls._iter_config_items()}
+
+    @classmethod
+    def get_log_table_separator(cls):
+        return "-" * (
+            cls.LOG_TABLE_EPOCH_WIDTH
+            + cls.LOG_TABLE_PHASE_WIDTH
+            + cls.LOG_TABLE_LOSS_WIDTH * 2
+            + cls.LOG_TABLE_METRIC_WIDTH * 3
+            + cls.LOG_TABLE_LR_WIDTH
+            + cls.LOG_TABLE_TEACHER_WIDTH
+            + cls.LOG_TABLE_BEST_WIDTH
+        )
+
+    @classmethod
+    def get_log_table_header(cls):
+        return (
+            f"{'Epoch':<{cls.LOG_TABLE_EPOCH_WIDTH}}"
+            f"{'Phase':<{cls.LOG_TABLE_PHASE_WIDTH}}"
+            f"{'Train Loss':<{cls.LOG_TABLE_LOSS_WIDTH}}"
+            f"{'Val Loss':<{cls.LOG_TABLE_LOSS_WIDTH}}"
+            f"{'Precision':<{cls.LOG_TABLE_METRIC_WIDTH}}"
+            f"{'Recall':<{cls.LOG_TABLE_METRIC_WIDTH}}"
+            f"{'F1':<{cls.LOG_TABLE_METRIC_WIDTH}}"
+            f"{'LR':<{cls.LOG_TABLE_LR_WIDTH}}"
+            f"{'Teacher W':<{cls.LOG_TABLE_TEACHER_WIDTH}}"
+            f"{'Best':<{cls.LOG_TABLE_BEST_WIDTH}}"
+        )
 
     @classmethod
     def get_current_phase(cls, epoch):
@@ -93,12 +147,15 @@ class Config:
             return "phase2", "教师约束 + 光学层 + 检测头"
         return "phase3", "光学层 + 检测头"
 
+
+Config = ConfigYOLO
+
 # =========================================================
 # 数据集类
 # =========================================================
 class MilitaryDataset(Dataset):
-    def __init__(self, root_dir, mode='train', img_size=640):
-        self.img_size = img_size
+    def __init__(self, root_dir, mode='train', img_size=None):
+        self.img_size = ConfigYOLO.IMG_SIZE if img_size is None else img_size
         self.mode = mode
         
         # 构建路径
@@ -502,7 +559,7 @@ class OpticalYOLOv3Trainer:
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
             'phase_history': self.phase_history,
-            'config': self.config.__dict__,
+            'config': self.config.to_dict(),
             'teacher_status_message': getattr(self.model, 'teacher_status_message', ''),
             'class_names': self.class_names,
             'num_classes': self.num_classes
@@ -517,8 +574,15 @@ class OpticalYOLOv3Trainer:
         torch.save(checkpoint, filepath)
         print(f"模型已保存: {filepath}")
 
-    def decode_detections(self, preds, conf_thresh=0.5, nms_thresh=0.4, max_det=100):
+    def decode_detections(self, preds, conf_thresh=None, nms_thresh=None, max_det=None):
         """解码检测结果，返回边界框、置信度和类别"""
+        if conf_thresh is None:
+            conf_thresh = self.config.CONF_THRESH
+        if nms_thresh is None:
+            nms_thresh = self.config.NMS_THRESH
+        if max_det is None:
+            max_det = self.config.DECODE_MAX_DETECTIONS
+
         batch_size = preds[0].shape[0]
         detections = [[] for _ in range(batch_size)]
         
@@ -603,25 +667,29 @@ class OpticalYOLOv3Trainer:
         ], dim=1)
 
     def non_max_suppression(self, detections, nms_thresh, max_det=None):
-        """按类别执行 NMS，避免不同类别之间互相抑制。"""
+        """根据配置执行 agnostic/class-wise NMS。"""
         if len(detections) == 0:
             return []
 
         boxes_xyxy = self.xywh_to_xyxy(detections[:, :4])
         scores = detections[:, 4]
         class_ids = detections[:, 5]
-        keep = []
 
-        for cls_id in class_ids.unique(sorted=False):
-            cls_mask = class_ids == cls_id
-            cls_indices = torch.where(cls_mask)[0]
-            cls_keep = nms(boxes_xyxy[cls_mask], scores[cls_mask], nms_thresh)
-            keep.append(cls_indices[cls_keep])
+        if self.config.AGNOSTIC_NMS:
+            keep = nms(boxes_xyxy, scores, nms_thresh)
+        else:
+            keep = []
+            for cls_id in class_ids.unique(sorted=False):
+                cls_mask = class_ids == cls_id
+                cls_indices = torch.where(cls_mask)[0]
+                cls_keep = nms(boxes_xyxy[cls_mask], scores[cls_mask], nms_thresh)
+                keep.append(cls_indices[cls_keep])
 
-        if not keep:
-            return []
+            if not keep:
+                return []
 
-        keep = torch.cat(keep)
+            keep = torch.cat(keep)
+
         keep = keep[scores[keep].argsort(descending=True)]
         if max_det is not None:
             keep = keep[:max_det]
@@ -1049,7 +1117,19 @@ class OpticalYOLOv3Trainer:
         
         print(f"配置参数已保存: {self.config_log_path}")
 
-    def log_training_epoch(self, epoch, phase, train_loss, val_loss, precision, recall, f1_score, lr, constraint_weight=0.0):
+    def log_training_epoch(
+        self,
+        epoch,
+        phase,
+        train_loss,
+        val_loss,
+        precision,
+        recall,
+        f1_score,
+        lr,
+        constraint_weight=0.0,
+        best_status="",
+    ):
         """记录每个epoch的训练日志到txt文件"""
         with open(self.training_log_path, 'a', encoding='utf-8') as f:
             if epoch == 0:
@@ -1057,11 +1137,24 @@ class OpticalYOLOv3Trainer:
                 f.write("光学YOLOv3训练日志\n")
                 f.write("="*80 + "\n\n")
                 f.write(f"训练开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                f.write("-"*80 + "\n")
-                f.write(f"{'Epoch':<8} {'Phase':<10} {'Train Loss':<12} {'Val Loss':<12} {'Precision':<10} {'Recall':<10} {'F1':<10} {'LR':<12} {'Teacher W':<12}\n")
-                f.write("-"*80 + "\n")
+                separator = self.config.get_log_table_separator()
+                f.write(separator + "\n")
+                f.write(self.config.get_log_table_header() + "\n")
+                f.write(separator + "\n")
             
-            f.write(f"{epoch+1:<8} {phase:<10} {train_loss:<12.4f} {val_loss:<12.4f} {precision:<10.3f} {recall:<10.3f} {f1_score:<10.3f} {lr:<12.6f} {constraint_weight:<12.4f}\n")
+            f.write(
+                f"{epoch + 1:<{self.config.LOG_TABLE_EPOCH_WIDTH}}"
+                f"{phase:<{self.config.LOG_TABLE_PHASE_WIDTH}}"
+                f"{train_loss:<{self.config.LOG_TABLE_LOSS_WIDTH}.4f}"
+                f"{val_loss:<{self.config.LOG_TABLE_LOSS_WIDTH}.4f}"
+                f"{precision:<{self.config.LOG_TABLE_METRIC_WIDTH}.3f}"
+                f"{recall:<{self.config.LOG_TABLE_METRIC_WIDTH}.3f}"
+                f"{f1_score:<{self.config.LOG_TABLE_METRIC_WIDTH}.3f}"
+                f"{lr:<{self.config.LOG_TABLE_LR_WIDTH}.6f}"
+                f"{constraint_weight:<{self.config.LOG_TABLE_TEACHER_WIDTH}.4f}"
+                f"{best_status:<{self.config.LOG_TABLE_BEST_WIDTH}}"
+                "\n"
+            )
     
     def save_training_summary(self, total_time, best_epoch, best_val_loss):
         """保存训练总结到txt文件"""
@@ -1190,8 +1283,24 @@ class OpticalYOLOv3Trainer:
                 self.f1_scores.append(f1_score)
             else:
                 precision = recall = f1_score = 0
+
+            is_best = (
+                phase != "phase1"
+                and val_loss < self.best_val_loss - self.config.EARLY_STOPPING_MIN_DELTA
+            )
             
-            self.log_training_epoch(epoch, phase, train_loss, val_loss, precision, recall, f1_score, current_lr, teacher_weight)
+            self.log_training_epoch(
+                epoch,
+                phase,
+                train_loss,
+                val_loss,
+                precision,
+                recall,
+                f1_score,
+                current_lr,
+                teacher_weight,
+                best_status=self.config.LOG_TABLE_BEST_MARK if is_best else "",
+            )
             
             if phase == "phase1":
                 print(f"训练损失: {train_loss:.4f}, 验证损失: {val_loss:.4f}, 学习率: {current_lr:.6f}")
@@ -1204,7 +1313,7 @@ class OpticalYOLOv3Trainer:
             if phase == "phase1":
                 self.no_improve_epochs = 0
             else:
-                if val_loss < self.best_val_loss - self.config.EARLY_STOPPING_MIN_DELTA:
+                if is_best:
                     self.best_val_loss = val_loss
                     self.best_detection_epoch = epoch
                     self.no_improve_epochs = 0
@@ -1254,7 +1363,7 @@ class OpticalYOLOv3Trainer:
 # =========================================================
 def main():
     # 初始化配置
-    config = Config()
+    config = ConfigYOLO()
     
     # 创建训练器
     trainer = OpticalYOLOv3Trainer(config)

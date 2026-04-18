@@ -325,12 +325,12 @@ def extract_specific_phase_layers(pth_file_path, layer_names=None, output_dir="o
 # 使用示例
 if __name__ == "__main__":
     # 设置输入文件和输出目录
-    pth_file = "output/optical_yolo_models/optical_yolo_epoch_20_20260412_001018.pth"  # Fashion-MNIST训练模型
-    output_directory = "output/optical_yolo_phase_layers"  # 输出目录
+    pth_file = "output/OpticalTeacher/optical_student_best.pth"  
+    output_directory = "output/OpticalTeacher/optical_phase_layers"  # 输出目录
 
     print("=" * 70)
     print("光学YOLOv3相位层提取工具")
-    print("专门用于提取Fashion-MNIST训练的光学模型相位参数")
+    print("专门用于提取光学模型相位参数")
     print("=" * 70)
     print(f"模型文件: {pth_file}")
     print(f"输出目录: {output_directory}")

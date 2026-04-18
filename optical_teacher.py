@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
+from torchvision.ops import nms
 import os
 import cv2
 import numpy as np
@@ -28,7 +29,10 @@ def load_teacher_checkpoint(teacher, checkpoint_path, device):
     if not os.path.exists(checkpoint_path):
         return False, f"Teacher checkpoint not found: {checkpoint_path}"
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = extract_state_dict(checkpoint)
     teacher_state = teacher.state_dict()
     compatible_state = {}
@@ -77,6 +81,8 @@ class Config:
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
+    TRAIN_START_TIME = None
+    VISUALIZATION_DIR = None
     
     # 训练参数
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -87,7 +93,10 @@ class Config:
     # 损失权重
     BOX_WEIGHT = 0.05  # 目标框损失权重，用于计算总损失
     OBJ_WEIGHT = 1.5  # 目标损失权重，用于计算总损失
+    NOOBJ_WEIGHT = 0.2
     CLS_WEIGHT = 0.15  # 类别损失权重，用于计算总损失
+    FOCAL_ALPHA = 0.25
+    FOCAL_GAMMA = 2.0
     
     # 锚框设置
     STRIDES = [8, 16, 32]
@@ -109,6 +118,12 @@ class Config:
     PROP_DISTANCE_2 = 0.02  # 传播距离2，单位：米
     SLM_MODE = "phase"  # SLM模式，"phase"或"amplitude"
     RESOLUTION = (640, 640)
+    OPTICAL_FIELD_EPS = 1e-8
+    OPTICAL_NORM_EPS = 1e-6
+    DISPLAY_EPS = 1e-6
+    IOU_EPS = 1e-6
+    YOLO_HEAD_IN_CHANNELS = 1
+    YOLO_HEAD_BASE_CHANNELS = 32
     
     # 训练控制参数
     NORM_ENABLE_EPOCH = 50  # 启用归一化的轮数
@@ -123,6 +138,8 @@ class Config:
     CONF_THRESH = 0.5  # 置信度阈值，用于筛选检测框
     NMS_THRESH = 0.4  # NMS阈值，用于合并重叠检测框
     MAX_DET = 8  # 最大检测框数量，用于限制检测框数量
+    AGNOSTIC_NMS = True
+    METRIC_IOU_THRESHOLD = 0.5
     
     # 可视化参数
     VIS_BATCH_SIZE = 4  # 可视化批次大小，用于可视化检测结果
@@ -134,7 +151,9 @@ class Config:
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
         os.makedirs(cls.TEACHER_OUTPUT_DIR, exist_ok=True)
         cls.LOG_ROOT_DIR = os.path.join(cls.TEACHER_OUTPUT_DIR, "logs")
+        cls.VISUALIZATION_DIR = os.path.join(cls.TEACHER_OUTPUT_DIR, "visualizations")
         os.makedirs(cls.LOG_ROOT_DIR, exist_ok=True)
+        os.makedirs(cls.VISUALIZATION_DIR, exist_ok=True)
         cls.TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
         cls.LOG_FILE = os.path.join(cls.LOG_ROOT_DIR, f"training_log_{cls.TIMESTAMP}.txt")
     
@@ -142,6 +161,18 @@ class Config:
     def get_detector_output_channels(cls):
         """获取检测头输出通道数"""
         return 3 * (4 + 1 + cls.NUM_CLASSES)
+
+    @classmethod
+    def get_best_model_path(cls):
+        return os.path.join(cls.TEACHER_OUTPUT_DIR, "optical_student_best.pth")
+
+    @classmethod
+    def get_final_model_path(cls):
+        return os.path.join(cls.TEACHER_OUTPUT_DIR, "optical_student_final.pth")
+
+    @classmethod
+    def get_loss_curve_path(cls):
+        return os.path.join(cls.TEACHER_OUTPUT_DIR, "loss_curve.png")
     
     @classmethod
     def print_config(cls):
@@ -174,16 +205,17 @@ def log_to_file(message, log_file=None, also_print=True):
 def init_log_file(log_file=None):
     if log_file is None:
         log_file = Config.LOG_FILE
+    Config.TRAIN_START_TIME = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     with open(log_file, 'w', encoding='utf-8') as f:
         f.write("="*80 + "\n")
         f.write("光学教师网络训练日志\n")
         f.write("="*80 + "\n")
-        f.write(f"训练开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"训练开始时间: {Config.TRAIN_START_TIME}\n")
         f.write("="*80 + "\n\n")
 
 init_log_file()
 log_to_file(f"日志文件路径: {Config.LOG_FILE}")
-log_to_file(f"可视化结果保存路径: {Config.LOG_ROOT_DIR.replace('\\logs', '')}")
+log_to_file(f"可视化结果保存路径: {Config.TEACHER_OUTPUT_DIR}")
 log_to_file(f"加载类别信息: {Config.CLASS_NAMES}, 类别数: {Config.NUM_CLASSES}")
 
 # =========================================================
@@ -253,13 +285,13 @@ class OpticalStudent(nn.Module):
         self.enable_norm = False
 
     def forward(self, intensity):
-        amp = torch.sqrt(intensity.clamp(min=0)+1e-8)
+        amp = torch.sqrt(intensity.clamp(min=0) + Config.OPTICAL_FIELD_EPS)
         field = torch.complex(amp, torch.zeros_like(amp))
         field = self.prop1(self.slm1(field))
         field = self.prop2(self.slm2(field))
         out = torch.abs(field)**2
         if self.enable_norm:
-            out = out / (out.mean(dim=[2,3], keepdim=True) + 1e-6)
+            out = out / (out.mean(dim=[2,3], keepdim=True) + Config.OPTICAL_NORM_EPS)
         return out
 
 # =========================================================
@@ -337,7 +369,7 @@ class LightConvBlock(nn.Module):
 class YOLOLightHead(nn.Module):
     def __init__(self, in_channels=1, out_channels=27):
         super(YOLOLightHead, self).__init__()
-        base_ch = 32
+        base_ch = Config.YOLO_HEAD_BASE_CHANNELS
 
         self.init_conv = LightConvBlock(in_channels, base_ch, kernel_size=3, stride=1)
 
@@ -455,11 +487,92 @@ def enhance_feature_for_display(feature_map):
     feature_map = np.asarray(feature_map, dtype=np.float32)
     low = np.percentile(feature_map, 2)
     high = np.percentile(feature_map, 98)
-    if high - low < 1e-6:
+    if high - low < Config.DISPLAY_EPS:
         return np.zeros_like(feature_map)
     
     feature_map = np.clip((feature_map - low) / (high - low), 0.0, 1.0)
     return np.power(feature_map, 0.8)
+
+def xywh_to_xyxy(boxes):
+    half_w = boxes[:, 2] / 2
+    half_h = boxes[:, 3] / 2
+    return torch.stack([
+        boxes[:, 0] - half_w,
+        boxes[:, 1] - half_h,
+        boxes[:, 0] + half_w,
+        boxes[:, 1] + half_h,
+    ], dim=1)
+
+def bbox_iou_xywh(box1, box2, ciou=False, eps=1e-7):
+    box1 = box1.reshape(-1, 4)
+    box2 = box2.reshape(-1, 4)
+    box1_xyxy = xywh_to_xyxy(box1)
+    box2_xyxy = xywh_to_xyxy(box2)
+
+    inter_x1 = torch.max(box1_xyxy[:, 0], box2_xyxy[:, 0])
+    inter_y1 = torch.max(box1_xyxy[:, 1], box2_xyxy[:, 1])
+    inter_x2 = torch.min(box1_xyxy[:, 2], box2_xyxy[:, 2])
+    inter_y2 = torch.min(box1_xyxy[:, 3], box2_xyxy[:, 3])
+
+    inter_w = (inter_x2 - inter_x1).clamp(min=0)
+    inter_h = (inter_y2 - inter_y1).clamp(min=0)
+    inter_area = inter_w * inter_h
+
+    box1_area = (box1_xyxy[:, 2] - box1_xyxy[:, 0]).clamp(min=0) * (box1_xyxy[:, 3] - box1_xyxy[:, 1]).clamp(min=0)
+    box2_area = (box2_xyxy[:, 2] - box2_xyxy[:, 0]).clamp(min=0) * (box2_xyxy[:, 3] - box2_xyxy[:, 1]).clamp(min=0)
+    union = box1_area + box2_area - inter_area + eps
+    iou = inter_area / union
+
+    if not ciou:
+        return iou
+
+    center_dist = (box1[:, 0] - box2[:, 0]) ** 2 + (box1[:, 1] - box2[:, 1]) ** 2
+    enc_x1 = torch.min(box1_xyxy[:, 0], box2_xyxy[:, 0])
+    enc_y1 = torch.min(box1_xyxy[:, 1], box2_xyxy[:, 1])
+    enc_x2 = torch.max(box1_xyxy[:, 2], box2_xyxy[:, 2])
+    enc_y2 = torch.max(box1_xyxy[:, 3], box2_xyxy[:, 3])
+    enc_w = (enc_x2 - enc_x1).clamp(min=0)
+    enc_h = (enc_y2 - enc_y1).clamp(min=0)
+    c2 = enc_w ** 2 + enc_h ** 2 + eps
+
+    w1 = box1[:, 2].clamp(min=eps)
+    h1 = box1[:, 3].clamp(min=eps)
+    w2 = box2[:, 2].clamp(min=eps)
+    h2 = box2[:, 3].clamp(min=eps)
+    v = (4.0 / (np.pi ** 2)) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)) ** 2
+    with torch.no_grad():
+        alpha = v / (1.0 - iou + v + eps)
+
+    return iou - (center_dist / c2) - alpha * v
+
+def apply_nms(detections, nms_thresh, max_det, class_agnostic=None):
+    if len(detections) == 0:
+        return np.zeros((0, 6), dtype=np.float32)
+
+    if class_agnostic is None:
+        class_agnostic = Config.AGNOSTIC_NMS
+
+    det_tensor = torch.as_tensor(detections, dtype=torch.float32)
+    boxes_xyxy = xywh_to_xyxy(det_tensor[:, :4])
+    scores = det_tensor[:, 4]
+    class_ids = det_tensor[:, 5]
+
+    if class_agnostic:
+        keep_indices = nms(boxes_xyxy, scores, nms_thresh)
+        det_tensor = det_tensor[keep_indices]
+    else:
+        kept = []
+        for cls_id in class_ids.unique(sorted=False):
+            cls_mask = class_ids == cls_id
+            keep_indices = nms(boxes_xyxy[cls_mask], scores[cls_mask], nms_thresh)
+            kept.append(det_tensor[cls_mask][keep_indices])
+
+        if len(kept) == 0:
+            return np.zeros((0, 6), dtype=np.float32)
+        det_tensor = torch.cat(kept, dim=0)
+
+    det_tensor = det_tensor[det_tensor[:, 4].argsort(descending=True)]
+    return det_tensor[:max_det].cpu().numpy()
 
 def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, img_size=None):
     """
@@ -486,7 +599,7 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
     
     batch_size = preds[0].shape[0]
     detections = [[] for _ in range(batch_size)]
-    strides = [8, 16, 32]
+    strides = Config.STRIDES
     anchors = Config.ANCHORS
     
     for i, pred in enumerate(preds):
@@ -523,13 +636,13 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
                         tx, ty, tw, th = bbox_pred[b, gh, gw, a]
                         
                         # 转换为绝对坐标
-                        x_center = (gw + tx.item()) * stride
-                        y_center = (gh + ty.item()) * stride
+                        x_center = (gw + torch.sigmoid(tx).item()) * stride
+                        y_center = (gh + torch.sigmoid(ty).item()) * stride
                         
                         # 解码宽度和高度
                         anchor_w, anchor_h = anchor_set[a]
-                        w = anchor_w * torch.exp(tw).item()
-                        h = anchor_h * torch.exp(th).item()
+                        w = anchor_w * torch.exp(torch.clamp(tw, min=-8.0, max=8.0)).item()
+                        h = anchor_h * torch.exp(torch.clamp(th, min=-8.0, max=8.0)).item()
                         
                         # 限制边界框在图像范围内
                         x_center = max(0, min(x_center, img_size - 1))
@@ -542,14 +655,10 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
     # 按置信度排序并限制最大检测数量
     for b in range(batch_size):
         if len(detections[b]) > 0:
-            detections[b] = np.array(detections[b])
-            # 按置信度降序排序
-            sorted_indices = detections[b][:, 4].argsort()[::-1]
-            detections[b] = detections[b][sorted_indices]
-            # 限制最大检测数量
-            if len(detections[b]) > max_det:
-                detections[b] = detections[b][:max_det]
-    
+            detections[b] = apply_nms(detections[b], nms_thresh, max_det)
+        else:
+            detections[b] = np.zeros((0, 6), dtype=np.float32)
+
     return detections
 
 # =========================================================
@@ -566,7 +675,7 @@ def save_feature_comparison(epoch, teacher, student, save_dir, prefix="train", i
     
     fig, axes = plt.subplots(4, 4, figsize=(20, 20))
     
-    def norm(x): return (x - x.min()) / (x.max() - x.min() + 1e-8)
+    def norm(x): return (x - x.min()) / (x.max() - x.min() + Config.OPTICAL_FIELD_EPS)
     
     for i, idx in enumerate(indices):
         if input_images is not None:
@@ -666,18 +775,26 @@ def log_all_parameters():
     log_to_file("\n【损失权重】")
     log_to_file(f"  边界框损失权重: {Config.BOX_WEIGHT}")
     log_to_file(f"  目标性损失权重: {Config.OBJ_WEIGHT}")
+    log_to_file(f"  非目标损失权重: {Config.NOOBJ_WEIGHT}")
     log_to_file(f"  类别损失权重: {Config.CLS_WEIGHT}")
+    log_to_file(f"  Focal Alpha: {Config.FOCAL_ALPHA}")
+    log_to_file(f"  Focal Gamma: {Config.FOCAL_GAMMA}")
     
     log_to_file("\n【锚框设置】")
     log_to_file(f"  步长: {Config.STRIDES}")
     log_to_file(f"  P3锚框: {Config.ANCHORS[0]}")
     log_to_file(f"  P4锚框: {Config.ANCHORS[1]}")
     log_to_file(f"  P5锚框: {Config.ANCHORS[2]}")
+    log_to_file(f"  Agnostic NMS: {Config.AGNOSTIC_NMS}")
+    log_to_file(f"  Metric IoU Threshold: {Config.METRIC_IOU_THRESHOLD}")
     
     log_to_file("\n【模型参数】")
     teacher = ConvTeacher()
     student = OpticalStudent()
-    detector = YOLOLightHead(in_channels=1, out_channels=Config.get_detector_output_channels())
+    detector = YOLOLightHead(
+        in_channels=Config.YOLO_HEAD_IN_CHANNELS,
+        out_channels=Config.get_detector_output_channels(),
+    )
     
     log_to_file(f"  ConvTeacher可训练参数: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
     log_to_file(f"  OpticalStudent可训练参数: {sum(p.numel() for p in student.parameters() if p.requires_grad):,}")
@@ -698,67 +815,12 @@ def log_all_parameters():
     
     log_to_file("\n【路径设置】")
     log_to_file(f"  日志文件: {Config.LOG_FILE}")
-    log_to_file(f"  可视化结果: {Config.TEACHER_OUTPUT_DIR}")
-    log_to_file(f"  模型保存: {os.path.join(Config.TEACHER_OUTPUT_DIR, 'optical_student_final.pth')}")
+    log_to_file(f"  可视化结果: {Config.VISUALIZATION_DIR}")
+    log_to_file(f"  模型保存: {Config.get_final_model_path()}")
     
     log_to_file("\n" + "="*80)
     log_to_file("参数设置输出完成")
     log_to_file("="*80 + "\n")
-
-# =========================================================
-# 日志输出所有参数
-# =========================================================
-def log_all_parameters():
-    log_to_file("="*80)
-    log_to_file("训练参数设置")
-    log_to_file("="*80)
-    
-    log_to_file("\n【数据集参数】")
-    log_to_file(f"  YAML路径: {Config.YAML_PATH}")
-    log_to_file(f"  类别数量: {Config.NUM_CLASSES}")
-    log_to_file(f"  类别名称: {Config.CLASS_NAMES}")
-    
-    log_to_file("\n【训练参数】")
-    log_to_file(f"  设备: {Config.DEVICE}")
-    log_to_file(f"  图像尺寸: {Config.IMG_SIZE}")
-    log_to_file(f"  批次大小: {Config.BATCH_SIZE}")
-    log_to_file(f"  训练轮数: {Config.EPOCHS}")
-    
-    log_to_file("\n【损失权重】")
-    log_to_file(f"  边界框损失权重: {Config.BOX_WEIGHT}")
-    log_to_file(f"  目标性损失权重: {Config.OBJ_WEIGHT}")
-    log_to_file(f"  类别损失权重: {Config.CLS_WEIGHT}")
-    
-    log_to_file("\n【锚框设置】")
-    log_to_file(f"  步长: {Config.STRIDES}")
-    log_to_file(f"  P3锚框: {Config.ANCHORS[0]}")
-    log_to_file(f"  P4锚框: {Config.ANCHORS[1]}")
-    log_to_file(f"  P5锚框: {Config.ANCHORS[2]}")
-    
-    log_to_file("\n【模型参数】")
-    teacher = ConvTeacher()
-    student = OpticalStudent((640, 640), mode="phase")
-    detector = YOLOLightHead(in_channels=1, out_channels=3*(4 + 1 + Config.NUM_CLASSES))
-    
-    log_to_file(f"  ConvTeacher可训练参数: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
-    log_to_file(f"  OpticalStudent可训练参数: {sum(p.numel() for p in student.parameters() if p.requires_grad):,}")
-    log_to_file(f"  检测头输出通道数: {3*(4 + 1 + Config.NUM_CLASSES)}")
-    log_to_file(f"  检测头可训练参数: {sum(p.numel() for p in detector.parameters() if p.requires_grad):,}")
-    
-    log_to_file("\n【优化器参数】")
-    log_to_file(f"  优化器: {Config.OPTIMIZER}")
-    log_to_file(f"  学习率: {Config.LEARNING_RATE}")
-    log_to_file(f"  权重衰减: {Config.WEIGHT_DECAY}")
-    
-    log_to_file("\n【路径设置】")
-    log_to_file(f"  日志文件: {Config.LOG_FILE}")
-    log_to_file(f"  可视化结果: {Config.TEACHER_OUTPUT_DIR}")
-    log_to_file(f"  模型保存: {os.path.join(Config.TEACHER_OUTPUT_DIR, 'optical_student_final.pth')}")
-    
-    log_to_file("\n" + "="*80)
-    log_to_file("参数设置输出完成")
-    log_to_file("="*80 + "\n")
-
 
 # =========================================================
 # 训练函数
@@ -792,8 +854,7 @@ def train():
     optimizer = torch.optim.Adam(student.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
     criterion = MultiScaleMSELoss()
     
-    vis_dir = os.path.join(Config.TEACHER_OUTPUT_DIR, "visualizations")
-    os.makedirs(vis_dir, exist_ok=True)
+    vis_dir = Config.VISUALIZATION_DIR
     
     loss_curve = []
     best_loss = float('inf')
@@ -821,7 +882,7 @@ def train():
         
         if avg_loss < best_loss:
             best_loss = avg_loss
-            best_model_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "optical_student_best.pth")
+            best_model_path = Config.get_best_model_path()
             torch.save(student.state_dict(), best_model_path)
             log_to_file(f"Epoch {epoch}: 保存最佳模型 (Loss: {best_loss:.6f})", also_print=False)
         
@@ -849,15 +910,15 @@ def train():
     plt.title("Training Loss Curve")
     plt.legend()
     plt.grid(True)
-    plt.savefig(os.path.join(Config.TEACHER_OUTPUT_DIR, "loss_curve.png"), dpi=Config.VIS_DPI)
+    plt.savefig(Config.get_loss_curve_path(), dpi=Config.VIS_DPI)
     plt.close()
 
-    model_save_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "optical_student_final.pth")
+    model_save_path = Config.get_final_model_path()
     torch.save(student.state_dict(), model_save_path)
     
     log_to_file("="*60)
     log_to_file("训练完成！")
-    log_to_file(f"最佳模型已保存到: {os.path.join(Config.TEACHER_OUTPUT_DIR, 'optical_student_best.pth')}")
+    log_to_file(f"最佳模型已保存到: {Config.get_best_model_path()}")
     log_to_file(f"最终模型已保存到: {model_save_path}")
     log_to_file(f"所有结果已保存到: {Config.TEACHER_OUTPUT_DIR}")
     log_to_file("="*60)

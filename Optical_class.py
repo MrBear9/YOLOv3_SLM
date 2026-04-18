@@ -8,6 +8,41 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class ConfigYOLO:
+    DEFAULT_NUM_CLASSES = 4
+    DEFAULT_IMG_SIZE = 640
+    DEFAULT_RESOLUTION = (640, 640)
+    DEFAULT_OPTICAL_MODE = "phase"
+    DEFAULT_ENABLE_CONSTRAINT = True
+    DEFAULT_TEACHER_INIT_MODE = "checkpoint_or_random"
+    DEFAULT_FREEZE_TEACHER = True
+    DEFAULT_TEACHER_DEVICE = "cpu"
+    DEFAULT_SLM_VORTEX_CHARGE = 0
+    DEFAULT_VORTEX_PERTURBATION = 0.1
+
+    PROP_DISTANCE_1 = 0.01
+    PROP_DISTANCE_2 = 0.02
+    WAVELENGTH = 532e-9
+    PIXEL_SIZE = 6.4e-6
+
+    YOLO_HEAD_IN_CHANNELS = 1
+    YOLO_HEAD_BASE_CHANNELS = 32
+    YOLO_NUM_ANCHORS = 3
+
+    OPTICAL_FIELD_EPS = 1e-8
+    OPTICAL_NORM_EPS = 1e-6
+    TARGET_EPS = 1e-6
+
+    LOSS_BOX_WEIGHT = 0.05
+    LOSS_OBJ_WEIGHT = 1.5
+    LOSS_NOOBJ_WEIGHT = 0.5
+    LOSS_CLS_WEIGHT = 0.15
+
+    @classmethod
+    def detector_output_channels(cls, num_classes):
+        return cls.YOLO_NUM_ANCHORS * (4 + 1 + num_classes)
+
+
 def extract_state_dict(checkpoint):
     if not isinstance(checkpoint, dict):
         return checkpoint
@@ -156,31 +191,54 @@ class OpticalFrontend(nn.Module):
 
     def __init__(
         self,
-        resolution=(640, 640),
-        mode="phase",
-        slm1_vortex_charge=0,
-        slm2_vortex_charge=0,
-        vortex_perturbation=0.1,
+        resolution=None,
+        mode=None,
+        slm1_vortex_charge=None,
+        slm2_vortex_charge=None,
+        vortex_perturbation=None,
     ):
         super().__init__()
+        resolution = resolution or ConfigYOLO.DEFAULT_RESOLUTION
+        mode = mode or ConfigYOLO.DEFAULT_OPTICAL_MODE
+        slm1_vortex_charge = (
+            ConfigYOLO.DEFAULT_SLM_VORTEX_CHARGE if slm1_vortex_charge is None else slm1_vortex_charge
+        )
+        slm2_vortex_charge = (
+            ConfigYOLO.DEFAULT_SLM_VORTEX_CHARGE if slm2_vortex_charge is None else slm2_vortex_charge
+        )
+        vortex_perturbation = (
+            ConfigYOLO.DEFAULT_VORTEX_PERTURBATION
+            if vortex_perturbation is None
+            else vortex_perturbation
+        )
         self.slm1 = SLMLayer(
             resolution,
             mode,
             vortex_charge=slm1_vortex_charge,
             vortex_perturbation=vortex_perturbation,
         )
-        self.prop1 = ASMPropagation(0.01, 532e-9, 6.4e-6, resolution)
+        self.prop1 = ASMPropagation(
+            ConfigYOLO.PROP_DISTANCE_1,
+            ConfigYOLO.WAVELENGTH,
+            ConfigYOLO.PIXEL_SIZE,
+            resolution,
+        )
         self.slm2 = SLMLayer(
             resolution,
             mode,
             vortex_charge=slm2_vortex_charge,
             vortex_perturbation=vortex_perturbation,
         )
-        self.prop2 = ASMPropagation(0.02, 532e-9, 6.4e-6, resolution)
+        self.prop2 = ASMPropagation(
+            ConfigYOLO.PROP_DISTANCE_2,
+            ConfigYOLO.WAVELENGTH,
+            ConfigYOLO.PIXEL_SIZE,
+            resolution,
+        )
         self.enable_norm = False
 
     def forward(self, intensity):
-        amp = torch.sqrt(intensity.clamp(min=0) + 1e-8)
+        amp = torch.sqrt(intensity.clamp(min=0) + ConfigYOLO.OPTICAL_FIELD_EPS)
         field = torch.complex(amp, torch.zeros_like(amp))
 
         field = self.prop1(self.slm1(field))
@@ -188,7 +246,7 @@ class OpticalFrontend(nn.Module):
 
         out = torch.abs(field) ** 2
         if self.enable_norm:
-            out = out / (out.mean(dim=[2, 3], keepdim=True) + 1e-6)
+            out = out / (out.mean(dim=[2, 3], keepdim=True) + ConfigYOLO.OPTICAL_NORM_EPS)
         return out
 
 
@@ -219,9 +277,15 @@ class LightConvBlock(nn.Module):
 class YOLOLightHead(nn.Module):
     """Lightweight FPN-style detector head."""
 
-    def __init__(self, in_channels=1, out_channels=27):
+    def __init__(self, in_channels=None, out_channels=None):
         super().__init__()
-        base_ch = 32
+        in_channels = ConfigYOLO.YOLO_HEAD_IN_CHANNELS if in_channels is None else in_channels
+        out_channels = (
+            ConfigYOLO.detector_output_channels(ConfigYOLO.DEFAULT_NUM_CLASSES)
+            if out_channels is None
+            else out_channels
+        )
+        base_ch = ConfigYOLO.YOLO_HEAD_BASE_CHANNELS
 
         self.init_conv = LightConvBlock(in_channels, base_ch, kernel_size=3, stride=1)
         self.down_to_p5 = nn.Sequential(
@@ -269,20 +333,31 @@ class OpticalYOLOv3(nn.Module):
 
     def __init__(
         self,
-        num_classes=4,
-        img_size=640,
-        optical_mode="phase",
-        enable_constraint=True,
+        num_classes=None,
+        img_size=None,
+        optical_mode=None,
+        enable_constraint=None,
         teacher=None,
         teacher_checkpoint=None,
-        teacher_init_mode="checkpoint_or_random",
-        freeze_teacher=True,
-        teacher_device="cpu",
-        slm1_vortex_charge=0,
-        slm2_vortex_charge=0,
-        vortex_perturbation=0.1,
+        teacher_init_mode=None,
+        freeze_teacher=None,
+        teacher_device=None,
+        slm1_vortex_charge=None,
+        slm2_vortex_charge=None,
+        vortex_perturbation=None,
     ):
         super().__init__()
+        num_classes = ConfigYOLO.DEFAULT_NUM_CLASSES if num_classes is None else num_classes
+        img_size = ConfigYOLO.DEFAULT_IMG_SIZE if img_size is None else img_size
+        optical_mode = ConfigYOLO.DEFAULT_OPTICAL_MODE if optical_mode is None else optical_mode
+        enable_constraint = (
+            ConfigYOLO.DEFAULT_ENABLE_CONSTRAINT if enable_constraint is None else enable_constraint
+        )
+        teacher_init_mode = (
+            ConfigYOLO.DEFAULT_TEACHER_INIT_MODE if teacher_init_mode is None else teacher_init_mode
+        )
+        freeze_teacher = ConfigYOLO.DEFAULT_FREEZE_TEACHER if freeze_teacher is None else freeze_teacher
+        teacher_device = ConfigYOLO.DEFAULT_TEACHER_DEVICE if teacher_device is None else teacher_device
         self.img_size = img_size
         self.enable_constraint = enable_constraint
         self.freeze_teacher = freeze_teacher
@@ -299,8 +374,11 @@ class OpticalYOLOv3(nn.Module):
             vortex_perturbation=vortex_perturbation,
         )
 
-        out_channels = 3 * (4 + 1 + num_classes)
-        self.detector = YOLOLightHead(in_channels=1, out_channels=out_channels)
+        out_channels = ConfigYOLO.detector_output_channels(num_classes)
+        self.detector = YOLOLightHead(
+            in_channels=ConfigYOLO.YOLO_HEAD_IN_CHANNELS,
+            out_channels=out_channels,
+        )
 
         self.teacher = teacher if teacher is not None else ConvTeacher()
         self.num_classes = num_classes
@@ -367,15 +445,15 @@ class OpticalYOLOv3(nn.Module):
 
 
 class YOLOLoss(nn.Module):
-    def __init__(self, box_weight=0.05, obj_weight=1.5, noobj_weight=0.5, cls_weight=0.15):
+    def __init__(self, box_weight=None, obj_weight=None, noobj_weight=None, cls_weight=None):
         super().__init__()
         self.mse = nn.MSELoss()
         self.smooth_l1 = nn.SmoothL1Loss()
         self.bce = nn.BCEWithLogitsLoss()
-        self.box_weight = box_weight
-        self.obj_weight = obj_weight
-        self.noobj_weight = noobj_weight
-        self.cls_weight = cls_weight
+        self.box_weight = ConfigYOLO.LOSS_BOX_WEIGHT if box_weight is None else box_weight
+        self.obj_weight = ConfigYOLO.LOSS_OBJ_WEIGHT if obj_weight is None else obj_weight
+        self.noobj_weight = ConfigYOLO.LOSS_NOOBJ_WEIGHT if noobj_weight is None else noobj_weight
+        self.cls_weight = ConfigYOLO.LOSS_CLS_WEIGHT if cls_weight is None else cls_weight
 
     def forward(self, pred, target, batch_size):
         pred = pred.permute(0, 2, 3, 1).reshape(batch_size, pred.shape[2], pred.shape[3], 3, -1)
@@ -412,7 +490,7 @@ def build_target(targets, anchors, stride, num_classes, img_size, device):
     batch_size = targets.shape[0]
     h, w = img_size // stride, img_size // stride
     num_anchors = len(anchors)
-    eps = 1e-6
+    eps = ConfigYOLO.TARGET_EPS
 
     target_tensor = torch.zeros((batch_size, h, w, num_anchors, 5 + num_classes), device=device)
 
