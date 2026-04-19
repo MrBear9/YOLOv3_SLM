@@ -64,6 +64,35 @@ def load_class_names(yaml_path):
     num_classes = len(CLASS_NAMES)
     return CLASS_NAMES, num_classes
 
+def load_anchor_groups(anchor_yaml_path):
+    """Load grouped YOLO anchors from an external yaml file."""
+    with open(anchor_yaml_path, 'r', encoding='utf-8') as f:
+        cfg = yaml.safe_load(f)
+
+    anchors = cfg.get('anchors')
+    if anchors is None:
+        raise ValueError(f"'anchors' not found in anchor config: {anchor_yaml_path}")
+    if not isinstance(anchors, list) or len(anchors) != 3:
+        raise ValueError(f"'anchors' must contain exactly 3 layers: {anchor_yaml_path}")
+
+    normalized = []
+    for layer_idx, layer_anchors in enumerate(anchors):
+        if not isinstance(layer_anchors, list) or len(layer_anchors) != 3:
+            raise ValueError(f"Layer {layer_idx} must contain exactly 3 anchors: {anchor_yaml_path}")
+
+        layer_values = []
+        for anchor_idx, anchor in enumerate(layer_anchors):
+            if not isinstance(anchor, (list, tuple)) or len(anchor) != 2:
+                raise ValueError(f"Anchor {anchor_idx} in layer {layer_idx} must be [w, h]: {anchor_yaml_path}")
+            w = int(anchor[0])
+            h = int(anchor[1])
+            if w <= 0 or h <= 0:
+                raise ValueError(f"Anchor {anchor_idx} in layer {layer_idx} must be positive: {anchor_yaml_path}")
+            layer_values.append([w, h])
+        normalized.append(layer_values)
+
+    return normalized
+
 # =========================================================
 # 配置类 - 集中管理所有参数
 # =========================================================
@@ -100,11 +129,15 @@ class Config:
     
     # 锚框设置
     STRIDES = [8, 16, 32]
-    ANCHORS = [
+    DEFAULT_ANCHORS = [
         [[26,23], [47,49], [100,67]],   # P3: 小目标 / 较小目标
         [[103,169], [203,107], [351,177]],  # P4: 中目标 / 长条目标
         [[241,354], [534,299], [568,528]]  # P5: 大目标 / 超大目标（军舰等）
     ]
+    ANCHOR_CONFIG_PATH = r"output\anchor_clustering\yolo_anchors.yaml"
+    USE_EXTERNAL_ANCHORS = False
+    ANCHORS = None
+    ANCHOR_SOURCE = "default"
     
     # 优化器参数
     LEARNING_RATE = 5e-4  # 学习率，用于优化模型参数
@@ -149,6 +182,15 @@ class Config:
     def initialize(cls):
         """初始化配置，加载类别信息和创建输出目录"""
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
+        cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
+        cls.ANCHOR_SOURCE = "default"
+        if cls.USE_EXTERNAL_ANCHORS:
+            try:
+                cls.ANCHORS = load_anchor_groups(cls.ANCHOR_CONFIG_PATH)
+                cls.ANCHOR_SOURCE = cls.ANCHOR_CONFIG_PATH
+            except Exception as exc:
+                cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
+                cls.ANCHOR_SOURCE = f"default (external load failed: {exc})"
         os.makedirs(cls.TEACHER_OUTPUT_DIR, exist_ok=True)
         cls.LOG_ROOT_DIR = os.path.join(cls.TEACHER_OUTPUT_DIR, "logs")
         cls.VISUALIZATION_DIR = os.path.join(cls.TEACHER_OUTPUT_DIR, "visualizations")
@@ -600,62 +642,62 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
     batch_size = preds[0].shape[0]
     detections = [[] for _ in range(batch_size)]
     strides = Config.STRIDES
-    anchors = Config.ANCHORS
     
     for i, pred in enumerate(preds):
         grid_h, grid_w = pred.shape[2], pred.shape[3]
         stride = strides[i]
-        anchor_set = anchors[i]
         
-        # 重塑预测为 (batch_size, grid_h, grid_w, 3, 5+num_classes)
         pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
         
-        # 应用sigmoid激活函数
-        obj_conf = torch.sigmoid(pred[..., 4])  # 目标置信度
-        cls_conf = torch.sigmoid(pred[..., 5:])  # 类别置信度
-        bbox_pred = pred[..., :4]  # 边界框预测 (tx, ty, tw, th)
-        
+        obj_conf = torch.sigmoid(pred[..., 4])
+        cls_conf = torch.sigmoid(pred[..., 5:])
+        cls_score, cls_id = cls_conf.max(dim=-1)
+        final_conf = obj_conf * cls_score
+        valid_mask = (obj_conf >= conf_thresh) & (final_conf >= conf_thresh)
+
+        if not valid_mask.any():
+            continue
+
+        device = pred.device
+        dtype = pred.dtype
+        grid_y, grid_x = torch.meshgrid(
+            torch.arange(grid_h, device=device, dtype=dtype),
+            torch.arange(grid_w, device=device, dtype=dtype),
+            indexing='ij'
+        )
+        grid_x = grid_x.view(1, grid_h, grid_w, 1)
+        grid_y = grid_y.view(1, grid_h, grid_w, 1)
+        anchor_tensor = torch.tensor(Config.ANCHORS[i], device=device, dtype=dtype).view(1, 1, 1, 3, 2)
+
+        tx = pred[..., 0]
+        ty = pred[..., 1]
+        tw = pred[..., 2]
+        th = pred[..., 3]
+
+        x_center = ((torch.sigmoid(tx) + grid_x) * stride).clamp(0, img_size - 1)
+        y_center = ((torch.sigmoid(ty) + grid_y) * stride).clamp(0, img_size - 1)
+        w = (torch.exp(torch.clamp(tw, min=-8.0, max=8.0)) * anchor_tensor[..., 0]).clamp(1, img_size)
+        h = (torch.exp(torch.clamp(th, min=-8.0, max=8.0)) * anchor_tensor[..., 1]).clamp(1, img_size)
+
         for b in range(batch_size):
-            for gh in range(grid_h):
-                for gw in range(grid_w):
-                    for a in range(3):
-                        # 获取目标置信度
-                        obj_score = obj_conf[b, gh, gw, a].item()
-                        if obj_score < conf_thresh:
-                            continue
-                        
-                        # 获取类别置信度和类别ID
-                        cls_scores = cls_conf[b, gh, gw, a]
-                        cls_score, cls_id = cls_scores.max(dim=-1)
-                        final_conf = obj_score * cls_score.item()
-                        
-                        if final_conf < conf_thresh:
-                            continue
-                        
-                        # 解码边界框坐标 (YOLO格式)
-                        tx, ty, tw, th = bbox_pred[b, gh, gw, a]
-                        
-                        # 转换为绝对坐标
-                        x_center = (gw + torch.sigmoid(tx).item()) * stride
-                        y_center = (gh + torch.sigmoid(ty).item()) * stride
-                        
-                        # 解码宽度和高度
-                        anchor_w, anchor_h = anchor_set[a]
-                        w = anchor_w * torch.exp(torch.clamp(tw, min=-8.0, max=8.0)).item()
-                        h = anchor_h * torch.exp(torch.clamp(th, min=-8.0, max=8.0)).item()
-                        
-                        # 限制边界框在图像范围内
-                        x_center = max(0, min(x_center, img_size - 1))
-                        y_center = max(0, min(y_center, img_size - 1))
-                        w = max(1, min(w, img_size))
-                        h = max(1, min(h, img_size))
-                        
-                        detections[b].append([x_center, y_center, w, h, final_conf, cls_id.item()])
+            sample_mask = valid_mask[b]
+            if not sample_mask.any():
+                continue
+
+            sample_detections = torch.stack([
+                x_center[b][sample_mask],
+                y_center[b][sample_mask],
+                w[b][sample_mask],
+                h[b][sample_mask],
+                final_conf[b][sample_mask],
+                cls_id[b][sample_mask].to(dtype),
+            ], dim=1)
+            detections[b].append(sample_detections)
     
     # 按置信度排序并限制最大检测数量
     for b in range(batch_size):
         if len(detections[b]) > 0:
-            detections[b] = apply_nms(detections[b], nms_thresh, max_det)
+            detections[b] = apply_nms(torch.cat(detections[b], dim=0), nms_thresh, max_det)
         else:
             detections[b] = np.zeros((0, 6), dtype=np.float32)
 
@@ -782,6 +824,9 @@ def log_all_parameters():
     
     log_to_file("\n【锚框设置】")
     log_to_file(f"  步长: {Config.STRIDES}")
+    log_to_file(f"  使用外部锚框: {Config.USE_EXTERNAL_ANCHORS}")
+    log_to_file(f"  外部锚框配置: {Config.ANCHOR_CONFIG_PATH}")
+    log_to_file(f"  当前锚框来源: {Config.ANCHOR_SOURCE}")
     log_to_file(f"  P3锚框: {Config.ANCHORS[0]}")
     log_to_file(f"  P4锚框: {Config.ANCHORS[1]}")
     log_to_file(f"  P5锚框: {Config.ANCHORS[2]}")

@@ -117,7 +117,7 @@ class ConfigYOLO:
     
     # 锚框设置
     STRIDES = [8, 16, 32]
-    ANCHORS = [
+    DEFAULT_ANCHORS = [
         # P3: 小目标（士兵、小型装备）
         [[26, 23], [47, 49], [100, 67]],
         # P4: 中目标（坦克、战机主体）
@@ -125,10 +125,23 @@ class ConfigYOLO:
         # P5: 大目标（军舰、大型战机）
         [[241, 354], [534, 299], [568, 528]]
     ]
+    ANCHOR_CONFIG_PATH = r"output\anchor_clustering\yolo_anchors.yaml"
+    USE_EXTERNAL_ANCHORS = False
+    ANCHORS = None
+    ANCHOR_SOURCE = "default"
     
     @classmethod
     def initialize(cls):
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
+        cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
+        cls.ANCHOR_SOURCE = "default"
+        if cls.USE_EXTERNAL_ANCHORS:
+            try:
+                cls.ANCHORS = load_anchor_groups(cls.ANCHOR_CONFIG_PATH)
+                cls.ANCHOR_SOURCE = cls.ANCHOR_CONFIG_PATH
+            except Exception as exc:
+                cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
+                cls.ANCHOR_SOURCE = f"default (external load failed: {exc})"
     
     @classmethod
     def get_detector_output_channels(cls):
@@ -219,6 +232,35 @@ def load_class_names(yaml_path):
         num_classes = 1
     
     return class_names, num_classes
+
+def load_anchor_groups(anchor_yaml_path):
+    """Load grouped YOLO anchors from an external yaml file."""
+    with open(anchor_yaml_path, 'r', encoding='utf-8') as f:
+        cfg = yaml.safe_load(f)
+
+    anchors = cfg.get('anchors')
+    if anchors is None:
+        raise ValueError(f"'anchors' not found in anchor config: {anchor_yaml_path}")
+    if not isinstance(anchors, list) or len(anchors) != 3:
+        raise ValueError(f"'anchors' must contain exactly 3 layers: {anchor_yaml_path}")
+
+    normalized = []
+    for layer_idx, layer_anchors in enumerate(anchors):
+        if not isinstance(layer_anchors, list) or len(layer_anchors) != 3:
+            raise ValueError(f"Layer {layer_idx} must contain exactly 3 anchors: {anchor_yaml_path}")
+
+        layer_values = []
+        for anchor_idx, anchor in enumerate(layer_anchors):
+            if not isinstance(anchor, (list, tuple)) or len(anchor) != 2:
+                raise ValueError(f"Anchor {anchor_idx} in layer {layer_idx} must be [w, h]: {anchor_yaml_path}")
+            w = int(anchor[0])
+            h = int(anchor[1])
+            if w <= 0 or h <= 0:
+                raise ValueError(f"Anchor {anchor_idx} in layer {layer_idx} must be positive: {anchor_yaml_path}")
+            layer_values.append([w, h])
+        normalized.append(layer_values)
+
+    return normalized
 
 def xywh_to_xyxy(boxes):
     """将YOLO格式的边界框(x_center, y_center, w, h)转换为(x1, y1, x2, y2)格式"""
@@ -331,44 +373,56 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
     for i, pred in enumerate(preds):
         grid_h, grid_w = pred.shape[2], pred.shape[3]
         stride = ConfigYOLO.STRIDES[i]
-        anchor_set = ConfigYOLO.ANCHORS[i]
         pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
 
         obj_conf = torch.sigmoid(pred[..., 4])
         cls_conf = torch.sigmoid(pred[..., 5:])
-        bbox_pred = pred[..., :4]
+        cls_score, cls_id = cls_conf.max(dim=-1)
+        final_conf = obj_conf * cls_score
+        valid_mask = (obj_conf >= conf_thresh) & (final_conf >= conf_thresh)
+
+        if not valid_mask.any():
+            continue
+
+        device = pred.device
+        dtype = pred.dtype
+        grid_y, grid_x = torch.meshgrid(
+            torch.arange(grid_h, device=device, dtype=dtype),
+            torch.arange(grid_w, device=device, dtype=dtype),
+            indexing='ij'
+        )
+        grid_x = grid_x.view(1, grid_h, grid_w, 1)
+        grid_y = grid_y.view(1, grid_h, grid_w, 1)
+        anchor_tensor = torch.tensor(ConfigYOLO.ANCHORS[i], device=device, dtype=dtype).view(1, 1, 1, 3, 2)
+
+        tx = pred[..., 0]
+        ty = pred[..., 1]
+        tw = pred[..., 2]
+        th = pred[..., 3]
+
+        x_center = ((torch.sigmoid(tx) + grid_x) * stride).clamp(0, img_size - 1)
+        y_center = ((torch.sigmoid(ty) + grid_y) * stride).clamp(0, img_size - 1)
+        w = (torch.exp(torch.clamp(tw, min=-8.0, max=8.0)) * anchor_tensor[..., 0]).clamp(1, img_size)
+        h = (torch.exp(torch.clamp(th, min=-8.0, max=8.0)) * anchor_tensor[..., 1]).clamp(1, img_size)
 
         for b in range(batch_size):
-            for gh in range(grid_h):
-                for gw in range(grid_w):
-                    for a in range(3):
-                        obj_score = obj_conf[b, gh, gw, a].item()
-                        if obj_score < conf_thresh:
-                            continue
+            sample_mask = valid_mask[b]
+            if not sample_mask.any():
+                continue
 
-                        cls_scores = cls_conf[b, gh, gw, a]
-                        cls_score, cls_id = cls_scores.max(dim=-1)
-                        final_conf = obj_score * cls_score.item()
-                        if final_conf < conf_thresh:
-                            continue
-
-                        tx, ty, tw, th = bbox_pred[b, gh, gw, a]
-                        x_center = (gw + torch.sigmoid(tx).item()) * stride
-                        y_center = (gh + torch.sigmoid(ty).item()) * stride
-
-                        anchor_w, anchor_h = anchor_set[a]
-                        w = anchor_w * torch.exp(torch.clamp(tw, min=-8.0, max=8.0)).item()
-                        h = anchor_h * torch.exp(torch.clamp(th, min=-8.0, max=8.0)).item()
-
-                        x_center = max(0, min(x_center, img_size - 1))
-                        y_center = max(0, min(y_center, img_size - 1))
-                        w = max(1, min(w, img_size))
-                        h = max(1, min(h, img_size))
-                        detections[b].append([x_center, y_center, w, h, final_conf, cls_id.item()])
+            sample_detections = torch.stack([
+                x_center[b][sample_mask],
+                y_center[b][sample_mask],
+                w[b][sample_mask],
+                h[b][sample_mask],
+                final_conf[b][sample_mask],
+                cls_id[b][sample_mask].to(dtype),
+            ], dim=1)
+            detections[b].append(sample_detections)
 
     for b in range(batch_size):
         if len(detections[b]) > 0:
-            detections[b] = apply_nms(detections[b], nms_thresh, max_det)
+            detections[b] = apply_nms(torch.cat(detections[b], dim=0), nms_thresh, max_det)
         else:
             detections[b] = np.zeros((0, 6), dtype=np.float32)
 
@@ -733,6 +787,7 @@ def main():
     
     # 初始化配置
     ConfigYOLO.initialize()
+    print(f"当前锚框来源: {ConfigYOLO.ANCHOR_SOURCE}")
     
     # 创建检测器
     try:

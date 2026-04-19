@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import yaml
 
 
 class ConfigYOLO:
@@ -41,6 +42,51 @@ class ConfigYOLO:
     @classmethod
     def detector_output_channels(cls, num_classes):
         return cls.YOLO_NUM_ANCHORS * (4 + 1 + num_classes)
+
+
+def load_anchor_groups(anchor_yaml_path):
+    """Load grouped YOLO anchors from an external yaml file."""
+    with open(anchor_yaml_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    anchors = cfg.get("anchors")
+    if anchors is None:
+        raise ValueError(f"'anchors' not found in anchor config: {anchor_yaml_path}")
+    if not isinstance(anchors, list) or len(anchors) != 3:
+        raise ValueError(f"'anchors' must contain exactly 3 layers: {anchor_yaml_path}")
+
+    normalized = []
+    for layer_idx, layer_anchors in enumerate(anchors):
+        if not isinstance(layer_anchors, list) or len(layer_anchors) != 3:
+            raise ValueError(f"Layer {layer_idx} must contain exactly 3 anchors: {anchor_yaml_path}")
+
+        layer_values = []
+        for anchor_idx, anchor in enumerate(layer_anchors):
+            if not isinstance(anchor, (list, tuple)) or len(anchor) != 2:
+                raise ValueError(f"Anchor {anchor_idx} in layer {layer_idx} must be [w, h]: {anchor_yaml_path}")
+
+            w = int(anchor[0])
+            h = int(anchor[1])
+            if w <= 0 or h <= 0:
+                raise ValueError(f"Anchor {anchor_idx} in layer {layer_idx} must be positive: {anchor_yaml_path}")
+            layer_values.append([w, h])
+        normalized.append(layer_values)
+
+    return normalized
+
+
+def resolve_anchor_groups(default_anchors, use_external_anchors=False, anchor_config_path=None):
+    """Resolve anchors from defaults or an optional external yaml config."""
+    anchors = [[anchor.copy() for anchor in layer] for layer in default_anchors]
+    anchor_source = "default"
+    if use_external_anchors:
+        try:
+            anchors = load_anchor_groups(anchor_config_path)
+            anchor_source = anchor_config_path
+        except Exception as exc:
+            anchors = [[anchor.copy() for anchor in layer] for layer in default_anchors]
+            anchor_source = f"default (external load failed: {exc})"
+    return anchors, anchor_source
 
 
 def extract_state_dict(checkpoint):

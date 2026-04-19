@@ -15,7 +15,13 @@ import time
 from datetime import datetime
 
 # 导入光学YOLOv3模型
-from Optical_class import ConfigYOLO as BaseConfigYOLO, OpticalYOLOv3, YOLOLoss, build_target
+from Optical_class import (
+    ConfigYOLO as BaseConfigYOLO,
+    OpticalYOLOv3,
+    YOLOLoss,
+    build_target,
+    resolve_anchor_groups,
+)
 
 # =========================================================
 # 配置参数
@@ -48,11 +54,15 @@ class ConfigYOLO(BaseConfigYOLO):
     
     # 锚框设置（针对军事目标优化）
     STRIDES = [8, 16, 32]
-    ANCHORS = [
+    DEFAULT_ANCHORS = [
         [[26,23], [47,49], [100,67]],   # P3: 小目标 / 较小目标
         [[103,169], [203,107], [351,177]],  # P4: 中目标 / 长条目标
         [[241,354], [534,299], [568,528]]  # P5: 大目标 / 超大目标（军舰等）
     ]
+    ANCHOR_CONFIG_PATH = r"output\anchor_clustering\yolo_anchors.yaml"
+    USE_EXTERNAL_ANCHORS = False
+    ANCHORS = None
+    ANCHOR_SOURCE = "default"
     
     # 路径设置
     DATA_YAML_PATH = r"data\military\data.yaml"
@@ -147,6 +157,14 @@ class ConfigYOLO(BaseConfigYOLO):
             return "phase2", "教师约束 + 光学层 + 检测头"
         return "phase3", "光学层 + 检测头"
 
+    @classmethod
+    def initialize(cls):
+        cls.ANCHORS, cls.ANCHOR_SOURCE = resolve_anchor_groups(
+            cls.DEFAULT_ANCHORS,
+            use_external_anchors=cls.USE_EXTERNAL_ANCHORS,
+            anchor_config_path=cls.ANCHOR_CONFIG_PATH,
+        )
+
 
 Config = ConfigYOLO
 
@@ -223,6 +241,7 @@ class MilitaryDataset(Dataset):
 class OpticalYOLOv3Trainer:
     def __init__(self, config):
         self.config = config
+        self.config.initialize()
         self.device = config.DEVICE
         
         # 创建输出目录
@@ -233,6 +252,7 @@ class OpticalYOLOv3Trainer:
         # 加载类别信息
         self.class_names, self.num_classes = self.load_class_names()
         print(f"类别数量: {self.num_classes}, 类别名称: {self.class_names}")
+        print(f"当前锚框来源: {self.config.ANCHOR_SOURCE}")
         
         # 初始化模型
         self.model = self.init_model()
@@ -585,69 +605,64 @@ class OpticalYOLOv3Trainer:
 
         batch_size = preds[0].shape[0]
         detections = [[] for _ in range(batch_size)]
-        
+
         for i, pred in enumerate(preds):
             grid_h, grid_w = pred.shape[2], pred.shape[3]
             stride = self.config.STRIDES[i]
-            anchor_tensor = torch.tensor(
-                self.config.ANCHORS[i], device=pred.device, dtype=pred.dtype
-            )
-            
-            # 重塑预测为 (batch_size, grid_h, grid_w, 3, 5+num_classes)
             pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
-            
+
             obj_conf = torch.sigmoid(pred[..., 4])
             cls_probs = torch.sigmoid(pred[..., 5:])
             cls_conf, cls_id = cls_probs.max(dim=-1)
             final_conf = obj_conf * cls_conf
-            obj_mask = final_conf > conf_thresh
-            
+            valid_mask = (obj_conf >= conf_thresh) & (final_conf >= conf_thresh)
+
+            if not valid_mask.any():
+                continue
+
+            device = pred.device
+            dtype = pred.dtype
+            grid_y, grid_x = torch.meshgrid(
+                torch.arange(grid_h, device=device, dtype=dtype),
+                torch.arange(grid_w, device=device, dtype=dtype),
+                indexing="ij",
+            )
+            grid_x = grid_x.view(1, grid_h, grid_w, 1)
+            grid_y = grid_y.view(1, grid_h, grid_w, 1)
+            anchor_tensor = torch.tensor(self.config.ANCHORS[i], device=device, dtype=dtype).view(1, 1, 1, 3, 2)
+
+            bx = pred[..., 0]
+            by = pred[..., 1]
+            bw = pred[..., 2]
+            bh = pred[..., 3]
+
+            x = ((torch.sigmoid(bx) + grid_x) * stride).clamp(0, self.config.IMG_SIZE - 1)
+            y = ((torch.sigmoid(by) + grid_y) * stride).clamp(0, self.config.IMG_SIZE - 1)
+            width = (torch.exp(torch.clamp(bw, min=-8.0, max=8.0)) * anchor_tensor[..., 0]).clamp(1, self.config.IMG_SIZE)
+            height = (torch.exp(torch.clamp(bh, min=-8.0, max=8.0)) * anchor_tensor[..., 1]).clamp(1, self.config.IMG_SIZE)
+
             for b in range(batch_size):
-                for h_idx in range(grid_h):
-                    for w_idx in range(grid_w):
-                        for anchor in range(3):
-                            if obj_mask[b, h_idx, w_idx, anchor]:
-                                bx, by, bw, bh = pred[b, h_idx, w_idx, anchor, :4]
-                                conf = final_conf[b, h_idx, w_idx, anchor].item()
-                                current_cls_id = cls_id[b, h_idx, w_idx, anchor].item()
-                                anchor_w, anchor_h = anchor_tensor[anchor]
+                sample_mask = valid_mask[b]
+                if not sample_mask.any():
+                    continue
 
-                                # 与 build_target/YOLOLoss 保持一致：xy 为网格内偏移，wh 为相对 anchor 的 log 编码。
-                                x = float(
-                                    torch.clamp(
-                                        (torch.sigmoid(bx) + w_idx) * stride,
-                                        0,
-                                        self.config.IMG_SIZE - 1
-                                    ).item()
-                                )
-                                y = float(
-                                    torch.clamp(
-                                        (torch.sigmoid(by) + h_idx) * stride,
-                                        0,
-                                        self.config.IMG_SIZE - 1
-                                    ).item()
-                                )
-                                width = float(
-                                    torch.clamp(
-                                        torch.exp(torch.clamp(bw, min=-8.0, max=8.0)) * anchor_w,
-                                        1,
-                                        self.config.IMG_SIZE
-                                    ).item()
-                                )
-                                height = float(
-                                    torch.clamp(
-                                        torch.exp(torch.clamp(bh, min=-8.0, max=8.0)) * anchor_h,
-                                        1,
-                                        self.config.IMG_SIZE
-                                    ).item()
-                                )
-
-                                detections[b].append([x, y, width, height, conf, current_cls_id])
+                sample_detections = torch.stack(
+                    [
+                        x[b][sample_mask],
+                        y[b][sample_mask],
+                        width[b][sample_mask],
+                        height[b][sample_mask],
+                        final_conf[b][sample_mask],
+                        cls_id[b][sample_mask].to(dtype),
+                    ],
+                    dim=1,
+                )
+                detections[b].append(sample_detections)
 
         final_detections = []
         for batch_detections in detections:
             if batch_detections:
-                batch_detections = torch.tensor(batch_detections, dtype=torch.float32)
+                batch_detections = torch.cat(batch_detections, dim=0)
                 keep = self.non_max_suppression(batch_detections, nms_thresh, max_det=max_det)
                 kept = batch_detections[keep]
                 final_detections.append(kept.tolist())
@@ -1067,6 +1082,9 @@ class OpticalYOLOv3Trainer:
             f.write("锚框设置\n")
             f.write("-"*80 + "\n")
             f.write(f"STRIDES: {self.config.STRIDES}\n")
+            f.write(f"USE_EXTERNAL_ANCHORS: {self.config.USE_EXTERNAL_ANCHORS}\n")
+            f.write(f"ANCHOR_CONFIG_PATH: {self.config.ANCHOR_CONFIG_PATH}\n")
+            f.write(f"ANCHOR_SOURCE: {self.config.ANCHOR_SOURCE}\n")
             f.write("ANCHORS:\n")
             for i, anchors in enumerate(self.config.ANCHORS):
                 f.write(f"  P{i+3} (stride={self.config.STRIDES[i]}): {anchors}\n")

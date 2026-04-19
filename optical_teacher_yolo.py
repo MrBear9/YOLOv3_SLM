@@ -31,6 +31,36 @@ def load_class_names(yaml_path):
     
     return class_names, num_classes
 
+def load_anchor_groups(anchor_yaml_path):
+    """Load grouped YOLO anchors from an external yaml file."""
+    with open(anchor_yaml_path, 'r', encoding='utf-8') as f:
+        cfg = yaml.safe_load(f)
+
+    anchors = cfg.get('anchors')
+    if anchors is None:
+        raise ValueError(f"'anchors' not found in anchor config: {anchor_yaml_path}")
+    if not isinstance(anchors, list) or len(anchors) != 3:
+        raise ValueError(f"'anchors' must contain exactly 3 layers: {anchor_yaml_path}")
+
+    normalized = []
+    for layer_idx, layer_anchors in enumerate(anchors):
+        if not isinstance(layer_anchors, list) or len(layer_anchors) != 3:
+            raise ValueError(f"Layer {layer_idx} must contain exactly 3 anchors: {anchor_yaml_path}")
+
+        layer_values = []
+        for anchor_idx, anchor in enumerate(layer_anchors):
+            if not isinstance(anchor, (list, tuple)) or len(anchor) != 2:
+                raise ValueError(f"Anchor {anchor_idx} in layer {layer_idx} must be [w, h]: {anchor_yaml_path}")
+
+            w = int(anchor[0])
+            h = int(anchor[1])
+            if w <= 0 or h <= 0:
+                raise ValueError(f"Anchor {anchor_idx} in layer {layer_idx} must be positive: {anchor_yaml_path}")
+            layer_values.append([w, h])
+        normalized.append(layer_values)
+
+    return normalized
+
 def init_log_file():
     """初始化日志文件，使用ConfigYOLO路径"""
     os.makedirs(ConfigYOLO.LOG_ROOT_DIR, exist_ok=True)
@@ -511,44 +541,61 @@ def decode_detections_fixed(preds, conf_thresh=None, nms_thresh=None, max_det=No
     for i, pred in enumerate(preds):
         grid_h, grid_w = pred.shape[2], pred.shape[3]
         stride = Config.STRIDES[i]
-        anchor_set = Config.ANCHORS[i]
         pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
 
         obj_conf = torch.sigmoid(pred[..., 4])
         cls_conf = torch.sigmoid(pred[..., 5:])
-        bbox_pred = pred[..., :4]
+        cls_score, cls_id = cls_conf.max(dim=-1)
+        final_conf = obj_conf * cls_score
+        valid_mask = (obj_conf >= conf_thresh) & (final_conf >= conf_thresh)
+
+        if not valid_mask.any():
+            continue
+
+        device = pred.device
+        dtype = pred.dtype
+        grid_y, grid_x = torch.meshgrid(
+            torch.arange(grid_h, device=device, dtype=dtype),
+            torch.arange(grid_w, device=device, dtype=dtype),
+            indexing='ij'
+        )
+        grid_x = grid_x.view(1, grid_h, grid_w, 1)
+        grid_y = grid_y.view(1, grid_h, grid_w, 1)
+        anchor_tensor = torch.tensor(Config.ANCHORS[i], device=device, dtype=dtype).view(1, 1, 1, 3, 2)
+
+        tx = pred[..., 0]
+        ty = pred[..., 1]
+        tw = pred[..., 2]
+        th = pred[..., 3]
+
+        x_center = (grid_x + torch.sigmoid(tx)) * stride
+        y_center = (grid_y + torch.sigmoid(ty)) * stride
+        w = anchor_tensor[..., 0] * torch.exp(torch.clamp(tw, min=-8.0, max=8.0))
+        h = anchor_tensor[..., 1] * torch.exp(torch.clamp(th, min=-8.0, max=8.0))
+
+        x_center = x_center.clamp(0, img_size - 1)
+        y_center = y_center.clamp(0, img_size - 1)
+        w = w.clamp(1, img_size)
+        h = h.clamp(1, img_size)
 
         for b in range(batch_size):
-            for gh in range(grid_h):
-                for gw in range(grid_w):
-                    for a in range(3):
-                        obj_score = obj_conf[b, gh, gw, a].item()
-                        if obj_score < conf_thresh:
-                            continue
+            sample_mask = valid_mask[b]
+            if not sample_mask.any():
+                continue
 
-                        cls_scores = cls_conf[b, gh, gw, a]
-                        cls_score, cls_id = cls_scores.max(dim=-1)
-                        final_conf = obj_score * cls_score.item()
-                        if final_conf < conf_thresh:
-                            continue
-
-                        tx, ty, tw, th = bbox_pred[b, gh, gw, a]
-                        x_center = (gw + torch.sigmoid(tx).item()) * stride
-                        y_center = (gh + torch.sigmoid(ty).item()) * stride
-
-                        anchor_w, anchor_h = anchor_set[a]
-                        w = anchor_w * torch.exp(torch.clamp(tw, min=-8.0, max=8.0)).item()
-                        h = anchor_h * torch.exp(torch.clamp(th, min=-8.0, max=8.0)).item()
-
-                        x_center = max(0, min(x_center, img_size - 1))
-                        y_center = max(0, min(y_center, img_size - 1))
-                        w = max(1, min(w, img_size))
-                        h = max(1, min(h, img_size))
-                        detections[b].append([x_center, y_center, w, h, final_conf, cls_id.item()])
+            sample_detections = torch.stack([
+                x_center[b][sample_mask],
+                y_center[b][sample_mask],
+                w[b][sample_mask],
+                h[b][sample_mask],
+                final_conf[b][sample_mask],
+                cls_id[b][sample_mask].to(dtype),
+            ], dim=1)
+            detections[b].append(sample_detections)
 
     for b in range(batch_size):
         if len(detections[b]) > 0:
-            detections[b] = apply_nms(detections[b], nms_thresh, max_det)
+            detections[b] = apply_nms(torch.cat(detections[b], dim=0), nms_thresh, max_det)
         else:
             detections[b] = np.zeros((0, 6), dtype=np.float32)
 
@@ -604,11 +651,15 @@ class ConfigYOLO:
     IOU_THRESHOLD = 0.5    # 目标匹配的IOU阈值（标准YOLOv3设置）
     
     STRIDES = [8, 16, 32] # strides for each feature map
-    ANCHORS = [
+    DEFAULT_ANCHORS = [
         [[26,23], [47,49], [100,67]],   # P3: 小目标 / 较小目标
         [[103,169], [203,107], [351,177]],  # P4: 中目标 / 长条目标
         [[241,354], [534,299], [568,528]]  # P5: 大目标 / 超大目标（军舰等）
     ]
+    ANCHOR_CONFIG_PATH = r"output\anchor_clustering\yolo_anchors.yaml"
+    USE_EXTERNAL_ANCHORS = False
+    ANCHORS = None
+    ANCHOR_SOURCE = "default"
     
     LEARNING_RATE = 5e-4
     WEIGHT_DECAY = 1e-5
@@ -653,6 +704,15 @@ class ConfigYOLO:
     @classmethod
     def initialize(cls):
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
+        cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
+        cls.ANCHOR_SOURCE = "default"
+        if cls.USE_EXTERNAL_ANCHORS:
+            try:
+                cls.ANCHORS = load_anchor_groups(cls.ANCHOR_CONFIG_PATH)
+                cls.ANCHOR_SOURCE = cls.ANCHOR_CONFIG_PATH
+            except Exception as exc:
+                cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
+                cls.ANCHOR_SOURCE = f"default (external load failed: {exc})"
         os.makedirs(cls.TEACHER_OUTPUT_DIR, exist_ok=True)
         cls.LOG_ROOT_DIR = os.path.join(cls.TEACHER_OUTPUT_DIR, "logs")
         os.makedirs(cls.LOG_ROOT_DIR, exist_ok=True)
@@ -742,6 +802,9 @@ def log_all_parameters():
     
     log_to_file("\n【锚框设置】")
     log_to_file(f"  步长: {Config.STRIDES}")
+    log_to_file(f"  使用外部锚框: {Config.USE_EXTERNAL_ANCHORS}")
+    log_to_file(f"  外部锚框配置: {Config.ANCHOR_CONFIG_PATH}")
+    log_to_file(f"  当前锚框来源: {Config.ANCHOR_SOURCE}")
     log_to_file(f"  P3锚框(小目标): {Config.ANCHORS[0]}")
     log_to_file(f"  P4锚框(中目标): {Config.ANCHORS[1]}")
     log_to_file(f"  P5锚框(大目标): {Config.ANCHORS[2]}")
@@ -1375,32 +1438,48 @@ def evaluate_model(model, dataloader, criterion, device):
     }
     return avg_losses, metrics
 
+def _valid_history_points(values):
+    points = [(epoch + 1, value) for epoch, value in enumerate(values) if not np.isnan(value)]
+    if not points:
+        return [], []
+    xs, ys = zip(*points)
+    return list(xs), list(ys)
+
 def save_training_curves(history, output_dir):
     if len(history["train_total"]) == 0:
         return
 
-    epochs = range(len(history["train_total"]))
+    epochs = np.arange(1, len(history["train_total"]) + 1)
     fig, axes = plt.subplots(2, 1, figsize=(10, 10))
 
     axes[0].plot(epochs, history["train_total"], label="Train Loss", linewidth=2)
-    if len(history["val_total"]) > 0:
-        axes[0].plot(epochs, history["val_total"], label="Val Loss", linewidth=2)
+    val_x, val_y = _valid_history_points(history["val_total"])
+    if len(val_x) > 0:
+        axes[0].plot(val_x, val_y, label="Val Loss", linewidth=2, marker="o", markersize=4)
     axes[0].set_xlabel("Epoch")
     axes[0].set_ylabel("Loss")
     axes[0].set_title("Train / Val Loss")
     axes[0].grid(True)
     axes[0].legend()
 
-    if len(history["precision"]) > 0:
-        axes[1].plot(epochs, history["precision"], label="Precision", linewidth=2)
-        axes[1].plot(epochs, history["recall"], label="Recall", linewidth=2)
-        axes[1].plot(epochs, history["f1"], label="F1", linewidth=2)
-        axes[1].plot(epochs, history["map50"], label="mAP@0.5", linewidth=2)
+    precision_x, precision_y = _valid_history_points(history["precision"])
+    recall_x, recall_y = _valid_history_points(history["recall"])
+    f1_x, f1_y = _valid_history_points(history["f1"])
+    map_x, map_y = _valid_history_points(history["map50"])
+    if len(precision_x) > 0:
+        axes[1].plot(precision_x, precision_y, label="Precision", linewidth=2, marker="o", markersize=4)
+    if len(recall_x) > 0:
+        axes[1].plot(recall_x, recall_y, label="Recall", linewidth=2, marker="o", markersize=4)
+    if len(f1_x) > 0:
+        axes[1].plot(f1_x, f1_y, label="F1", linewidth=2, marker="o", markersize=4)
+    if len(map_x) > 0:
+        axes[1].plot(map_x, map_y, label="mAP@0.5", linewidth=2, marker="o", markersize=4)
     axes[1].set_xlabel("Epoch")
     axes[1].set_ylabel("Metric")
     axes[1].set_title("Validation Metrics")
     axes[1].grid(True)
-    axes[1].legend()
+    if len(axes[1].lines) > 0:
+        axes[1].legend()
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "loss_curve.png"), dpi=Config.VIS_DPI)
