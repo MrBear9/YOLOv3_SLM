@@ -1,4 +1,4 @@
-import yaml
+﻿import yaml
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
@@ -32,7 +32,7 @@ def load_class_names(yaml_path):
     return class_names, num_classes
 
 def load_anchor_groups(anchor_yaml_path):
-    """Load grouped YOLO anchors from an external yaml file."""
+    """从外部YAML文件加载分组的YOLO锚点"""
     with open(anchor_yaml_path, 'r', encoding='utf-8') as f:
         cfg = yaml.safe_load(f)
 
@@ -70,7 +70,7 @@ def init_log_file():
         f.write("=" * 80 + "\n")
         f.write("光学教师网络训练日志\n")
         f.write("=" * 80 + "\n")
-        f.write(f"训练开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"训练时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write("=" * 80 + "\n\n")
 
 def log_to_file(message, also_print=True):
@@ -123,7 +123,7 @@ def log_epoch_table_row(epoch, phase, train_loss, val_loss, precision, recall, f
     )
 
 # =========================================================
-# 光学层（相位 + 振幅调制）
+# 光学层（相位 + 幅度调制）
 # =========================================================
 class SLMLayer(nn.Module):
     def __init__(self, resolution, mode="phase"):
@@ -199,7 +199,7 @@ class OpticalStudent(nn.Module):
         return out
 
 # =========================================================
-# 教师网络（卷积-仿YOLOV3）
+# 教师网络（卷积版YOLOV3）
 # =========================================================
 class ConvTeacher(nn.Module):
     def __init__(self):
@@ -383,6 +383,43 @@ def bbox_iou_xywh(box1, box2, ciou=False, eps=1e-7):
 
     return iou - (center_dist / c2) - alpha * v
 
+def bbox_iou_matrix_xywh(box1, box2, eps=1e-7):
+    box1 = box1.reshape(-1, 4)
+    box2 = box2.reshape(-1, 4)
+
+    if box1.numel() == 0 or box2.numel() == 0:
+        return torch.zeros((box1.shape[0], box2.shape[0]), device=box1.device, dtype=box1.dtype)
+
+    box1_xyxy = xywh_to_xyxy(box1)
+    box2_xyxy = xywh_to_xyxy(box2)
+
+    inter_x1 = torch.maximum(box1_xyxy[:, None, 0], box2_xyxy[None, :, 0])
+    inter_y1 = torch.maximum(box1_xyxy[:, None, 1], box2_xyxy[None, :, 1])
+    inter_x2 = torch.minimum(box1_xyxy[:, None, 2], box2_xyxy[None, :, 2])
+    inter_y2 = torch.minimum(box1_xyxy[:, None, 3], box2_xyxy[None, :, 3])
+
+    inter_w = (inter_x2 - inter_x1).clamp(min=0)
+    inter_h = (inter_y2 - inter_y1).clamp(min=0)
+    inter_area = inter_w * inter_h
+
+    area1 = (box1_xyxy[:, 2] - box1_xyxy[:, 0]).clamp(min=0) * (box1_xyxy[:, 3] - box1_xyxy[:, 1]).clamp(min=0)
+    area2 = (box2_xyxy[:, 2] - box2_xyxy[:, 0]).clamp(min=0) * (box2_xyxy[:, 3] - box2_xyxy[:, 1]).clamp(min=0)
+    union = area1[:, None] + area2[None, :] - inter_area + eps
+    return inter_area / union
+
+def weighted_mean(values, weights=None, eps=1e-6):
+    if values.numel() == 0:
+        return torch.zeros((), device=values.device, dtype=values.dtype)
+    if weights is None:
+        return values.mean()
+
+    weights = weights.to(device=values.device, dtype=values.dtype)
+    if weights.shape != values.shape:
+        weights = weights.expand_as(values)
+    weighted_sum = (values * weights).sum()
+    normalizer = weights.sum().clamp(min=eps)
+    return weighted_sum / normalizer
+
 def apply_nms(detections, nms_thresh, max_det, class_agnostic=None):
     if len(detections) == 0:
         return np.zeros((0, 6), dtype=np.float32)
@@ -467,24 +504,24 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
         stride = strides[i]
         anchor_set = anchors[i]
         
-        # 重塑预测为 (batch_size, grid_h, grid_w, 3, 5+num_classes)
+        # Convert to (batch_size, grid_h, grid_w, 3, 5+num_classes)
         pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
         
-        # 应用sigmoid激活函数
-        obj_conf = torch.sigmoid(pred[..., 4])  # 目标置信度
-        cls_conf = torch.sigmoid(pred[..., 5:])  # 类别置信度
-        bbox_pred = pred[..., :4]  # 边界框预测 (tx, ty, tw, th)
+        # Apply sigmoid activation to the confidence scores
+        obj_conf = torch.sigmoid(pred[..., 4])  # Object confidence
+        cls_conf = torch.sigmoid(pred[..., 5:])  # 错误类别 confidence
+        bbox_pred = pred[..., :4]  # 坐标预测 (tx, ty, tw, th)
         
         for b in range(batch_size):
             for gh in range(grid_h):
                 for gw in range(grid_w):
                     for a in range(3):
-                        # 获取目标置信度
+                        # 鑾峰彇鐩爣缃俊搴?
                         obj_score = obj_conf[b, gh, gw, a].item()
                         if obj_score < conf_thresh:
                             continue
                         
-                        # 获取类别置信度和类别ID
+                        # 鑾峰彇绫诲埆缃俊搴﹀拰绫诲埆ID
                         cls_scores = cls_conf[b, gh, gw, a]
                         cls_score, cls_id = cls_scores.max(dim=-1)
                         final_conf = obj_score * cls_score.item()
@@ -492,19 +529,19 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
                         if final_conf < conf_thresh:
                             continue
                         
-                        # 解码边界框坐标 (YOLO格式)
+                        # 瑙ｇ爜杈圭晫妗嗗潗鏍?(YOLO鏍煎紡)
                         tx, ty, tw, th = bbox_pred[b, gh, gw, a]
                         
-                        # 转换为绝对坐标
+                        # 杞崲涓虹粷瀵瑰潗鏍?
                         x_center = (gw + torch.sigmoid(tx).item()) * stride
                         y_center = (gh + torch.sigmoid(ty).item()) * stride
                         
-                        # 解码宽度和高度
+                        # 瑙ｇ爜瀹藉害鍜岄珮搴?
                         anchor_w, anchor_h = anchor_set[a]
                         w = anchor_w * torch.exp(torch.clamp(tw, min=-8.0, max=8.0)).item()
                         h = anchor_h * torch.exp(torch.clamp(th, min=-8.0, max=8.0)).item()
                         
-                        # 限制边界框在图像范围内
+                        # 闄愬埗杈圭晫妗嗗湪鍥惧儚鑼冨洿鍐?
                         x_center = max(0, min(x_center, img_size - 1))
                         y_center = max(0, min(y_center, img_size - 1))
                         w = max(1, min(w, img_size))
@@ -512,14 +549,14 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
                         
                         detections[b].append([x_center, y_center, w, h, final_conf, cls_id.item()])
     
-    # 按置信度排序并限制最大检测数量
+    # 鎸夌疆淇″害鎺掑簭骞堕檺鍒舵渶澶ф娴嬫暟閲?
     for b in range(batch_size):
         if len(detections[b]) > 0:
             detections[b] = np.array(detections[b])
-            # 按置信度降序排序
+            # 鎸夌疆淇″害闄嶅簭鎺掑簭
             sorted_indices = detections[b][:, 4].argsort()[::-1]
             detections[b] = detections[b][sorted_indices]
-            # 限制最大检测数量
+            # 闄愬埗鏈€澶ф娴嬫暟閲?
             if len(detections[b]) > max_det:
                 detections[b] = detections[b][:max_det]
     
@@ -604,100 +641,132 @@ def decode_detections_fixed(preds, conf_thresh=None, nms_thresh=None, max_det=No
 decode_detections = decode_detections_fixed
 
 class ConfigYOLO:
-    FOCAL_ALPHA = 0.25  # 背景类权重 增大会增加背景类的损失
-    FOCAL_GAMMA = 2.0  # 前向传播时的gamma参数 增大会增加分类损失的权重
-    AGNOSTIC_NMS = True  # 是否使用agnostic NMS 增加检测框的多样性
-    VAL_INTERVAL = 5  # 验证间隔 每5个epoch验证一次模型
-    METRIC_IOU_THRESHOLD = 0.5  # 验证指标的IOU阈值
-    EPOCH_TABLE_EPOCH_WIDTH = 8  # 训练表格中epoch列的宽度
-    EPOCH_TABLE_PHASE_WIDTH = 18  # 训练表格中phase列的宽度
-    EPOCH_TABLE_TRAIN_LOSS_WIDTH = 18 
-    EPOCH_TABLE_TRAIN_LOSS_WIDTH = 13
-    EPOCH_TABLE_VAL_LOSS_WIDTH = 13
-    EPOCH_TABLE_METRIC_WIDTH = 11
-    EPOCH_TABLE_LR_WIDTH = 12
-    EPOCH_TABLE_BEST_WIDTH = 8
-    EPOCH_TABLE_BEST_MARK = "Yes"  # 训练表格中best列的标记
-    SKIP_FILE_LOG_MESSAGES = (
-        "best checkpoint updated",
-        "保存最佳模型",
-        "saved best model",
-    )
+    # Data and outputs
     YAML_PATH = r"data\military\data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    
     TEACHER_OUTPUT_DIR = r"output\OpticalTeacherYOLO"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
-    
+
+    # Runtime
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     IMG_SIZE = 640
     BATCH_SIZE = 8
     EPOCHS = 100
-    
-    # 动态损失权重配置（先位置后分类策略）
-    BOX_WEIGHT_BASE = 0.8     # 基础边界框权重
-    OBJ_WEIGHT_BASE = 0.8     # 基础目标性权重
-    NOOBJ_WEIGHT_BASE = 0.2   # 基础非目标权重
-    CLS_WEIGHT_BASE = 0.4    # 基础分类权重
-    
-    # 阶段划分参数
-    POSITION_PHASE_EPOCHS = 20  # 位置优先阶段轮数
-    BALANCE_PHASE_EPOCHS = 10   # 平衡过渡阶段轮数
-    
-    IOU_THRESHOLD = 0.5    # 目标匹配的IOU阈值（标准YOLOv3设置）
-    
-    STRIDES = [8, 16, 32] # strides for each feature map
+
+    # 经常调整的训练参数
+    BOX_WEIGHT_BASE = 1.2  # 增加边界框回归权重，改善大目标定位准确性
+    OBJ_WEIGHT_BASE = 0.7  # 保持原值，避免过度增加候选框
+    NOOBJ_WEIGHT_BASE = 0.2  # 降低负样本权重，减少对大目标定位的干扰
+    CLS_WEIGHT_BASE = 0.2  # 降低分类权重，优先关注定位精度
+
+    POSITION_PHASE_EPOCHS = 25  # 延长位置聚焦阶段，让模型有更多时间学习准确的边界框
+    BALANCE_PHASE_EPOCHS = 10  # 较大的值使过渡到平衡训练更平滑
+
+    IOU_THRESHOLD = 0.5  # 主要正样本匹配阈值；较大的值使正样本分配更严格，可能降低召回率
+    POSITIVE_ANCHOR_IOU = 0.25  # 降低阈值，让更多锚点参与大目标学习，改善大目标定位
+    MAX_POSITIVE_ANCHORS = 1  # 减少匹配的锚点数量，降低单个目标上的重复检测框
+    NOOBJ_IGNORE_IOU = 0.6  # 提高阈值，让更多附近的锚点被忽略，减少重复检测
+
+    SMALL_OBJ_AREA = 32 * 32  # 将对象分组为小目标的阈值
+    LARGE_OBJ_AREA = 128 * 128  # 将对象分组为大目标的阈值
+    SMALL_OBJ_WEIGHT = 0.5  # 较大的值使训练更关注小目标
+    MEDIUM_OBJ_WEIGHT = 1.0  # 中等目标的基准损失权重
+    LARGE_OBJ_WEIGHT = 2.0  # 增加大目标权重，强制模型更关注大目标框的拟合
+
+    FOCAL_ALPHA = 0.25  # 降低正样本权重，减少对重复检测的过度关注
+    FOCAL_GAMMA = 2.0  # 较大的值更关注困难样本，但可能使置信度校准和收敛稳定性降低
+
+    CONF_THRESH = 0.4  # 提高置信度阈值，过滤掉更多低质量检测框
+    NMS_THRESH = 0.4  # 降低NMS阈值，更严格地抑制重叠框
+    MAX_DET = 6  # 根据数据集统计（平均1.6个目标/图像），设置为6个框足够覆盖绝大多数情况
+    AGNOSTIC_NMS = True  # 如果为True，不同类别的框也可以相互抑制
+
+    # 验证和指标
+    VAL_INTERVAL = 5
+    METRIC_IOU_THRESHOLD = 0.5  # 较大的值在评估期间使TP匹配更严格，可能降低召回率，但可能增加假阳性
+
+    # 模型和锚点
+    STRIDES = [8, 16, 32]
     DEFAULT_ANCHORS = [
-        [[26,23], [47,49], [100,67]],   # P3: 小目标 / 较小目标
-        [[103,169], [203,107], [351,177]],  # P4: 中目标 / 长条目标
-        [[241,354], [534,299], [568,528]]  # P5: 大目标 / 超大目标（军舰等）
+        [[26, 23], [47, 49], [100, 67]],  # P3: 小目标
+        [[103, 169], [203, 107], [351, 177]],  # P4: 中等目标
+        [[241, 354], [534, 299], [568, 528]],  # P5: 大目标
     ]
     ANCHOR_CONFIG_PATH = r"output\anchor_clustering\yolo_anchors.yaml"
-    USE_EXTERNAL_ANCHORS = False
+    USE_EXTERNAL_ANCHORS = True
     ANCHORS = None
     ANCHOR_SOURCE = "default"
-    
+
+    # Optimizer and checkpoints
     LEARNING_RATE = 5e-4
     WEIGHT_DECAY = 1e-5
     OPTIMIZER = "Adam"
     TEACHER_CHECKPOINT = None
     FREEZE_TEACHER = False
     SAVE_TEACHER_WEIGHTS = True
-    
-    VIS_INTERVAL = 5 # visualization interval in epochs
-    
-    CONF_THRESH = 0.5 # confidence threshold
-    NMS_THRESH = 0.4 # NMS threshold for post-processing
-    MAX_DET = 8 # maximum number of detections to keep
-    
-    VIS_BATCH_SIZE = 4 # visualization batch size
-    VIS_DPI = 120 # visualization DPI
 
+    # Visualization
+    VIS_INTERVAL = 5
+    VIS_BATCH_SIZE = 4
+    VIS_DPI = 130
+    VIS_DATASET_SPLIT = "val"  # 可视化时使用的数据集分割
+    VIS_SEED = 20260420  # 可视化时的随机种子，确保可重复性
+
+    # Logging table
+    EPOCH_TABLE_EPOCH_WIDTH = 8
+    EPOCH_TABLE_PHASE_WIDTH = 18
+    EPOCH_TABLE_TRAIN_LOSS_WIDTH = 13
+    EPOCH_TABLE_VAL_LOSS_WIDTH = 13
+    EPOCH_TABLE_METRIC_WIDTH = 11
+    EPOCH_TABLE_LR_WIDTH = 12
+    EPOCH_TABLE_BEST_WIDTH = 8
+    EPOCH_TABLE_BEST_MARK = "Yes"
+    SKIP_FILE_LOG_MESSAGES = (
+        "best checkpoint updated",
+        "saved best model",
+        "best model saved",
+    )
     @classmethod
     def get_dynamic_weights(cls, epoch):
         if epoch < cls.POSITION_PHASE_EPOCHS:
             box_weight = cls.BOX_WEIGHT_BASE * 1.3
             cls_weight = cls.CLS_WEIGHT_BASE * 0.8
             phase = "position_focus"
+            size_weights = {
+                "small": cls.SMALL_OBJ_WEIGHT,
+                "medium": cls.MEDIUM_OBJ_WEIGHT,
+                "large": cls.LARGE_OBJ_WEIGHT,
+            }
         elif epoch < cls.POSITION_PHASE_EPOCHS + cls.BALANCE_PHASE_EPOCHS:
             progress = (epoch - cls.POSITION_PHASE_EPOCHS) / max(cls.BALANCE_PHASE_EPOCHS, 1)
             box_weight = cls.BOX_WEIGHT_BASE * (1.3 - 0.3 * progress)
             cls_weight = cls.CLS_WEIGHT_BASE * (0.8 + 0.2 * progress)
             phase = "balance_transition"
+            size_weights = {
+                "small": cls.SMALL_OBJ_WEIGHT + (1.0 - cls.SMALL_OBJ_WEIGHT) * progress,
+                "medium": 1.0,
+                "large": cls.LARGE_OBJ_WEIGHT - (cls.LARGE_OBJ_WEIGHT - 1.0) * progress,
+            }
         else:
             box_weight = cls.BOX_WEIGHT_BASE
             cls_weight = cls.CLS_WEIGHT_BASE
             phase = "balanced"
+            size_weights = {
+                "small": 1.0,
+                "medium": 1.0,
+                "large": 1.0,
+            }
 
         return {
             "box_weight": box_weight,
             "obj_weight": cls.OBJ_WEIGHT_BASE,
             "noobj_weight": cls.NOOBJ_WEIGHT_BASE,
             "cls_weight": cls_weight,
+            "size_weights": size_weights,
             "phase": phase,
         }
 
@@ -753,7 +822,7 @@ class ConfigYOLO:
     @classmethod
     def print_config(cls):
         print("="*80)
-        print("Optical Teacher YOLO Training Config")
+        print("光学教师YOLO训练配置")
         print("="*80)
         print(f"Device: {cls.DEVICE}")
         print(f"Image Size: {cls.IMG_SIZE}")
@@ -763,6 +832,7 @@ class ConfigYOLO:
         print(f"Learning Rate: {cls.LEARNING_RATE}")
         print(f"Class Names: {cls.CLASS_NAMES}")
         print("="*80)
+
 
 Config = ConfigYOLO
 
@@ -774,71 +844,76 @@ log_to_file(f"Log file path: {Config.LOG_FILE}")
 log_to_file(f"Visualization save path: {Config.TEACHER_OUTPUT_DIR}")
 log_to_file(f"Class info: {Config.CLASS_NAMES}, Num classes: {Config.NUM_CLASSES}")
 
-# 记录完整的参数配置到日志文件
+# 打印所有配置参数
 def log_all_parameters():
-    """记录所有训练参数到日志文件"""
+    """Log all configuration parameters."""
     log_to_file("="*80)
-    log_to_file("光学教师YOLO训练参数配置")
+    log_to_file("Optical teacher YOLO training configuration")
     log_to_file("="*80)
     
-    log_to_file("\n【数据集参数】")
-    log_to_file(f"  YAML路径: {Config.YAML_PATH}")
-    log_to_file(f"  类别数量: {Config.NUM_CLASSES}")
-    log_to_file(f"  类别名称: {Config.CLASS_NAMES}")
+    log_to_file("\n[Dataset]")
+    log_to_file(f"  YAML path: {Config.YAML_PATH}")
+    log_to_file(f"  Num classes: {Config.NUM_CLASSES}")
+    log_to_file(f"  Class names: {Config.CLASS_NAMES}")
     
-    log_to_file("\n【训练参数】")
-    log_to_file(f"  设备: {Config.DEVICE}")
-    log_to_file(f"  图像尺寸: {Config.IMG_SIZE}")
-    log_to_file(f"  批次大小: {Config.BATCH_SIZE}")
-    log_to_file(f"  训练轮数: {Config.EPOCHS}")
+    log_to_file("\n[Training]")
+    log_to_file(f"  Device: {Config.DEVICE}")
+    log_to_file(f"  Image size: {Config.IMG_SIZE}")
+    log_to_file(f"  Batch size: {Config.BATCH_SIZE}")
+    log_to_file(f"  Epochs: {Config.EPOCHS}")
     
-    log_to_file("\n【损失权重配置】")
-    log_to_file(f"  基础边界框权重: {Config.BOX_WEIGHT_BASE}")
-    log_to_file(f"  基础目标性权重: {Config.OBJ_WEIGHT_BASE}")
-    log_to_file(f"  基础非目标权重: {Config.NOOBJ_WEIGHT_BASE}")
-    log_to_file(f"  基础分类权重: {Config.CLS_WEIGHT_BASE}")
-    log_to_file(f"  位置优先阶段轮数: {Config.POSITION_PHASE_EPOCHS}")
-    log_to_file(f"  平衡过渡阶段轮数: {Config.BALANCE_PHASE_EPOCHS}")
+    log_to_file("\n[Loss Weights]")
+    log_to_file(f"  Box weight: {Config.BOX_WEIGHT_BASE}")
+    log_to_file(f"  Obj weight: {Config.OBJ_WEIGHT_BASE}")
+    log_to_file(f"  Noobj weight: {Config.NOOBJ_WEIGHT_BASE}")
+    log_to_file(f"  Class weight: {Config.CLS_WEIGHT_BASE}")
+    log_to_file(f"  Position phase epochs: {Config.POSITION_PHASE_EPOCHS}")
+    log_to_file(f"  Balance phase epochs: {Config.BALANCE_PHASE_EPOCHS}")
     
-    log_to_file("\n【锚框设置】")
-    log_to_file(f"  步长: {Config.STRIDES}")
-    log_to_file(f"  使用外部锚框: {Config.USE_EXTERNAL_ANCHORS}")
-    log_to_file(f"  外部锚框配置: {Config.ANCHOR_CONFIG_PATH}")
-    log_to_file(f"  当前锚框来源: {Config.ANCHOR_SOURCE}")
-    log_to_file(f"  P3锚框(小目标): {Config.ANCHORS[0]}")
-    log_to_file(f"  P4锚框(中目标): {Config.ANCHORS[1]}")
-    log_to_file(f"  P5锚框(大目标): {Config.ANCHORS[2]}")
-    log_to_file(f"  IOU阈值: {Config.IOU_THRESHOLD}")
+    log_to_file("\n[Anchors]")
+    log_to_file(f"  Strides: {Config.STRIDES}")
+    log_to_file(f"  Use external anchors: {Config.USE_EXTERNAL_ANCHORS}")
+    log_to_file(f"  Anchor config path: {Config.ANCHOR_CONFIG_PATH}")
+    log_to_file(f"  Anchor source: {Config.ANCHOR_SOURCE}")
+    log_to_file(f"  P3 anchors: {Config.ANCHORS[0]}")
+    log_to_file(f"  P4 anchors: {Config.ANCHORS[1]}")
+    log_to_file(f"  P5 anchors: {Config.ANCHORS[2]}")
+    log_to_file(f"  IOU threshold: {Config.IOU_THRESHOLD}")
+    log_to_file(f"  Positive anchor IoU: {Config.POSITIVE_ANCHOR_IOU}")
+    log_to_file(f"  Max positive anchors: {Config.MAX_POSITIVE_ANCHORS}")
+    log_to_file(f"  Ignore IoU for noobj: {Config.NOOBJ_IGNORE_IOU}")
     
-    log_to_file("\n【优化器参数】")
-    log_to_file(f"  优化器: {Config.OPTIMIZER}")
-    log_to_file(f"  学习率: {Config.LEARNING_RATE}")
-    log_to_file(f"  权重衰减: {Config.WEIGHT_DECAY}")
+    log_to_file("\n[Optimizer]")
+    log_to_file(f"  Optimizer: {Config.OPTIMIZER}")
+    log_to_file(f"  Learning rate: {Config.LEARNING_RATE}")
+    log_to_file(f"  Weight decay: {Config.WEIGHT_DECAY}")
     
-    log_to_file("\n【检测参数】")
-    log_to_file(f"  置信度阈值: {Config.CONF_THRESH}")
-    log_to_file(f"  NMS阈值: {Config.NMS_THRESH}")
-    log_to_file(f"  最大检测数量: {Config.MAX_DET}")
+    log_to_file("\n[Detection]")
+    log_to_file(f"  Confidence threshold: {Config.CONF_THRESH}")
+    log_to_file(f"  NMS threshold: {Config.NMS_THRESH}")
+    log_to_file(f"  Max detections: {Config.MAX_DET}")
     
-    log_to_file("\n【可视化参数】")
-    log_to_file(f"  可视化间隔: {Config.VIS_INTERVAL} 轮")
-    log_to_file(f"  可视化批次大小: {Config.VIS_BATCH_SIZE}")
-    log_to_file(f"  可视化DPI: {Config.VIS_DPI}")
+    log_to_file("\n[Visualization]")
+    log_to_file(f"  Visualization interval: {Config.VIS_INTERVAL} epochs")
+    log_to_file(f"  Visualization batch size: {Config.VIS_BATCH_SIZE}")
+    log_to_file(f"  Visualization DPI: {Config.VIS_DPI}")
+    log_to_file(f"  Visualization split: {Config.VIS_DATASET_SPLIT}")
+    log_to_file(f"  Visualization seed: {Config.VIS_SEED}")
     
-    log_to_file("\n【路径设置】")
-    log_to_file(f"  教师输出目录: {Config.TEACHER_OUTPUT_DIR}")
-    log_to_file(f"  日志根目录: {Config.LOG_ROOT_DIR}")
-    log_to_file(f"  日志文件: {Config.LOG_FILE}")
-    log_to_file(f"  时间戳: {Config.TIMESTAMP}")
+    log_to_file("\n[Paths]")
+    log_to_file(f"  Teacher output path: {Config.TEACHER_OUTPUT_DIR}")
+    log_to_file(f"  Log root path: {Config.LOG_ROOT_DIR}")
+    log_to_file(f"  Log file path: {Config.LOG_FILE}")
+    log_to_file(f"  Timestamp: {Config.TIMESTAMP}")
     
-    # 计算模型参数数量
+    # Instantiate the teacher and detector models
     teacher = ConvTeacher()
     detector = YOLOLightHead(in_channels=1, out_channels=Config.get_detector_output_channels())
     
-    log_to_file("\n【模型参数统计】")
-    log_to_file(f"  教师网络可训练参数: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
-    log_to_file(f"  检测头可训练参数: {sum(p.numel() for p in detector.parameters() if p.requires_grad):,}")
-    log_to_file(f"  检测头输出通道数: {Config.get_detector_output_channels()}")
+    log_to_file("\n[Model Stats]")
+    log_to_file(f"  Teacher parameters: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
+    log_to_file(f"  Detector parameters: {sum(p.numel() for p in detector.parameters() if p.requires_grad):,}")
+    log_to_file(f"  Detector output channels: {Config.get_detector_output_channels()}")
 
     log_to_file(f"Focal alpha: {Config.FOCAL_ALPHA}")
     log_to_file(f"Focal gamma: {Config.FOCAL_GAMMA}")
@@ -846,10 +921,10 @@ def log_all_parameters():
     log_to_file(f"Validation interval: {Config.VAL_INTERVAL}")
     
     log_to_file("\n" + "="*80)
-    log_to_file("参数配置记录完成")
+    log_to_file("Parameter logging complete")
     log_to_file("="*80 + "\n")
 
-# 在训练开始前记录所有参数
+# Log all parameters
 log_all_parameters()
 
 class YOLODataset(Dataset):
@@ -916,18 +991,18 @@ class YOLOLoss(nn.Module):
         self.num_classes = num_classes
         self.strides = strides
         
-        # 使用动态损失权重
+        # Loss weights
         self.box_weight = Config.BOX_WEIGHT_BASE
         self.obj_weight = Config.OBJ_WEIGHT_BASE
         self.noobj_weight = Config.NOOBJ_WEIGHT_BASE
         self.cls_weight = Config.CLS_WEIGHT_BASE
         
-        # 使用带reduction的损失函数，避免数值爆炸
+        # Loss functions
         self.mse_loss = nn.MSELoss(reduction="mean")
         self.bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
     
     def set_epoch_weights(self, epoch):
-        """根据训练轮数设置动态权重"""
+        # Update dynamic loss weights according to the current training epoch.
         weights = Config.get_dynamic_weights(epoch)
         self.box_weight = weights['box_weight']
         self.obj_weight = weights['obj_weight']
@@ -988,37 +1063,37 @@ class YOLOLoss(nn.Module):
             obj_mask = target_obj > 0.5
             noobj_mask = target_obj <= 0.5
             
-            # 计算各项损失（修复损失值过小问题）
+            # Compute loss for object boxes
             if obj_mask.sum() > 0:
-                # 边界框损失 - 使用正确的损失计算
+                # Compute box loss
                 box_loss = self.mse_loss(pred_boxes[obj_mask], target_boxes[obj_mask])
                 
-                # 目标存在性损失
+                # Compute object loss
                 obj_loss = self.bce_loss(pred_obj[obj_mask], target_obj[obj_mask])
                 
-                # 类别损失
+                # Compute class loss
                 cls_loss = self.bce_loss(pred_cls[obj_mask], target_cls[obj_mask])
             else:
                 box_loss = torch.tensor(0.0, device=pred_boxes.device)
                 obj_loss = torch.tensor(0.0, device=pred_boxes.device)
                 cls_loss = torch.tensor(0.0, device=pred_boxes.device)
             
-            # 非目标损失
+            # Compute loss for no-object boxes
             if noobj_mask.sum() > 0:
                 noobj_loss = self.bce_loss(pred_obj[noobj_mask], target_obj[noobj_mask])
             else:
                 noobj_loss = torch.tensor(0.0, device=pred_boxes.device)
             
-            # 总损失计算（修复权重应用）
+            # Compute total loss
             scale_loss = (self.box_weight * box_loss + 
                          self.obj_weight * obj_loss + 
                          self.noobj_weight * noobj_loss + 
                          self.cls_weight * cls_loss)
             
-            # 检查损失值是否合理，避免数值爆炸
+            # Handle NaN and infinite values
             if torch.isnan(scale_loss) or torch.isinf(scale_loss):
                 scale_loss = torch.tensor(0.0, device=pred_boxes.device)
-                print(f"警告: 检测到无效损失值，已重置为0")
+                print(f"璀﹀憡: 妫€娴嬪埌鏃犳晥鎹熷け鍊硷紝宸查噸缃负0")
             
             total_loss += scale_loss
         
@@ -1139,13 +1214,25 @@ class SigmoidFocalLoss(nn.Module):
         self.gamma = gamma
         self.reduction = reduction
 
-    def forward(self, logits, targets):
+    def forward(self, logits, targets, sample_weight=None):
         loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
         prob = torch.sigmoid(logits)
         p_t = prob * targets + (1.0 - prob) * (1.0 - targets)
         alpha_t = self.alpha * targets + (1.0 - self.alpha) * (1.0 - targets)
         focal_term = (1.0 - p_t).pow(self.gamma)
         loss = alpha_t * focal_term * loss
+
+        if sample_weight is not None:
+            sample_weight = sample_weight.to(device=loss.device, dtype=loss.dtype)
+            while sample_weight.dim() < loss.dim():
+                sample_weight = sample_weight.unsqueeze(-1)
+            loss = loss * sample_weight
+            if self.reduction == "sum":
+                return loss.sum()
+            if self.reduction == "none":
+                return loss
+            normalizer = sample_weight.expand_as(loss).sum().clamp(min=1e-6)
+            return loss.sum() / normalizer
 
         if self.reduction == "sum":
             return loss.sum()
@@ -1182,6 +1269,11 @@ class EnhancedYOLOLoss(nn.Module):
         self.noobj_weight = Config.NOOBJ_WEIGHT_BASE
         self.cls_weight = Config.CLS_WEIGHT_BASE
         self.focal_loss = SigmoidFocalLoss(alpha=Config.FOCAL_ALPHA, gamma=Config.FOCAL_GAMMA, reduction="mean")
+        self.size_weights = {
+            "small": 1.0,
+            "medium": 1.0,
+            "large": 1.0,
+        }
         self.last_components = {
             "total": 0.0,
             "box": 0.0,
@@ -1196,7 +1288,16 @@ class EnhancedYOLOLoss(nn.Module):
         self.obj_weight = weights["obj_weight"]
         self.noobj_weight = weights["noobj_weight"]
         self.cls_weight = weights["cls_weight"]
+        self.size_weights = weights["size_weights"]
         return weights["phase"]
+
+    def _get_size_weight(self, width, height):
+        area = float(width * height)
+        if area >= Config.LARGE_OBJ_AREA:
+            return self.size_weights["large"]
+        if area >= Config.SMALL_OBJ_AREA:
+            return self.size_weights["medium"]
+        return self.size_weights["small"]
 
     def forward(self, predictions, targets):
         device = predictions[0].device
@@ -1221,12 +1322,15 @@ class EnhancedYOLOLoss(nn.Module):
                 "target_boxes_abs": torch.zeros_like(pred[..., :4]),
                 "target_obj": torch.zeros_like(pred[..., 4]),
                 "target_cls": torch.zeros_like(pred[..., 5:]),
+                "target_match_iou": torch.full_like(pred[..., 4], -1.0),
+                "target_scale_weight": torch.ones_like(pred[..., 4]),
                 "grid_h": grid_h,
                 "grid_w": grid_w,
                 "stride": self.strides[i],
                 "anchors": self.anchors[i].to(device)
             })
 
+        gt_boxes_abs_by_batch = [[] for _ in range(batch_size)]
         for b in range(batch_size):
             if len(targets[b]) == 0:
                 continue
@@ -1238,39 +1342,54 @@ class EnhancedYOLOLoss(nn.Module):
                 ty = target[2]
                 tw = target[3] * Config.IMG_SIZE
                 th = target[4] * Config.IMG_SIZE
+                gt_boxes_abs_by_batch[b].append(torch.stack([tx * Config.IMG_SIZE, ty * Config.IMG_SIZE, tw, th]))
 
-                best_scale_idx = 0
-                best_anchor_idx = 0
-                best_iou = -1.0
-
+                size_weight = self._get_size_weight(tw.item(), th.item())
+                candidate_matches = []
                 for scale_idx, scale_data in enumerate(prepared_scales):
                     for anchor_idx in range(3):
                         anchor_w, anchor_h = scale_data["anchors"][anchor_idx]
                         inter = torch.minimum(tw, anchor_w) * torch.minimum(th, anchor_h)
                         union = tw * th + anchor_w * anchor_h - inter + 1e-6
                         iou = (inter / union).item()
-                        if iou > best_iou:
-                            best_iou = iou
-                            best_scale_idx = scale_idx
-                            best_anchor_idx = anchor_idx
+                        candidate_matches.append((iou, scale_idx, anchor_idx))
 
-                scale_data = prepared_scales[best_scale_idx]
-                gx = tx * scale_data["grid_w"]
-                gy = ty * scale_data["grid_h"]
-                grid_x = max(0, min(int(gx.item()), scale_data["grid_w"] - 1))
-                grid_y = max(0, min(int(gy.item()), scale_data["grid_h"] - 1))
-                anchor_w, anchor_h = scale_data["anchors"][best_anchor_idx]
+                candidate_matches.sort(key=lambda item: item[0], reverse=True)
+                selected_matches = []
+                for match_iou, scale_idx, anchor_idx in candidate_matches:
+                    if not selected_matches or match_iou >= Config.POSITIVE_ANCHOR_IOU:
+                        selected_matches.append((match_iou, scale_idx, anchor_idx))
+                    if len(selected_matches) >= Config.MAX_POSITIVE_ANCHORS:
+                        break
 
-                scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 0] = gx - grid_x
-                scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 1] = gy - grid_y
-                scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 2] = torch.log(tw / anchor_w + 1e-6)
-                scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 3] = torch.log(th / anchor_h + 1e-6)
-                scale_data["target_boxes_abs"][b, grid_y, grid_x, best_anchor_idx, 0] = tx * Config.IMG_SIZE
-                scale_data["target_boxes_abs"][b, grid_y, grid_x, best_anchor_idx, 1] = ty * Config.IMG_SIZE
-                scale_data["target_boxes_abs"][b, grid_y, grid_x, best_anchor_idx, 2] = tw
-                scale_data["target_boxes_abs"][b, grid_y, grid_x, best_anchor_idx, 3] = th
-                scale_data["target_obj"][b, grid_y, grid_x, best_anchor_idx] = 1.0
-                scale_data["target_cls"][b, grid_y, grid_x, best_anchor_idx, cls_id] = 1.0
+                for match_iou, scale_idx, anchor_idx in selected_matches:
+                    scale_data = prepared_scales[scale_idx]
+                    gx = tx * scale_data["grid_w"]
+                    gy = ty * scale_data["grid_h"]
+                    grid_x = max(0, min(int(gx.item()), scale_data["grid_w"] - 1))
+                    grid_y = max(0, min(int(gy.item()), scale_data["grid_h"] - 1))
+                    if scale_data["target_match_iou"][b, grid_y, grid_x, anchor_idx] >= match_iou:
+                        continue
+
+                    anchor_w, anchor_h = scale_data["anchors"][anchor_idx]
+                    scale_data["target_boxes"][b, grid_y, grid_x, anchor_idx, 0] = gx - grid_x
+                    scale_data["target_boxes"][b, grid_y, grid_x, anchor_idx, 1] = gy - grid_y
+                    scale_data["target_boxes"][b, grid_y, grid_x, anchor_idx, 2] = torch.log(tw / anchor_w + 1e-6)
+                    scale_data["target_boxes"][b, grid_y, grid_x, anchor_idx, 3] = torch.log(th / anchor_h + 1e-6)
+                    scale_data["target_boxes_abs"][b, grid_y, grid_x, anchor_idx, 0] = tx * Config.IMG_SIZE
+                    scale_data["target_boxes_abs"][b, grid_y, grid_x, anchor_idx, 1] = ty * Config.IMG_SIZE
+                    scale_data["target_boxes_abs"][b, grid_y, grid_x, anchor_idx, 2] = tw
+                    scale_data["target_boxes_abs"][b, grid_y, grid_x, anchor_idx, 3] = th
+                    scale_data["target_obj"][b, grid_y, grid_x, anchor_idx] = 1.0
+                    scale_data["target_cls"][b, grid_y, grid_x, anchor_idx, cls_id] = 1.0
+                    scale_data["target_match_iou"][b, grid_y, grid_x, anchor_idx] = match_iou
+                    scale_data["target_scale_weight"][b, grid_y, grid_x, anchor_idx] = size_weight
+
+        gt_boxes_abs_by_batch = [
+            torch.stack(sample_boxes).to(device=device, dtype=predictions[0].dtype)
+            if len(sample_boxes) > 0 else torch.zeros((0, 4), device=device, dtype=predictions[0].dtype)
+            for sample_boxes in gt_boxes_abs_by_batch
+        ]
 
         for scale_data in prepared_scales:
             pred_boxes = scale_data["pred_boxes"]
@@ -1279,16 +1398,27 @@ class EnhancedYOLOLoss(nn.Module):
             target_obj = scale_data["target_obj"]
             target_cls = scale_data["target_cls"]
             target_boxes_abs = scale_data["target_boxes_abs"]
+            target_scale_weight = scale_data["target_scale_weight"]
             pred_boxes_abs = decode_boxes_to_absolute(pred_boxes, scale_data["anchors"], scale_data["stride"])
 
             obj_mask = target_obj > 0.5
-            noobj_mask = target_obj <= 0.5
+            ignore_mask = torch.zeros_like(target_obj, dtype=torch.bool)
+            for b in range(batch_size):
+                gt_boxes_abs = gt_boxes_abs_by_batch[b]
+                if gt_boxes_abs.numel() == 0:
+                    continue
+                flat_pred_boxes = pred_boxes_abs[b].reshape(-1, 4)
+                max_iou = bbox_iou_matrix_xywh(flat_pred_boxes, gt_boxes_abs).max(dim=1).values
+                ignore_mask[b] = max_iou.view(scale_data["grid_h"], scale_data["grid_w"], 3) >= Config.NOOBJ_IGNORE_IOU
+
+            noobj_mask = (target_obj <= 0.5) & (~ignore_mask)
 
             if obj_mask.any():
+                positive_weights = target_scale_weight[obj_mask]
                 ciou = bbox_iou_xywh(pred_boxes_abs[obj_mask], target_boxes_abs[obj_mask], ciou=True)
-                box_loss = (1.0 - ciou).mean()
-                obj_loss = self.focal_loss(pred_obj[obj_mask], target_obj[obj_mask])
-                cls_loss = self.focal_loss(pred_cls[obj_mask], target_cls[obj_mask])
+                box_loss = weighted_mean(1.0 - ciou, positive_weights)
+                obj_loss = self.focal_loss(pred_obj[obj_mask], target_obj[obj_mask], sample_weight=positive_weights)
+                cls_loss = self.focal_loss(pred_cls[obj_mask], target_cls[obj_mask], sample_weight=positive_weights)
             else:
                 box_loss = torch.zeros((), device=device)
                 obj_loss = torch.zeros((), device=device)
@@ -1488,131 +1618,129 @@ def save_training_curves(history, output_dir):
 YOLOLoss = EnhancedYOLOLoss
 
 def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train", device=None):
-    """
-    保存检测结果可视化图像
-    
-    参数:
-        epoch: 当前训练轮数
-        model: 训练好的模型
-        dataset: 数据集对象
-        save_dir: 保存目录
-        prefix: 文件名前缀，默认为"train"
-        device: 计算设备，默认为Config.DEVICE
-    """
+    # Save a detection visualization image for the current epoch.
+    if dataset is None or len(dataset) == 0:
+        return
+
     if device is None:
         device = Config.DEVICE
     
-    # 创建保存目录
+    # Create the save directory if it doesn't exist
     os.makedirs(save_dir, exist_ok=True)
     
-    # 设置模型为评估模式
+    # Set the model to evaluation mode
+    was_training = model.training
     model.eval()
     
-    # 随机选择样本进行可视化
+    # Use a fixed seeded subset so visualizations stay comparable across runs
     num_samples = min(Config.VIS_BATCH_SIZE, len(dataset))
-    indices = torch.randperm(len(dataset))[:num_samples]
+    generator = torch.Generator()
+    generator.manual_seed(Config.VIS_SEED)
+    indices = torch.randperm(len(dataset), generator=generator)[:num_samples]
     
-    # 创建子图布局：4列（原图、教师特征、真实标签、预测结果）
+    # Create the figure and axes for the visualization image
     fig, axes = plt.subplots(num_samples, 4, figsize=(24, 6 * num_samples))
     if num_samples == 1:
         axes = axes.reshape(1, -1)
     
-    # 禁用梯度计算以节省内存
+    # Process each sample in the dataset
     with torch.no_grad():
         for i, idx in enumerate(indices):
-            # 获取图像和标签
+            # Load the image and targets
             img_tensor, targets = dataset[idx]
-            img_tensor = img_tensor.unsqueeze(0).to(device)  # 添加批次维度
+            img_tensor = img_tensor.unsqueeze(0).to(device)  # Add batch dimension and move to device
             
-            # 将张量转换为numpy数组用于显示
+            # Convert the image to numpy array
             img_np = img_tensor.squeeze(0).cpu().numpy().transpose(1, 2, 0)
             img_np = (img_np * 255).astype(np.uint8)
-            img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)  # 灰度转RGB
+            img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)  # Convert to RGB if grayscale
             
-            # 获取教师网络的特征图
+            # Get the teacher feature
             teacher_output = model.teacher(img_tensor)
             teacher_output = teacher_output.squeeze(0).cpu().numpy()
-            teacher_output = enhance_feature_for_display(teacher_output)  # 增强特征显示
+            teacher_output = enhance_feature_for_display(teacher_output)  # Enhance the feature for display purposes
             
-            # 确保教师特征输出为2D以便imshow显示
+            # Process the teacher feature
             if teacher_output.ndim == 3:
                 teacher_output = teacher_output.squeeze(0)
             
-            # 获取模型预测结果
+            # Get the model predictions 
             pred_p3, pred_p4, pred_p5 = model(img_tensor)
             preds = [pred_p3, pred_p4, pred_p5]
-            detections = decode_detections(preds)  # 解码检测结果
+            detections = decode_detections(preds)  # Decode the detections
             
-            # 第一列：显示原始图像
+            # Display the original image
             axes[i, 0].imshow(img_np)
             axes[i, 0].set_title(f"Original Image {i+1}")
             axes[i, 0].axis("off")
             
-            # 第二列：显示教师网络特征图
+            # Display the teacher feature
             axes[i, 1].imshow(teacher_output, cmap="hot")
             axes[i, 1].set_title(f"Teacher Feature {i+1}")
             axes[i, 1].axis("off")
             
-            # 第三列：显示真实标签（绿色边界框）
+            # Display the ground truth
             axes[i, 2].imshow(img_np)
             axes[i, 2].set_title(f"Ground Truth {i+1}")
             axes[i, 2].axis("off")
             
-            # 绘制真实边界框
+            # Display the model predictions
             for target_idx in range(len(targets)):
                 cls_id, x_center, y_center, width, height = targets[target_idx]
                 cls_id = int(cls_id.item())
                 
-                # 计算边界框坐标（YOLO格式转像素坐标）
+                # Calculate the coordinates of the bounding box
                 x1 = int((x_center - width / 2) * Config.IMG_SIZE)
                 y1 = int((y_center - height / 2) * Config.IMG_SIZE)
                 w = int(width * Config.IMG_SIZE)
                 h = int(height * Config.IMG_SIZE)
                 
-                # 绘制绿色边界框
+                # Draw the bounding box
                 rect = patches.Rectangle((x1, y1), w, h, linewidth=2, 
                                         edgecolor='green', facecolor='none')
                 axes[i, 2].add_patch(rect)
-                # 添加类别标签
+                # Add the class name
                 axes[i, 2].text(x1, y1 - 5, Config.CLASS_NAMES[cls_id], 
                               color='green', fontsize=10, fontweight='bold')
             
-            # 第四列：显示预测结果（彩色边界框）
+            # Display the model predictions
             axes[i, 3].imshow(img_np)
             axes[i, 3].set_title(f"Predictions {i+1}")
             axes[i, 3].axis("off")
             
-            # 绘制预测边界框
+            # Display the model predictions
             if len(detections[0]) > 0:
                 for det in detections[0]:
                     x_center, y_center, w, h, conf, cls_id = det
                     cls_id = int(cls_id)
                     
-                    # 计算边界框坐标
+                    # Calculate the coordinates of the bounding box
                     x1 = int(x_center - w / 2)
                     y1 = int(y_center - h / 2)
                     w = int(w)
                     h = int(h)
                     
-                    # 根据类别ID选择颜色
+                    # Draw the bounding box
                     color = plt.cm.tab20(cls_id / max(Config.NUM_CLASSES, 1))
-                    # 绘制彩色边界框
+                    # Draw the bounding box
                     rect = patches.Rectangle((x1, y1), w, h, linewidth=2, 
                                             edgecolor=color, facecolor='none')
                     axes[i, 3].add_patch(rect)
                     
-                    # 添加类别标签和置信度
+                    # Add the class name and confidence
                     label = f"{Config.CLASS_NAMES[cls_id]}: {conf:.2f}"
                     axes[i, 3].text(x1, y1 - 5, label, 
                                   color=color, fontsize=10, fontweight='bold',
                                   bbox=dict(boxstyle='round,pad=0.3', 
                                           facecolor=color, alpha=0.7))
     
-    # 调整布局并保存图像
+    # Save the figure
     plt.tight_layout()
     save_path = os.path.join(save_dir, f"{prefix}_epoch_{epoch:03d}.png")
     plt.savefig(save_path, dpi=Config.VIS_DPI)
-    plt.close()  # 关闭图像以释放内存
+    plt.close()  # Close the figure to release memory.
+    if was_training:
+        model.train()
 
 class TeacherWithDetector(nn.Module):
     def __init__(self, teacher=None, detector=None):
@@ -1688,9 +1816,9 @@ def load_teacher_checkpoint_safe(teacher, checkpoint_path, device):
 
 def train():
     device = Config.DEVICE
-    log_to_file(f"使用设备: {device}")
+    log_to_file(f"Using device: {device}")
     
-    log_to_file("初始化教师网络（ConvTeacher）...")
+    log_to_file("Loading ConvTeacher...")
     teacher = ConvTeacher()
     loaded_teacher, teacher_message = load_teacher_checkpoint_safe(teacher, Config.TEACHER_CHECKPOINT, device)
     log_to_file(teacher_message)
@@ -1702,13 +1830,13 @@ def train():
     for p in teacher.parameters():
         p.requires_grad = not freeze_teacher
     log_to_file(f"Teacher status: {'frozen' if freeze_teacher else 'trainable'}")
-    log_to_file("Teacher parameter setup applied") # 应用教师参数设置
+    log_to_file("Teacher parameter setup applied") 
     
-    log_to_file("初始化检测头（YOLOLightHead）...")
+    log_to_file("Loading YOLOLightHead...")
     detector = YOLOLightHead(in_channels=1, 
                            out_channels=Config.get_detector_output_channels())
     
-    log_to_file("构建教师网络+检测头模型...")
+    log_to_file("Loading model components...")
     model = TeacherWithDetector(teacher=teacher, detector=detector).to(device)
     
     for p in model.teacher.parameters():
@@ -1716,11 +1844,11 @@ def train():
     for p in model.detector.parameters():
         p.requires_grad = True
     
-    log_to_file("加载数据集...")
+    log_to_file("Loading training dataset...")
     train_dataset = YOLODataset(split="train")
     train_loader = DataLoader(train_dataset, batch_size=Config.BATCH_SIZE, 
                              shuffle=True, collate_fn=lambda x: x)
-    log_to_file(f"训练集大小: {len(train_dataset)}")
+    log_to_file(f"Training dataset size: {len(train_dataset)}")
     
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.Adam(trainable_params,
@@ -1742,6 +1870,14 @@ def train():
             log_to_file("Validation dataset is empty; validation will be skipped.")
     except Exception as exc:
         log_to_file(f"Validation dataset unavailable: {exc}")
+
+    if Config.VIS_DATASET_SPLIT == "val" and val_dataset is not None and len(val_dataset) > 0:
+        vis_dataset = val_dataset
+        vis_prefix = "val"
+    else:
+        vis_dataset = train_dataset
+        vis_prefix = "train"
+    log_to_file(f"Visualization dataset: {vis_prefix}")
     
     vis_dir = os.path.join(Config.TEACHER_OUTPUT_DIR, "visualizations")
     os.makedirs(vis_dir, exist_ok=True)
@@ -1762,7 +1898,7 @@ def train():
     best_map50 = -1.0
     
     log_to_file("="*60)
-    log_to_file("开始训练检测头...")
+    log_to_file("Training model...")
     log_to_file("="*60)
     init_epoch_log_table()
     
@@ -1776,7 +1912,7 @@ def train():
             "cls": 0.0,
         }
         
-        # 根据训练阶段动态调整损失权重
+        # Set phase weights
         phase = criterion.set_epoch_weights(epoch)
         
         for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True):
@@ -1839,10 +1975,10 @@ def train():
                     f"Epoch {epoch}: best checkpoint updated "
                     f"(train_loss={avg_train['total']:.6f}, val_map50={val_metrics['map50']:.4f})"
                 )
-            log_to_file(f"Epoch {epoch}: 保存最佳模型 (Loss: {best_loss:.6f})", also_print=False)
+            # log_to_file(f"Epoch {epoch}: 保存最佳模型(Loss: {best_loss:.6f})", also_print=False)
         
         if epoch % Config.VIS_INTERVAL == 0:
-            save_detection_visualization(epoch, model, train_dataset, vis_dir, prefix="train", device=device)
+            save_detection_visualization(epoch, model, vis_dataset, vis_dir, prefix=vis_prefix, device=device)
 
         log_epoch_table_row(
             epoch=epoch,
@@ -1875,10 +2011,10 @@ def train():
     
     append_plain_log(Config.get_epoch_table_separator())
     log_to_file("="*60)
-    log_to_file("训练完成！")
-    log_to_file(f"最佳模型已保存到: {os.path.join(Config.TEACHER_OUTPUT_DIR, 'detector_best.pth')}")
-    log_to_file(f"最终模型已保存到: {model_save_path}")
-    log_to_file(f"所有结果已保存到: {Config.TEACHER_OUTPUT_DIR}")
+    log_to_file("Training complete")
+    log_to_file(f"Best detector model saved to: {os.path.join(Config.TEACHER_OUTPUT_DIR, 'detector_best.pth')}")
+    log_to_file(f"Final detector model saved to: {model_save_path}")
+    log_to_file(f"Teacher output directory: {Config.TEACHER_OUTPUT_DIR}")
     log_to_file("="*60)
 
 if __name__ == "__main__":
