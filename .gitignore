@@ -62,3 +62,7 @@ output/*
 
 # __pycache__/
 __pycache__/*
+
+# Optical_yolo_detect
+Optical_yolo_detect/*
+!Optical_yolo_detect/*.py

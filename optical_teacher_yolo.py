@@ -509,19 +509,19 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
         
         # Apply sigmoid activation to the confidence scores
         obj_conf = torch.sigmoid(pred[..., 4])  # Object confidence
-        cls_conf = torch.sigmoid(pred[..., 5:])  # 错误类别 confidence
+        cls_conf = torch.sigmoid(pred[..., 5:])  # 类别 confidence
         bbox_pred = pred[..., :4]  # 坐标预测 (tx, ty, tw, th)
         
         for b in range(batch_size):
             for gh in range(grid_h):
                 for gw in range(grid_w):
                     for a in range(3):
-                        # 鑾峰彇鐩爣缃俊搴?
+                        # 获取目标置信度
                         obj_score = obj_conf[b, gh, gw, a].item()
                         if obj_score < conf_thresh:
                             continue
                         
-                        # 鑾峰彇绫诲埆缃俊搴﹀拰绫诲埆ID
+                        # 获取类别置信度和类别ID
                         cls_scores = cls_conf[b, gh, gw, a]
                         cls_score, cls_id = cls_scores.max(dim=-1)
                         final_conf = obj_score * cls_score.item()
@@ -529,19 +529,19 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
                         if final_conf < conf_thresh:
                             continue
                         
-                        # 瑙ｇ爜杈圭晫妗嗗潗鏍?(YOLO鏍煎紡)
+                        # 解码边界框坐标(YOLO格式)
                         tx, ty, tw, th = bbox_pred[b, gh, gw, a]
                         
-                        # 杞崲涓虹粷瀵瑰潗鏍?
+                        # 转换为绝对坐标
                         x_center = (gw + torch.sigmoid(tx).item()) * stride
                         y_center = (gh + torch.sigmoid(ty).item()) * stride
                         
-                        # 瑙ｇ爜瀹藉害鍜岄珮搴?
+                        # 解码宽度和高度
                         anchor_w, anchor_h = anchor_set[a]
                         w = anchor_w * torch.exp(torch.clamp(tw, min=-8.0, max=8.0)).item()
                         h = anchor_h * torch.exp(torch.clamp(th, min=-8.0, max=8.0)).item()
                         
-                        # 闄愬埗杈圭晫妗嗗湪鍥惧儚鑼冨洿鍐?
+                        # 限制边界框在图像范围内
                         x_center = max(0, min(x_center, img_size - 1))
                         y_center = max(0, min(y_center, img_size - 1))
                         w = max(1, min(w, img_size))
@@ -549,14 +549,14 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
                         
                         detections[b].append([x_center, y_center, w, h, final_conf, cls_id.item()])
     
-    # 鎸夌疆淇″害鎺掑簭骞堕檺鍒舵渶澶ф娴嬫暟閲?
+    # 按置信度排序并限制最大检测数量
     for b in range(batch_size):
         if len(detections[b]) > 0:
             detections[b] = np.array(detections[b])
-            # 鎸夌疆淇″害闄嶅簭鎺掑簭
+            # 按置信度降序排序
             sorted_indices = detections[b][:, 4].argsort()[::-1]
             detections[b] = detections[b][sorted_indices]
-            # 闄愬埗鏈€澶ф娴嬫暟閲?
+            # 限制最大检测数量
             if len(detections[b]) > max_det:
                 detections[b] = detections[b][:max_det]
     
@@ -645,7 +645,7 @@ class ConfigYOLO:
     YAML_PATH = r"data\military\data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output\OpticalTeacherYOLO"
+    TEACHER_OUTPUT_DIR = r"output\OpticalTeacherYOLO_ft_tuned"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -658,32 +658,32 @@ class ConfigYOLO:
     EPOCHS = 100
 
     # 经常调整的训练参数
-    BOX_WEIGHT_BASE = 1.2  # 增加边界框回归权重，改善大目标定位准确性
-    OBJ_WEIGHT_BASE = 0.7  # 保持原值，避免过度增加候选框
-    NOOBJ_WEIGHT_BASE = 0.2  # 降低负样本权重，减少对大目标定位的干扰
-    CLS_WEIGHT_BASE = 0.2  # 降低分类权重，优先关注定位精度
+    BOX_WEIGHT_BASE = 1.2  # 保持边界框权重，避免继续放大大框主导问题
+    OBJ_WEIGHT_BASE = 0.6  # 适度降低目标置信度权重，缓解高置信度重复框
+    NOOBJ_WEIGHT_BASE = 0.2  # 维持较低负样本权重，避免明显压制召回
+    CLS_WEIGHT_BASE = 0.3  # 提高分类监督，缓解类别塌缩到 aircraft
 
-    POSITION_PHASE_EPOCHS = 25  # 延长位置聚焦阶段，让模型有更多时间学习准确的边界框
-    BALANCE_PHASE_EPOCHS = 10  # 较大的值使过渡到平衡训练更平滑
+    POSITION_PHASE_EPOCHS = 10  # 比 5 更稳，避免过早进入易过拟合的平衡阶段
+    BALANCE_PHASE_EPOCHS = 8  # 保留平滑过渡，但不再像 25+10 那样过长
 
     IOU_THRESHOLD = 0.5  # 主要正样本匹配阈值；较大的值使正样本分配更严格，可能降低召回率
-    POSITIVE_ANCHOR_IOU = 0.25  # 降低阈值，让更多锚点参与大目标学习，改善大目标定位
-    MAX_POSITIVE_ANCHORS = 1  # 减少匹配的锚点数量，降低单个目标上的重复检测框
+    POSITIVE_ANCHOR_IOU = 0.25  # 保持较宽松阈值，兼容数据集中的尺度波动
+    MAX_POSITIVE_ANCHORS = 1  # 收回到单锚点分配，优先减少重复框
     NOOBJ_IGNORE_IOU = 0.6  # 提高阈值，让更多附近的锚点被忽略，减少重复检测
 
     SMALL_OBJ_AREA = 32 * 32  # 将对象分组为小目标的阈值
     LARGE_OBJ_AREA = 128 * 128  # 将对象分组为大目标的阈值
-    SMALL_OBJ_WEIGHT = 0.5  # 较大的值使训练更关注小目标
+    SMALL_OBJ_WEIGHT = 0.8  # 适度提高小目标权重，避免完全被大框样本淹没
     MEDIUM_OBJ_WEIGHT = 1.0  # 中等目标的基准损失权重
-    LARGE_OBJ_WEIGHT = 2.0  # 增加大目标权重，强制模型更关注大目标框的拟合
+    LARGE_OBJ_WEIGHT = 1.4  # 下调大目标权重，减少场景级大框对训练的主导
 
-    FOCAL_ALPHA = 0.25  # 降低正样本权重，减少对重复检测的过度关注
-    FOCAL_GAMMA = 2.0  # 较大的值更关注困难样本，但可能使置信度校准和收敛稳定性降低
+    FOCAL_ALPHA = 0.3  # 略微抬高正样本权重，配合更高 cls_weight 稳定分类学习
+    FOCAL_GAMMA = 1.5  # 取 1.0 和 2.0 的中间值，兼顾收敛稳定性与困难样本关注
 
-    CONF_THRESH = 0.4  # 提高置信度阈值，过滤掉更多低质量检测框
-    NMS_THRESH = 0.4  # 降低NMS阈值，更严格地抑制重叠框
-    MAX_DET = 6  # 根据数据集统计（平均1.6个目标/图像），设置为6个框足够覆盖绝大多数情况
-    AGNOSTIC_NMS = True  # 如果为True，不同类别的框也可以相互抑制
+    CONF_THRESH = 0.5  # 从 0.75 回调到更合理区间，兼顾召回与误检过滤
+    NMS_THRESH = 0.35  # 略微加强 NMS，抑制大目标附近的重复框
+    MAX_DET = 5  # 进一步收紧单图输出上限，减少重复检测对指标和可视化的干扰
+    AGNOSTIC_NMS = False  # 多类别任务使用按类 NMS，避免不同类别互相压制
 
     # 验证和指标
     VAL_INTERVAL = 5
@@ -705,7 +705,8 @@ class ConfigYOLO:
     LEARNING_RATE = 5e-4
     WEIGHT_DECAY = 1e-5
     OPTIMIZER = "Adam"
-    TEACHER_CHECKPOINT = None
+    TEACHER_INIT_MODE = "checkpoint"  # "scratch" 或 "checkpoint"
+    TEACHER_INIT_CHECKPOINT = r"output\OpticalTeacherYOLO\teacher_final.pth"
     FREEZE_TEACHER = False
     SAVE_TEACHER_WEIGHTS = True
 
@@ -714,7 +715,7 @@ class ConfigYOLO:
     VIS_BATCH_SIZE = 4
     VIS_DPI = 130
     VIS_DATASET_SPLIT = "val"  # 可视化时使用的数据集分割
-    VIS_SEED = 20260420  # 可视化时的随机种子，确保可重复性
+    VIS_SEED = 20260421  # 保持与本次 ft 实验一致，便于前后对比
 
     # Logging table
     EPOCH_TABLE_EPOCH_WIDTH = 8
@@ -787,6 +788,18 @@ class ConfigYOLO:
         os.makedirs(cls.LOG_ROOT_DIR, exist_ok=True)
         cls.TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
         cls.LOG_FILE = os.path.join(cls.LOG_ROOT_DIR, f"training_log_{cls.TIMESTAMP}.txt")
+
+    @classmethod
+    def get_teacher_init_mode(cls):
+        mode = str(cls.TEACHER_INIT_MODE).strip().lower()
+        return mode if mode in {"scratch", "checkpoint"} else "scratch"
+
+    @classmethod
+    def get_teacher_init_checkpoint(cls):
+        if cls.get_teacher_init_mode() != "checkpoint":
+            return None
+        checkpoint_path = str(cls.TEACHER_INIT_CHECKPOINT).strip()
+        return checkpoint_path if checkpoint_path else None
     
     @classmethod
     def get_detector_output_channels(cls):
@@ -887,6 +900,9 @@ def log_all_parameters():
     log_to_file(f"  Optimizer: {Config.OPTIMIZER}")
     log_to_file(f"  Learning rate: {Config.LEARNING_RATE}")
     log_to_file(f"  Weight decay: {Config.WEIGHT_DECAY}")
+    log_to_file(f"  Teacher init mode: {Config.get_teacher_init_mode()}")
+    log_to_file(f"  Teacher init checkpoint: {Config.get_teacher_init_checkpoint() or 'None'}")
+    log_to_file(f"  Freeze teacher: {Config.FREEZE_TEACHER}")
     
     log_to_file("\n[Detection]")
     log_to_file(f"  Confidence threshold: {Config.CONF_THRESH}")
@@ -1093,7 +1109,7 @@ class YOLOLoss(nn.Module):
             # Handle NaN and infinite values
             if torch.isnan(scale_loss) or torch.isinf(scale_loss):
                 scale_loss = torch.tensor(0.0, device=pred_boxes.device)
-                print(f"璀﹀憡: 妫€娴嬪埌鏃犳晥鎹熷け鍊硷紝宸查噸缃负0")
+                print(f"警告: 检测到无效损失值，已重置为0")
             
             total_loss += scale_loss
         
@@ -1814,18 +1830,30 @@ def load_teacher_checkpoint_safe(teacher, checkpoint_path, device):
     teacher.load_state_dict({**teacher_state, **compatible_state}, strict=False)
     return True, f"Loaded {len(compatible_state)} teacher tensors from: {checkpoint_path}"
 
+def initialize_teacher_weights(teacher, device):
+    init_mode = Config.get_teacher_init_mode()
+    if init_mode == "scratch":
+        return False, "Teacher init mode: scratch (training from random initialization)"
+
+    checkpoint_path = Config.get_teacher_init_checkpoint()
+    loaded_teacher, teacher_message = load_teacher_checkpoint_safe(teacher, checkpoint_path, device)
+    if loaded_teacher:
+        return True, f"Teacher init mode: checkpoint ({teacher_message})"
+
+    return False, f"Teacher init mode: checkpoint requested but unavailable, fallback to scratch ({teacher_message})"
+
 def train():
     device = Config.DEVICE
     log_to_file(f"Using device: {device}")
     
     log_to_file("Loading ConvTeacher...")
     teacher = ConvTeacher()
-    loaded_teacher, teacher_message = load_teacher_checkpoint_safe(teacher, Config.TEACHER_CHECKPOINT, device)
+    loaded_teacher, teacher_message = initialize_teacher_weights(teacher, device)
     log_to_file(teacher_message)
 
     freeze_teacher = Config.FREEZE_TEACHER and loaded_teacher
     if Config.FREEZE_TEACHER and not loaded_teacher:
-        log_to_file("Teacher checkpoint not found, not freezing teacher.")
+        log_to_file("Teacher requested to freeze, but no initialized teacher weights are available; keep teacher trainable.")
 
     for p in teacher.parameters():
         p.requires_grad = not freeze_teacher
