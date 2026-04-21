@@ -772,7 +772,30 @@ class ConfigYOLO:
         }
 
     @classmethod
+    def apply_runtime_overrides(cls):
+        yaml_path = os.environ.get("OPTICAL_TEACHER_YAML_PATH")
+        if yaml_path:
+            cls.YAML_PATH = yaml_path
+
+        output_dir = os.environ.get("OPTICAL_TEACHER_OUTPUT_DIR")
+        if output_dir:
+            cls.TEACHER_OUTPUT_DIR = output_dir
+
+        teacher_init_mode = os.environ.get("OPTICAL_TEACHER_INIT_MODE")
+        if teacher_init_mode:
+            cls.TEACHER_INIT_MODE = teacher_init_mode
+
+        teacher_init_checkpoint = os.environ.get("OPTICAL_TEACHER_INIT_CHECKPOINT")
+        if teacher_init_checkpoint:
+            cls.TEACHER_INIT_CHECKPOINT = teacher_init_checkpoint
+
+        freeze_teacher = os.environ.get("OPTICAL_TEACHER_FREEZE_TEACHER")
+        if freeze_teacher:
+            cls.FREEZE_TEACHER = freeze_teacher.strip().lower() in {"1", "true", "yes", "on"}
+
+    @classmethod
     def initialize(cls):
+        cls.apply_runtime_overrides()
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
         cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
         cls.ANCHOR_SOURCE = "default"
