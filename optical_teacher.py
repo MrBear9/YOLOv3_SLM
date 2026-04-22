@@ -48,6 +48,39 @@ def load_teacher_checkpoint(teacher, checkpoint_path, device):
     teacher.load_state_dict({**teacher_state, **compatible_state}, strict=False)
     return True, f"Loaded {len(compatible_state)} teacher tensors from: {checkpoint_path}"
 
+
+def load_detector_checkpoint(detector, checkpoint_path, device):
+    if not checkpoint_path:
+        return False, "Detector checkpoint: not configured"
+    if not os.path.exists(checkpoint_path):
+        return False, f"Detector checkpoint not found: {checkpoint_path}"
+
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    state_dict = None
+    for key in ("detector_state_dict", "model_state_dict", "state_dict", "model"):
+        if isinstance(checkpoint, dict) and key in checkpoint:
+            state_dict = checkpoint[key]
+            break
+    if state_dict is None:
+        state_dict = checkpoint
+
+    detector_state = detector.state_dict()
+    compatible_state = {}
+    for key, value in state_dict.items():
+        normalized_key = key[9:] if key.startswith("detector.") else key
+        if normalized_key in detector_state and detector_state[normalized_key].shape == value.shape:
+            compatible_state[normalized_key] = value
+
+    if len(compatible_state) == 0:
+        return False, f"No compatible detector weights found in: {checkpoint_path}"
+
+    detector.load_state_dict({**detector_state, **compatible_state}, strict=False)
+    return True, f"Loaded {len(compatible_state)} detector tensors from: {checkpoint_path}"
+
 # =========================================================
 # 读取data.yaml获取类别信息
 # =========================================================
@@ -105,8 +138,9 @@ class Config:
     NUM_CLASSES = None
     
     # 输出路径配置
-    TEACHER_OUTPUT_DIR = r"output\OpticalTeacher"
-    TEACHER_CHECKPOINT = r"output\OpticalTeacherYOLO\teacher_best.pth" # path to teacher checkpoint
+    TEACHER_OUTPUT_DIR = r"output\OpticalTeacher_deep_teacher"
+    TEACHER_CHECKPOINT = r"output\OpticalTeacherYOLO_deep_teacher\teacher_best.pth" # path to teacher checkpoint
+    DETECTOR_CHECKPOINT = r"output\OpticalTeacherYOLO_deep_teacher\detector_best.pth"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -140,8 +174,8 @@ class Config:
     ANCHOR_SOURCE = "default"
     
     # 优化器参数
-    LEARNING_RATE = 5e-4  # 学习率，用于优化模型参数
-    WEIGHT_DECAY = 1e-5  # 权重衰减，用于防止过拟合
+    LEARNING_RATE = 3e-4  # 学习率，用于优化模型参数
+    WEIGHT_DECAY = 3e-5  # 权重衰减，用于防止过拟合
     OPTIMIZER = "Adam"
     
     # 光学传播参数
@@ -163,9 +197,15 @@ class Config:
     VIS_INTERVAL = 2  # 可视化间隔，单位：轮数
     
     # 损失函数权重
-    LOSS_FULL_WEIGHT = 0.02  # 完整损失权重，用于计算总损失
-    LOSS_LOW1_WEIGHT = 1.0  # 低1损失权重，用于计算总损失
-    LOSS_LOW2_WEIGHT = 0.5  # 低2损失权重，用于计算总损失
+    LOSS_FULL_WEIGHT = 0.2
+    LOSS_LOW1_WEIGHT = 0.8
+    LOSS_LOW2_WEIGHT = 0.4
+    LOSS_SSIM_WEIGHT = 0.3
+    LOSS_GRAD_WEIGHT = 0.25
+    LOSS_FREQ_WEIGHT = 0.15
+    LOSS_PHASE_SMOOTH_WEIGHT = 0.02
+    RESPONSE_MAP_WEIGHT = 0.3
+    USE_DETECTION_RESPONSE_LOSS = True
     
     # 检测参数
     CONF_THRESH = 0.5  # 置信度阈值，用于筛选检测框
@@ -336,6 +376,42 @@ class OpticalStudent(nn.Module):
             out = out / (out.mean(dim=[2,3], keepdim=True) + Config.OPTICAL_NORM_EPS)
         return out
 
+
+class SqueezeExcite(nn.Module):
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+        hidden = max(channels // reduction, 4)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(channels, hidden, kernel_size=1, bias=True),
+            nn.SiLU(),
+            nn.Conv2d(hidden, channels, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        return x * self.fc(self.pool(x))
+
+
+class TeacherResidualBlock(nn.Module):
+    def __init__(self, channels, dilation=1):
+        super().__init__()
+        padding = dilation
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=padding, dilation=dilation, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=padding, dilation=dilation, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
+        self.se = SqueezeExcite(channels)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        identity = x
+        out = self.act(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.se(out)
+        out = out + identity
+        return self.act(out)
+
 # =========================================================
 # 教师网络（卷积-仿YOLOV3）
 # =========================================================
@@ -361,6 +437,41 @@ class ConvTeacher(nn.Module):
             nn.SiLU()
         )
 
+        self.stage1 = nn.Sequential(
+            TeacherResidualBlock(16),
+            TeacherResidualBlock(16),
+        )
+
+        self.stage2 = nn.Sequential(
+            TeacherResidualBlock(32),
+            TeacherResidualBlock(32),
+        )
+
+        self.stage3 = nn.Sequential(
+            TeacherResidualBlock(64),
+            TeacherResidualBlock(64),
+            TeacherResidualBlock(64, dilation=2),
+        )
+
+        self.skip1 = nn.Sequential(
+            nn.Conv2d(16, 64, kernel_size=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+        )
+
+        self.skip2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+        )
+
+        self.context = nn.Sequential(
+            TeacherResidualBlock(64),
+            nn.Conv2d(64, 64, kernel_size=3, padding=2, dilation=2, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+        )
+
         self.refine = nn.Sequential(
             nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(64),
@@ -376,9 +487,12 @@ class ConvTeacher(nn.Module):
         if x.shape[1] > 1:
             x = x.mean(dim=1, keepdim=True)
 
-        f = self.conv1(x)
-        f = self.conv2(f)
-        f = self.conv3(f)
+        x1 = self.stage1(self.conv1(x))
+        x2 = self.stage2(self.conv2(x1))
+        x3 = self.stage3(self.conv3(x2))
+        skip1 = F.interpolate(self.skip1(x1), size=x3.shape[-2:], mode="bilinear", align_corners=False)
+        skip2 = F.interpolate(self.skip2(x2), size=x3.shape[-2:], mode="bilinear", align_corners=False)
+        f = self.context(x3 + skip1 + skip2)
         f = self.refine(f)
         f = self.project(f)
         f = torch.abs(f)
@@ -500,19 +614,80 @@ class MilitaryFeatureDataset(Dataset):
 # =========================================================
 # 损失函数
 # =========================================================
-class MultiScaleMSELoss(nn.Module):
+class CompositeOpticalFeatureLoss(nn.Module):
     def __init__(self):
         super().__init__()
         self.pool1 = nn.AvgPool2d(8)
         self.pool2 = nn.AvgPool2d(32)
+        self.avg_pool = nn.AvgPool2d(3, 1, 1)
 
-    def forward(self, s, t):
+    def ssim_loss(self, s, t):
+        c1 = 0.01 ** 2
+        c2 = 0.03 ** 2
+        mu_s = self.avg_pool(s)
+        mu_t = self.avg_pool(t)
+        sigma_s = self.avg_pool(s * s) - mu_s * mu_s
+        sigma_t = self.avg_pool(t * t) - mu_t * mu_t
+        sigma_st = self.avg_pool(s * t) - mu_s * mu_t
+        ssim_map = ((2 * mu_s * mu_t + c1) * (2 * sigma_st + c2)) / (
+            (mu_s * mu_s + mu_t * mu_t + c1) * (sigma_s + sigma_t + c2) + Config.OPTICAL_FIELD_EPS
+        )
+        return torch.clamp((1.0 - ssim_map.mean()) * 0.5, min=0.0)
+
+    def gradient_loss(self, s, t):
+        grad_s_x = s[:, :, :, 1:] - s[:, :, :, :-1]
+        grad_t_x = t[:, :, :, 1:] - t[:, :, :, :-1]
+        grad_s_y = s[:, :, 1:, :] - s[:, :, :-1, :]
+        grad_t_y = t[:, :, 1:, :] - t[:, :, :-1, :]
+        return F.l1_loss(grad_s_x, grad_t_x) + F.l1_loss(grad_s_y, grad_t_y)
+
+    def frequency_loss(self, s, t):
+        freq_s = torch.fft.fft2(s.squeeze(1), norm="ortho")
+        freq_t = torch.fft.fft2(t.squeeze(1), norm="ortho")
+        mag_s = torch.log1p(torch.abs(freq_s))
+        mag_t = torch.log1p(torch.abs(freq_t))
+        return F.l1_loss(mag_s, mag_t)
+
+    def phase_smoothness_loss(self, student):
+        phase_terms = []
+        for slm_layer in (student.slm1, student.slm2):
+            phase = torch.remainder(slm_layer.phase_raw, 2 * np.pi)
+            cos_phase = torch.cos(phase)
+            sin_phase = torch.sin(phase)
+            phase_terms.append(torch.abs(cos_phase[:, :, :, 1:] - cos_phase[:, :, :, :-1]).mean())
+            phase_terms.append(torch.abs(cos_phase[:, :, 1:, :] - cos_phase[:, :, :-1, :]).mean())
+            phase_terms.append(torch.abs(sin_phase[:, :, :, 1:] - sin_phase[:, :, :, :-1]).mean())
+            phase_terms.append(torch.abs(sin_phase[:, :, 1:, :] - sin_phase[:, :, :-1, :]).mean())
+        return sum(phase_terms) / max(len(phase_terms), 1)
+
+    def forward(self, s, t, student):
         loss_full = F.mse_loss(s, t)
         loss_low1 = F.mse_loss(self.pool1(s), self.pool1(t))
         loss_low2 = F.mse_loss(self.pool2(s), self.pool2(t))
-        return (loss_full * Config.LOSS_FULL_WEIGHT + 
-                loss_low1 * Config.LOSS_LOW1_WEIGHT + 
-                loss_low2 * Config.LOSS_LOW2_WEIGHT)
+        loss_ssim = self.ssim_loss(s, t)
+        loss_grad = self.gradient_loss(s, t)
+        loss_freq = self.frequency_loss(s, t)
+        loss_phase = self.phase_smoothness_loss(student)
+        total = (
+            loss_full * Config.LOSS_FULL_WEIGHT +
+            loss_low1 * Config.LOSS_LOW1_WEIGHT +
+            loss_low2 * Config.LOSS_LOW2_WEIGHT +
+            loss_ssim * Config.LOSS_SSIM_WEIGHT +
+            loss_grad * Config.LOSS_GRAD_WEIGHT +
+            loss_freq * Config.LOSS_FREQ_WEIGHT +
+            loss_phase * Config.LOSS_PHASE_SMOOTH_WEIGHT
+        )
+        stats = {
+            "full": float(loss_full.detach().item()),
+            "low1": float(loss_low1.detach().item()),
+            "low2": float(loss_low2.detach().item()),
+            "ssim": float(loss_ssim.detach().item()),
+            "grad": float(loss_grad.detach().item()),
+            "freq": float(loss_freq.detach().item()),
+            "phase": float(loss_phase.detach().item()),
+            "total": float(total.detach().item()),
+        }
+        return total, stats
 
 # =========================================================
 # 辅助函数
@@ -524,6 +699,41 @@ def prediction_response_map(pred):
     cls_conf, _ = torch.sigmoid(pred[..., 5:]).max(dim=-1)
     response = (obj_conf * cls_conf).max(dim=-1).values
     return response.detach().cpu().numpy()
+
+
+def prediction_response_tensor(preds):
+    response_maps = []
+    for scale_idx, pred in enumerate(preds):
+        grid_h, grid_w = pred.shape[2], pred.shape[3]
+        pred = pred.permute(0, 2, 3, 1).reshape(pred.shape[0], grid_h, grid_w, 3, -1)
+        obj_conf = torch.sigmoid(pred[..., 4])
+        cls_conf = torch.sigmoid(pred[..., 5:]).max(dim=-1).values
+        response = (obj_conf * cls_conf).max(dim=-1).values.unsqueeze(1)
+        response = F.interpolate(response, size=(Config.IMG_SIZE, Config.IMG_SIZE), mode="bilinear", align_corners=False)
+        response_maps.append(response)
+    return torch.stack(response_maps, dim=0).max(dim=0).values
+
+
+def normalize_response_map(response):
+    peak = response.amax(dim=(2, 3), keepdim=True)
+    return response / (peak + Config.OPTICAL_NORM_EPS)
+
+
+def compute_detection_response_loss(detector, student_feature, teacher_feature):
+    if detector is None:
+        zero = torch.zeros((), device=student_feature.device, dtype=student_feature.dtype)
+        return zero, {"response": 0.0}
+
+    student_preds = detector(student_feature)
+    student_response = normalize_response_map(prediction_response_tensor(student_preds))
+
+    with torch.no_grad():
+        teacher_preds = detector(teacher_feature.detach())
+        teacher_response = normalize_response_map(prediction_response_tensor(teacher_preds))
+
+    response_loss = F.mse_loss(student_response, teacher_response)
+    weighted_loss = response_loss * Config.RESPONSE_MAP_WEIGHT
+    return weighted_loss, {"response": float(response_loss.detach().item())}
 
 def enhance_feature_for_display(feature_map):
     feature_map = np.asarray(feature_map, dtype=np.float32)
@@ -862,6 +1072,14 @@ def log_all_parameters():
     log_to_file(f"  日志文件: {Config.LOG_FILE}")
     log_to_file(f"  可视化结果: {Config.VISUALIZATION_DIR}")
     log_to_file(f"  模型保存: {Config.get_final_model_path()}")
+    log_to_file(f"  教师权重: {Config.TEACHER_CHECKPOINT}")
+    log_to_file(f"  检测头权重: {Config.DETECTOR_CHECKPOINT}")
+
+    log_to_file("\n【学生损失】")
+    log_to_file(f"  Full / Low1 / Low2: {Config.LOSS_FULL_WEIGHT} / {Config.LOSS_LOW1_WEIGHT} / {Config.LOSS_LOW2_WEIGHT}")
+    log_to_file(f"  SSIM / Grad / Freq / Phase: {Config.LOSS_SSIM_WEIGHT} / {Config.LOSS_GRAD_WEIGHT} / {Config.LOSS_FREQ_WEIGHT} / {Config.LOSS_PHASE_SMOOTH_WEIGHT}")
+    log_to_file(f"  Use detection response loss: {Config.USE_DETECTION_RESPONSE_LOSS}")
+    log_to_file(f"  Response map weight: {Config.RESPONSE_MAP_WEIGHT}")
     
     log_to_file("\n" + "="*80)
     log_to_file("参数设置输出完成")
@@ -887,7 +1105,25 @@ def train():
     for p in teacher.parameters():
         p.requires_grad = False
     log_to_file("教师网络参数已冻结")
-    
+
+    detector = None
+    if Config.USE_DETECTION_RESPONSE_LOSS:
+        log_to_file("初始化冻结检测头（YOLOLightHead）用于 response map 约束...")
+        detector = YOLOLightHead(
+            in_channels=Config.YOLO_HEAD_IN_CHANNELS,
+            out_channels=Config.get_detector_output_channels(),
+        ).to(device)
+        detector_loaded, detector_message = load_detector_checkpoint(detector, Config.DETECTOR_CHECKPOINT, device)
+        log_to_file(detector_message)
+        if detector_loaded:
+            detector.eval()
+            for p in detector.parameters():
+                p.requires_grad = False
+            log_to_file("已启用检测响应图约束")
+        else:
+            detector = None
+            log_to_file("检测头权重不可用，跳过 response map 约束")
+
     log_to_file("初始化学生网络（OpticalStudent）...")
     student = OpticalStudent().to(device)
     
@@ -897,7 +1133,7 @@ def train():
     log_to_file(f"数据集大小: {len(dataset)}")
     
     optimizer = torch.optim.Adam(student.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
-    criterion = MultiScaleMSELoss()
+    criterion = CompositeOpticalFeatureLoss()
     
     vis_dir = Config.VISUALIZATION_DIR
     
@@ -911,18 +1147,26 @@ def train():
     for epoch in range(Config.EPOCHS):
         student.train()
         loss_sum = 0
+        feature_loss_sum = 0
+        response_loss_sum = 0
         
         for x, t in tqdm(loader, desc=f"Epoch {epoch}/{Config.EPOCHS}", leave=True):
             x = x.to(device)
             t = t.to(device)
             y = student(x)
-            loss = criterion(y, t)
+            feature_loss, _ = criterion(y, t, student)
+            response_loss, _ = compute_detection_response_loss(detector, y, t)
+            loss = feature_loss + response_loss
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             loss_sum += loss.item()
+            feature_loss_sum += feature_loss.item()
+            response_loss_sum += response_loss.item()
 
         avg_loss = loss_sum / len(loader)
+        avg_feature_loss = feature_loss_sum / len(loader)
+        avg_response_loss = response_loss_sum / len(loader)
         loss_curve.append(avg_loss)
         
         if avg_loss < best_loss:
@@ -946,7 +1190,10 @@ def train():
                 y_vis = student(x_vis).cpu()
             save_feature_comparison(epoch, t_vis, y_vis, vis_dir, input_images=x_vis.cpu())
 
-        log_to_file(f"Epoch {epoch:3d} | Loss: {avg_loss:.6f}")
+        log_to_file(
+            f"Epoch {epoch:3d} | Loss: {avg_loss:.6f} | "
+            f"Feature: {avg_feature_loss:.6f} | Response: {avg_response_loss:.6f}"
+        )
 
     plt.figure(figsize=(10, 6))
     plt.plot(loss_curve, label="Train Loss")

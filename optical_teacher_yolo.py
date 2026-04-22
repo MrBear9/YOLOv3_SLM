@@ -199,13 +199,48 @@ class OpticalStudent(nn.Module):
             out = out / (out.mean(dim=[2,3], keepdim=True) + 1e-6)
         return out
 
+class SqueezeExcite(nn.Module):
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+        hidden = max(channels // reduction, 4)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(channels, hidden, kernel_size=1, bias=True),
+            nn.SiLU(),
+            nn.Conv2d(hidden, channels, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        scale = self.fc(self.pool(x))
+        return x * scale
+
+
+class TeacherResidualBlock(nn.Module):
+    def __init__(self, channels, dilation=1):
+        super().__init__()
+        padding = dilation
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=padding, dilation=dilation, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=padding, dilation=dilation, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
+        self.se = SqueezeExcite(channels)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        identity = x
+        out = self.act(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.se(out)
+        out = out + identity
+        return self.act(out)
+
 # =========================================================
 # 教师网络（卷积版YOLOV3）
 # =========================================================
 class ConvTeacher(nn.Module):
     def __init__(self):
         super().__init__()
-
         self.conv1 = nn.Sequential(
             nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(16),
@@ -224,6 +259,41 @@ class ConvTeacher(nn.Module):
             nn.SiLU()
         )
 
+        self.stage1 = nn.Sequential(
+            TeacherResidualBlock(16),
+            TeacherResidualBlock(16),
+        )
+
+        self.stage2 = nn.Sequential(
+            TeacherResidualBlock(32),
+            TeacherResidualBlock(32),
+        )
+
+        self.stage3 = nn.Sequential(
+            TeacherResidualBlock(64),
+            TeacherResidualBlock(64),
+            TeacherResidualBlock(64, dilation=2),
+        )
+
+        self.skip1 = nn.Sequential(
+            nn.Conv2d(16, 64, kernel_size=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+        )
+
+        self.skip2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+        )
+
+        self.context = nn.Sequential(
+            TeacherResidualBlock(64),
+            nn.Conv2d(64, 64, kernel_size=3, padding=2, dilation=2, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+        )
+
         self.refine = nn.Sequential(
             nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(64),
@@ -239,9 +309,13 @@ class ConvTeacher(nn.Module):
         if x.shape[1] > 1:
             x = x.mean(dim=1, keepdim=True)
 
-        f = self.conv1(x)
-        f = self.conv2(f)
-        f = self.conv3(f)
+        x1 = self.stage1(self.conv1(x))
+        x2 = self.stage2(self.conv2(x1))
+        x3 = self.stage3(self.conv3(x2))
+
+        skip1 = F.interpolate(self.skip1(x1), size=x3.shape[-2:], mode="bilinear", align_corners=False)
+        skip2 = F.interpolate(self.skip2(x2), size=x3.shape[-2:], mode="bilinear", align_corners=False)
+        f = self.context(x3 + skip1 + skip2)
         f = self.refine(f)
         f = self.project(f)
         f = torch.abs(f)
@@ -331,6 +405,109 @@ def enhance_feature_for_display(feature_map):
     
     feature_map = np.clip((feature_map - low) / (high - low), 0.0, 1.0)
     return np.power(feature_map, 0.8)
+
+
+def build_teacher_target_map(targets, img_size, device, dtype):
+    batch_size = len(targets)
+    target_map = torch.zeros((batch_size, 1, img_size, img_size), device=device, dtype=dtype)
+    foreground_mask = torch.zeros((batch_size, 1, img_size, img_size), device=device, dtype=torch.bool)
+    sigma = max(Config.FEATURE_HEATMAP_SIGMA, 1e-3)
+    box_fill_value = float(np.clip(Config.FEATURE_BOX_FILL_VALUE, 0.0, 1.0))
+    core_fill_value = float(np.clip(Config.FEATURE_CORE_FILL_VALUE, box_fill_value, 1.0))
+    core_ratio = float(np.clip(Config.FEATURE_CORE_RATIO, 0.1, 1.0))
+
+    for batch_idx, sample_targets in enumerate(targets):
+        if len(sample_targets) == 0:
+            continue
+
+        for target in sample_targets:
+            if target.shape[0] < 5:
+                continue
+            x_center = float(target[1].item() * img_size)
+            y_center = float(target[2].item() * img_size)
+            width = max(float(target[3].item() * img_size), 1.0)
+            height = max(float(target[4].item() * img_size), 1.0)
+
+            x1 = max(0, int(np.floor(x_center - width / 2.0)))
+            y1 = max(0, int(np.floor(y_center - height / 2.0)))
+            x2 = min(img_size, int(np.ceil(x_center + width / 2.0)))
+            y2 = min(img_size, int(np.ceil(y_center + height / 2.0)))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            box_w = x2 - x1
+            box_h = y2 - y1
+            xs = torch.linspace(-1.0, 1.0, box_w, device=device, dtype=dtype)
+            ys = torch.linspace(-1.0, 1.0, box_h, device=device, dtype=dtype)
+            yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+            heat = torch.exp(-(xx.pow(2) + yy.pow(2)) / (2.0 * sigma * sigma))
+            region = target_map[batch_idx, 0, y1:y2, x1:x2]
+            base_fill = torch.full_like(region, box_fill_value)
+            region_target = torch.maximum(torch.maximum(region, base_fill), heat)
+
+            core_w = max(1, int(round(box_w * core_ratio)))
+            core_h = max(1, int(round(box_h * core_ratio)))
+            core_x1 = x1 + max(0, (box_w - core_w) // 2)
+            core_y1 = y1 + max(0, (box_h - core_h) // 2)
+            core_x2 = min(x2, core_x1 + core_w)
+            core_y2 = min(y2, core_y1 + core_h)
+            if core_x2 > core_x1 and core_y2 > core_y1:
+                core_region = region_target[(core_y1 - y1):(core_y2 - y1), (core_x1 - x1):(core_x2 - x1)]
+                core_fill = torch.full_like(core_region, core_fill_value)
+                region_target[(core_y1 - y1):(core_y2 - y1), (core_x1 - x1):(core_x2 - x1)] = torch.maximum(core_region, core_fill)
+
+            target_map[batch_idx, 0, y1:y2, x1:x2] = region_target
+            foreground_mask[batch_idx, 0, y1:y2, x1:x2] = True
+
+    return target_map, foreground_mask
+
+
+def compute_teacher_guidance_loss(teacher_feature, targets, detector_frozen=False):
+    target_map, foreground_mask = build_teacher_target_map(
+        targets=targets,
+        img_size=teacher_feature.shape[-1],
+        device=teacher_feature.device,
+        dtype=teacher_feature.dtype,
+    )
+    background_mask = ~foreground_mask
+
+    heatmap_loss = F.binary_cross_entropy(teacher_feature.clamp(1e-4, 1.0 - 1e-4), target_map)
+
+    if foreground_mask.any():
+        fg_mean = teacher_feature[foreground_mask].mean()
+    else:
+        fg_mean = torch.zeros((), device=teacher_feature.device, dtype=teacher_feature.dtype)
+
+    if background_mask.any():
+        bg_mean = teacher_feature[background_mask].mean()
+    else:
+        bg_mean = torch.zeros((), device=teacher_feature.device, dtype=teacher_feature.dtype)
+
+    contrast_loss = (
+        F.relu(Config.FEATURE_FOREGROUND_TARGET - fg_mean) +
+        F.relu(bg_mean - Config.FEATURE_BACKGROUND_TARGET)
+    )
+    sparsity_loss = bg_mean
+    tv_loss = (
+        torch.abs(teacher_feature[:, :, 1:, :] - teacher_feature[:, :, :-1, :]).mean() +
+        torch.abs(teacher_feature[:, :, :, 1:] - teacher_feature[:, :, :, :-1]).mean()
+    )
+
+    weights = Config.get_teacher_guidance_weights(detector_frozen=detector_frozen)
+    total = (
+        weights["heatmap"] * heatmap_loss +
+        weights["contrast"] * contrast_loss +
+        weights["sparsity"] * sparsity_loss +
+        weights["tv"] * tv_loss
+    )
+    stats = {
+        "feature_heatmap": float(heatmap_loss.detach().item()),
+        "feature_contrast": float(contrast_loss.detach().item()),
+        "feature_sparsity": float(sparsity_loss.detach().item()),
+        "feature_tv": float(tv_loss.detach().item()),
+        "feature_total": float(total.detach().item()),
+    }
+    return total, stats
 
 def xywh_to_xyxy(boxes):
     half_w = boxes[:, 2] / 2
@@ -646,7 +823,7 @@ class ConfigYOLO:
     YAML_PATH = r"data\military\data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output\OpticalTeacherYOLO_ft_tuned_v2"
+    TEACHER_OUTPUT_DIR = r"output\OpticalTeacherYOLO_deep_teacher"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -689,6 +866,24 @@ class ConfigYOLO:
     # 验证和指标
     VAL_INTERVAL = 5
     METRIC_IOU_THRESHOLD = 0.5  # 较大的值在评估期间使TP匹配更严格，可能降低召回率，但可能增加假阳性
+
+    # Teacher feature shaping and staged training
+    DETECTOR_FREEZE_EPOCH = 55
+    DETECTOR_FINETUNE_LR = 2e-4
+    FEATURE_HEATMAP_WEIGHT_JOINT = 0.12
+    FEATURE_HEATMAP_WEIGHT_FROZEN = 0.28
+    FEATURE_CONTRAST_WEIGHT_JOINT = 0.04
+    FEATURE_CONTRAST_WEIGHT_FROZEN = 0.08
+    FEATURE_SPARSITY_WEIGHT_JOINT = 0.02
+    FEATURE_SPARSITY_WEIGHT_FROZEN = 0.05
+    FEATURE_TV_WEIGHT_JOINT = 0.005
+    FEATURE_TV_WEIGHT_FROZEN = 0.01
+    FEATURE_FOREGROUND_TARGET = 0.72
+    FEATURE_BACKGROUND_TARGET = 0.12
+    FEATURE_HEATMAP_SIGMA = 0.35
+    FEATURE_BOX_FILL_VALUE = 0.22
+    FEATURE_CORE_FILL_VALUE = 0.6
+    FEATURE_CORE_RATIO = 0.55
 
     # Class balance sampler
     USE_CLASS_BALANCED_SAMPLER = True
@@ -778,6 +973,22 @@ class ConfigYOLO:
             "cls_weight": cls_weight,
             "size_weights": size_weights,
             "phase": phase,
+        }
+
+    @classmethod
+    def get_teacher_guidance_weights(cls, detector_frozen=False):
+        if detector_frozen:
+            return {
+                "heatmap": cls.FEATURE_HEATMAP_WEIGHT_FROZEN,
+                "contrast": cls.FEATURE_CONTRAST_WEIGHT_FROZEN,
+                "sparsity": cls.FEATURE_SPARSITY_WEIGHT_FROZEN,
+                "tv": cls.FEATURE_TV_WEIGHT_FROZEN,
+            }
+        return {
+            "heatmap": cls.FEATURE_HEATMAP_WEIGHT_JOINT,
+            "contrast": cls.FEATURE_CONTRAST_WEIGHT_JOINT,
+            "sparsity": cls.FEATURE_SPARSITY_WEIGHT_JOINT,
+            "tv": cls.FEATURE_TV_WEIGHT_JOINT,
         }
 
     @classmethod
@@ -948,6 +1159,19 @@ def log_all_parameters():
     log_to_file(f"  Confidence threshold: {Config.CONF_THRESH}")
     log_to_file(f"  NMS threshold: {Config.NMS_THRESH}")
     log_to_file(f"  Max detections: {Config.MAX_DET}")
+
+    log_to_file("\n[Teacher Feature Shaping]")
+    log_to_file(f"  Detector freeze epoch: {Config.DETECTOR_FREEZE_EPOCH}")
+    log_to_file(f"  Detector-frozen LR: {Config.DETECTOR_FINETUNE_LR}")
+    log_to_file(f"  Heatmap weight (joint/frozen): {Config.FEATURE_HEATMAP_WEIGHT_JOINT} / {Config.FEATURE_HEATMAP_WEIGHT_FROZEN}")
+    log_to_file(f"  Contrast weight (joint/frozen): {Config.FEATURE_CONTRAST_WEIGHT_JOINT} / {Config.FEATURE_CONTRAST_WEIGHT_FROZEN}")
+    log_to_file(f"  Sparsity weight (joint/frozen): {Config.FEATURE_SPARSITY_WEIGHT_JOINT} / {Config.FEATURE_SPARSITY_WEIGHT_FROZEN}")
+    log_to_file(f"  TV weight (joint/frozen): {Config.FEATURE_TV_WEIGHT_JOINT} / {Config.FEATURE_TV_WEIGHT_FROZEN}")
+    log_to_file(f"  Foreground target: {Config.FEATURE_FOREGROUND_TARGET}")
+    log_to_file(f"  Background target: {Config.FEATURE_BACKGROUND_TARGET}")
+    log_to_file(f"  Heatmap sigma: {Config.FEATURE_HEATMAP_SIGMA}")
+    log_to_file(f"  Box / core fill value: {Config.FEATURE_BOX_FILL_VALUE} / {Config.FEATURE_CORE_FILL_VALUE}")
+    log_to_file(f"  Core ratio: {Config.FEATURE_CORE_RATIO}")
 
     log_to_file("\n[Sampling]")
     log_to_file(f"  Use class balanced sampler: {Config.USE_CLASS_BALANCED_SAMPLER}")
@@ -1648,19 +1872,45 @@ def evaluate_model(model, dataloader, criterion, device):
     model.eval()
     metric_storage = {cls_id: [] for cls_id in range(Config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(Config.NUM_CLASSES)}
-    component_totals = {"total": 0.0, "box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
+    component_totals = {
+        "total": 0.0,
+        "box": 0.0,
+        "obj": 0.0,
+        "noobj": 0.0,
+        "cls": 0.0,
+        "feature_total": 0.0,
+        "feature_heatmap": 0.0,
+        "feature_contrast": 0.0,
+        "feature_sparsity": 0.0,
+        "feature_tv": 0.0,
+    }
     total_tp = 0
     total_fp = 0
     total_fn = 0
+    detector_frozen = is_detector_frozen(model)
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validation", leave=False):
             batch_images, batch_targets = prepare_batch(batch, device)
-            predictions = model(batch_images)
+            teacher_features, predictions = model.forward_with_feature(batch_images)
             loss, loss_stats = criterion(predictions, batch_targets)
+            feature_loss, feature_stats = compute_teacher_guidance_loss(
+                teacher_features,
+                batch_targets,
+                detector_frozen=detector_frozen,
+            )
+            loss = loss + feature_loss
 
-            for key in component_totals:
-                component_totals[key] += loss_stats[key]
+            component_totals["total"] += float(loss.detach().item())
+            component_totals["box"] += loss_stats["box"]
+            component_totals["obj"] += loss_stats["obj"]
+            component_totals["noobj"] += loss_stats["noobj"]
+            component_totals["cls"] += loss_stats["cls"]
+            component_totals["feature_total"] += feature_stats["feature_total"]
+            component_totals["feature_heatmap"] += feature_stats["feature_heatmap"]
+            component_totals["feature_contrast"] += feature_stats["feature_contrast"]
+            component_totals["feature_sparsity"] += feature_stats["feature_sparsity"]
+            component_totals["feature_tv"] += feature_stats["feature_tv"]
 
             detections = decode_detections(predictions)
 
@@ -1923,6 +2173,11 @@ class TeacherWithDetector(nn.Module):
         detections = self.detector(features)
         return detections
 
+    def forward_with_feature(self, x):
+        features = self.teacher(x)
+        detections = self.detector(features)
+        return features, detections
+
 def extract_state_dict(checkpoint):
     if not isinstance(checkpoint, dict):
         return checkpoint
@@ -1988,6 +2243,22 @@ def initialize_teacher_weights(teacher, device):
 
     return False, f"Teacher init mode: checkpoint requested but unavailable, fallback to scratch ({teacher_message})"
 
+
+def build_optimizer_from_model(model, lr=None):
+    if lr is None:
+        lr = Config.LEARNING_RATE
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    return torch.optim.Adam(trainable_params, lr=lr, weight_decay=Config.WEIGHT_DECAY)
+
+
+def set_detector_trainable(model, trainable):
+    for p in model.detector.parameters():
+        p.requires_grad = trainable
+
+
+def is_detector_frozen(model):
+    return not any(p.requires_grad for p in model.detector.parameters())
+
 def train():
     device = Config.DEVICE
     log_to_file(f"Using device: {device}")
@@ -2015,8 +2286,7 @@ def train():
     
     for p in model.teacher.parameters():
         p.requires_grad = not freeze_teacher
-    for p in model.detector.parameters():
-        p.requires_grad = True
+    set_detector_trainable(model, True)
     
     log_to_file("Loading training dataset...")
     train_dataset = YOLODataset(split="train")
@@ -2044,10 +2314,7 @@ def train():
     )
     log_to_file(f"Training dataset size: {len(train_dataset)}")
     
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(trainable_params,
-                                lr=Config.LEARNING_RATE,
-                                weight_decay=Config.WEIGHT_DECAY)
+    optimizer = build_optimizer_from_model(model, lr=Config.LEARNING_RATE)
     
     criterion = YOLOLoss(anchors=Config.ANCHORS, 
                         num_classes=Config.NUM_CLASSES, 
@@ -2090,6 +2357,7 @@ def train():
     }
     best_loss = float('inf')
     best_map50 = -1.0
+    detector_stage_frozen = False
     
     log_to_file("="*60)
     log_to_file("Training model...")
@@ -2108,20 +2376,40 @@ def train():
         
         # Set phase weights
         phase = criterion.set_epoch_weights(epoch)
+
+        if (not detector_stage_frozen) and epoch >= Config.DETECTOR_FREEZE_EPOCH:
+            detector_stage_frozen = True
+            set_detector_trainable(model, False)
+            optimizer = build_optimizer_from_model(model, lr=Config.DETECTOR_FINETUNE_LR)
+            log_to_file(
+                f"Epoch {epoch}: detector frozen; continue shaping teacher features only "
+                f"(lr={Config.DETECTOR_FINETUNE_LR})"
+            )
+        if detector_stage_frozen:
+            phase = f"{phase}+teacher_shape"
         
         for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True):
             batch_images, batch_targets = prepare_batch(batch, device)
             
             optimizer.zero_grad()
             
-            predictions = model(batch_images)
+            teacher_features, predictions = model.forward_with_feature(batch_images)
             loss, loss_stats = criterion(predictions, batch_targets)
+            feature_loss, feature_stats = compute_teacher_guidance_loss(
+                teacher_features,
+                batch_targets,
+                detector_frozen=detector_stage_frozen,
+            )
+            loss = loss + feature_loss
             
             loss.backward()
             optimizer.step()
             
-            for key in train_component_sums:
-                train_component_sums[key] += loss_stats[key]
+            train_component_sums["total"] += float(loss.detach().item())
+            train_component_sums["box"] += loss_stats["box"]
+            train_component_sums["obj"] += loss_stats["obj"]
+            train_component_sums["noobj"] += loss_stats["noobj"]
+            train_component_sums["cls"] += loss_stats["cls"]
 
         avg_train = {key: value / max(len(train_loader), 1) for key, value in train_component_sums.items()}
         history["train_total"].append(avg_train["total"])
