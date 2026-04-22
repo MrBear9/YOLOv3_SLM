@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import transforms
 from torchvision.ops import nms
 import os
@@ -14,6 +14,7 @@ from tqdm import tqdm
 from datetime import datetime
 from PIL import Image
 import matplotlib.patches as patches
+from collections import Counter
 
 # 本地实现所有需要的函数，避免依赖optical_teacher.py的配置
 
@@ -645,7 +646,7 @@ class ConfigYOLO:
     YAML_PATH = r"data\military\data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output\OpticalTeacherYOLO_ft_tuned"
+    TEACHER_OUTPUT_DIR = r"output\OpticalTeacherYOLO_ft_tuned_v2"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -658,36 +659,44 @@ class ConfigYOLO:
     EPOCHS = 100
 
     # 经常调整的训练参数
-    BOX_WEIGHT_BASE = 1.2  # 保持边界框权重，避免继续放大大框主导问题
-    OBJ_WEIGHT_BASE = 0.6  # 适度降低目标置信度权重，缓解高置信度重复框
-    NOOBJ_WEIGHT_BASE = 0.2  # 维持较低负样本权重，避免明显压制召回
-    CLS_WEIGHT_BASE = 0.3  # 提高分类监督，缓解类别塌缩到 aircraft
+    BOX_WEIGHT_BASE = 1.35  # 略微抬高框回归权重，帮助大目标更完整地包围
+    OBJ_WEIGHT_BASE = 0.5  # 再压低目标置信度权重，减少背景被激活成目标
+    NOOBJ_WEIGHT_BASE = 0.3  # 提高负样本惩罚，针对背景假框做更强抑制
+    CLS_WEIGHT_BASE = 0.35  # 继续增强分类监督，配合类别平衡采样缓解 aircraft 偏置
 
-    POSITION_PHASE_EPOCHS = 10  # 比 5 更稳，避免过早进入易过拟合的平衡阶段
-    BALANCE_PHASE_EPOCHS = 8  # 保留平滑过渡，但不再像 25+10 那样过长
+    POSITION_PHASE_EPOCHS = 12  # 略拉长框定位阶段，让目标轮廓先学稳
+    BALANCE_PHASE_EPOCHS = 10  # 延长过渡阶段，减缓过早进入易过拟合区间
 
     IOU_THRESHOLD = 0.5  # 主要正样本匹配阈值；较大的值使正样本分配更严格，可能降低召回率
-    POSITIVE_ANCHOR_IOU = 0.25  # 保持较宽松阈值，兼容数据集中的尺度波动
+    POSITIVE_ANCHOR_IOU = 0.3  # 略微收紧正样本分配，减少碎片化匹配
     MAX_POSITIVE_ANCHORS = 1  # 收回到单锚点分配，优先减少重复框
-    NOOBJ_IGNORE_IOU = 0.6  # 提高阈值，让更多附近的锚点被忽略，减少重复检测
+    NOOBJ_IGNORE_IOU = 0.7  # 让更多近邻锚点承担 noobj 惩罚，进一步抑制重复框
 
     SMALL_OBJ_AREA = 32 * 32  # 将对象分组为小目标的阈值
     LARGE_OBJ_AREA = 128 * 128  # 将对象分组为大目标的阈值
-    SMALL_OBJ_WEIGHT = 0.8  # 适度提高小目标权重，避免完全被大框样本淹没
+    SMALL_OBJ_WEIGHT = 0.75  # 小幅回调小目标权重，避免背景纹理被过度当作小目标
     MEDIUM_OBJ_WEIGHT = 1.0  # 中等目标的基准损失权重
-    LARGE_OBJ_WEIGHT = 1.4  # 下调大目标权重，减少场景级大框对训练的主导
+    LARGE_OBJ_WEIGHT = 1.6  # 略微恢复大目标权重，帮助大目标学到更完整外接框
 
-    FOCAL_ALPHA = 0.3  # 略微抬高正样本权重，配合更高 cls_weight 稳定分类学习
-    FOCAL_GAMMA = 1.5  # 取 1.0 和 2.0 的中间值，兼顾收敛稳定性与困难样本关注
+    FOCAL_ALPHA = 0.25  # 给负样本更高权重，压制背景误检
+    FOCAL_GAMMA = 1.8  # 更关注困难负样本和重复框
 
-    CONF_THRESH = 0.5  # 从 0.75 回调到更合理区间，兼顾召回与误检过滤
-    NMS_THRESH = 0.35  # 略微加强 NMS，抑制大目标附近的重复框
-    MAX_DET = 5  # 进一步收紧单图输出上限，减少重复检测对指标和可视化的干扰
+    CONF_THRESH = 0.6  # 稍微提高可视化/评估阈值，减少背景假框
+    NMS_THRESH = 0.25  # 更强的 NMS，优先压掉一个目标上的重复框
+    MAX_DET = 4  # 进一步压缩单图最大输出，保留多目标余量同时减少碎框
     AGNOSTIC_NMS = False  # 多类别任务使用按类 NMS，避免不同类别互相压制
 
     # 验证和指标
     VAL_INTERVAL = 5
     METRIC_IOU_THRESHOLD = 0.5  # 较大的值在评估期间使TP匹配更严格，可能降低召回率，但可能增加假阳性
+
+    # Class balance sampler
+    USE_CLASS_BALANCED_SAMPLER = True
+    CLASS_BALANCE_POWER = 0.6  # 对少数类稍微更积极，进一步缓解 aircraft 过多
+    MAX_CLASS_BALANCE_GAIN = 3.0  # 单类最高采样增益上限
+    MAJORITY_ONLY_IMAGE_WEIGHT = 0.45  # 对纯多数类图像再多降一点权重
+    EMPTY_IMAGE_SAMPLE_WEIGHT = 0.7  # 空标签图保留，但略微降权
+    MIN_IMAGE_SAMPLE_WEIGHT = 0.35  # 防止样本权重过低导致几乎永不被采到
 
     # 模型和锚点
     STRIDES = [8, 16, 32]
@@ -702,8 +711,8 @@ class ConfigYOLO:
     ANCHOR_SOURCE = "default"
 
     # Optimizer and checkpoints
-    LEARNING_RATE = 5e-4
-    WEIGHT_DECAY = 1e-5
+    LEARNING_RATE = 3e-4
+    WEIGHT_DECAY = 3e-5
     OPTIMIZER = "Adam"
     TEACHER_INIT_MODE = "checkpoint"  # "scratch" 或 "checkpoint"
     TEACHER_INIT_CHECKPOINT = r"output\OpticalTeacherYOLO\teacher_final.pth"
@@ -792,6 +801,14 @@ class ConfigYOLO:
         freeze_teacher = os.environ.get("OPTICAL_TEACHER_FREEZE_TEACHER")
         if freeze_teacher:
             cls.FREEZE_TEACHER = freeze_teacher.strip().lower() in {"1", "true", "yes", "on"}
+
+        use_class_balanced_sampler = os.environ.get("OPTICAL_TEACHER_USE_CLASS_BALANCED_SAMPLER")
+        if use_class_balanced_sampler:
+            cls.USE_CLASS_BALANCED_SAMPLER = use_class_balanced_sampler.strip().lower() in {"1", "true", "yes", "on"}
+
+        class_balance_power = os.environ.get("OPTICAL_TEACHER_CLASS_BALANCE_POWER")
+        if class_balance_power:
+            cls.CLASS_BALANCE_POWER = float(class_balance_power)
 
     @classmethod
     def initialize(cls):
@@ -931,6 +948,14 @@ def log_all_parameters():
     log_to_file(f"  Confidence threshold: {Config.CONF_THRESH}")
     log_to_file(f"  NMS threshold: {Config.NMS_THRESH}")
     log_to_file(f"  Max detections: {Config.MAX_DET}")
+
+    log_to_file("\n[Sampling]")
+    log_to_file(f"  Use class balanced sampler: {Config.USE_CLASS_BALANCED_SAMPLER}")
+    log_to_file(f"  Class balance power: {Config.CLASS_BALANCE_POWER}")
+    log_to_file(f"  Max class balance gain: {Config.MAX_CLASS_BALANCE_GAIN}")
+    log_to_file(f"  Majority-only image weight: {Config.MAJORITY_ONLY_IMAGE_WEIGHT}")
+    log_to_file(f"  Empty-image sample weight: {Config.EMPTY_IMAGE_SAMPLE_WEIGHT}")
+    log_to_file(f"  Min image sample weight: {Config.MIN_IMAGE_SAMPLE_WEIGHT}")
     
     log_to_file("\n[Visualization]")
     log_to_file(f"  Visualization interval: {Config.VIS_INTERVAL} epochs")
@@ -985,6 +1010,7 @@ class YOLODataset(Dataset):
         self.label_dir = label_dir
         self.img_size = Config.IMG_SIZE
         self.num_classes = Config.NUM_CLASSES
+        self._sampling_metadata = None
         
         self.transform = transforms.Compose([
             transforms.Resize((self.img_size, self.img_size)),
@@ -995,13 +1021,53 @@ class YOLODataset(Dataset):
     def __len__(self):
         return len(self.files)
 
+    def get_label_path(self, img_path):
+        return os.path.join(self.label_dir, os.path.splitext(os.path.basename(img_path))[0] + ".txt")
+
+    def get_sampling_metadata(self):
+        if self._sampling_metadata is not None:
+            return self._sampling_metadata
+
+        image_class_counters = []
+        class_box_counts = Counter()
+        empty_image_count = 0
+
+        for img_path in self.files:
+            label_path = self.get_label_path(img_path)
+            image_class_counter = Counter()
+
+            if os.path.exists(label_path):
+                with open(label_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) < 5:
+                            continue
+                        try:
+                            cls_id = int(parts[0])
+                        except ValueError:
+                            continue
+                        if 0 <= cls_id < self.num_classes:
+                            image_class_counter[cls_id] += 1
+                            class_box_counts[cls_id] += 1
+
+            if len(image_class_counter) == 0:
+                empty_image_count += 1
+            image_class_counters.append(image_class_counter)
+
+        self._sampling_metadata = {
+            "image_class_counters": image_class_counters,
+            "class_box_counts": class_box_counts,
+            "empty_image_count": empty_image_count,
+        }
+        return self._sampling_metadata
+
     def __getitem__(self, idx):
         img_path = self.files[idx]
         img = Image.open(img_path).convert("RGB")
         
         img_tensor = self.transform(img)
         
-        label_path = os.path.join(self.label_dir, os.path.splitext(os.path.basename(img_path))[0] + ".txt")
+        label_path = self.get_label_path(img_path)
         
         targets = []
         if os.path.exists(label_path):
@@ -1022,6 +1088,63 @@ class YOLODataset(Dataset):
             targets = torch.zeros((0, 5), dtype=torch.float32)
         
         return img_tensor, targets
+
+
+def build_class_balanced_train_sampler(dataset):
+    metadata = dataset.get_sampling_metadata()
+    class_box_counts = metadata["class_box_counts"]
+
+    if len(class_box_counts) == 0:
+        return None, {"enabled": False, "reason": "no_valid_labels"}
+
+    majority_class_id, majority_count = class_box_counts.most_common(1)[0]
+    class_gains = {}
+    for cls_id, cls_count in class_box_counts.items():
+        raw_gain = (majority_count / max(cls_count, 1)) ** Config.CLASS_BALANCE_POWER
+        class_gains[cls_id] = min(Config.MAX_CLASS_BALANCE_GAIN, max(1.0, raw_gain))
+
+    image_weights = []
+    boosted_images = 0
+    majority_only_images = 0
+
+    for image_class_counter in metadata["image_class_counters"]:
+        if len(image_class_counter) == 0:
+            weight = Config.EMPTY_IMAGE_SAMPLE_WEIGHT
+        else:
+            total_boxes = sum(image_class_counter.values())
+            weighted_gain = sum(
+                box_count * class_gains.get(cls_id, 1.0)
+                for cls_id, box_count in image_class_counter.items()
+            ) / max(total_boxes, 1)
+            weight = weighted_gain
+
+            if len(image_class_counter) == 1 and majority_class_id in image_class_counter:
+                majority_only_images += 1
+                weight *= Config.MAJORITY_ONLY_IMAGE_WEIGHT
+
+            if weight > 1.05:
+                boosted_images += 1
+
+        image_weights.append(max(Config.MIN_IMAGE_SAMPLE_WEIGHT, weight))
+
+    weights_tensor = torch.tensor(image_weights, dtype=torch.double)
+    sampler = WeightedRandomSampler(weights=weights_tensor, num_samples=len(dataset), replacement=True)
+
+    summary = {
+        "enabled": True,
+        "majority_class_id": majority_class_id,
+        "majority_class_name": Config.CLASS_NAMES.get(majority_class_id, str(majority_class_id)),
+        "majority_count": int(majority_count),
+        "class_box_counts": {Config.CLASS_NAMES.get(cls_id, str(cls_id)): int(count) for cls_id, count in class_box_counts.items()},
+        "class_gains": {Config.CLASS_NAMES.get(cls_id, str(cls_id)): round(gain, 4) for cls_id, gain in class_gains.items()},
+        "boosted_images": boosted_images,
+        "majority_only_images": majority_only_images,
+        "empty_images": metadata["empty_image_count"],
+        "min_weight": round(float(weights_tensor.min().item()), 4),
+        "max_weight": round(float(weights_tensor.max().item()), 4),
+        "mean_weight": round(float(weights_tensor.mean().item()), 4),
+    }
+    return sampler, summary
 
 class YOLOLoss(nn.Module):
     def __init__(self, anchors, num_classes, strides):
@@ -1897,8 +2020,28 @@ def train():
     
     log_to_file("Loading training dataset...")
     train_dataset = YOLODataset(split="train")
-    train_loader = DataLoader(train_dataset, batch_size=Config.BATCH_SIZE, 
-                             shuffle=True, collate_fn=lambda x: x)
+    train_sampler = None
+    if Config.USE_CLASS_BALANCED_SAMPLER:
+        train_sampler, sampler_summary = build_class_balanced_train_sampler(train_dataset)
+        if train_sampler is not None and sampler_summary.get("enabled"):
+            log_to_file("Class balanced sampler enabled")
+            log_to_file(f"  Majority class: {sampler_summary['majority_class_name']} ({sampler_summary['majority_count']})")
+            log_to_file(f"  Boosted images: {sampler_summary['boosted_images']}")
+            log_to_file(f"  Majority-only images: {sampler_summary['majority_only_images']}")
+            log_to_file(f"  Empty images: {sampler_summary['empty_images']}")
+            log_to_file(f"  Image weight range: {sampler_summary['min_weight']} ~ {sampler_summary['max_weight']}")
+            log_to_file(f"  Image weight mean: {sampler_summary['mean_weight']}")
+            log_to_file(f"  Class gains: {sampler_summary['class_gains']}")
+        else:
+            log_to_file(f"Class balanced sampler disabled at runtime: {sampler_summary.get('reason', 'unknown reason')}")
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=Config.BATCH_SIZE,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        collate_fn=lambda x: x,
+    )
     log_to_file(f"Training dataset size: {len(train_dataset)}")
     
     trainable_params = [p for p in model.parameters() if p.requires_grad]
