@@ -261,6 +261,42 @@ def decode_detections(preds, anchors, strides, num_classes, conf_thresh, nms_thr
     return detections
 
 
+class SqueezeExcite(nn.Module):
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+        hidden = max(channels // reduction, 4)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(channels, hidden, kernel_size=1, bias=True),
+            nn.SiLU(),
+            nn.Conv2d(hidden, channels, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        return x * self.fc(self.pool(x))
+
+
+class TeacherResidualBlock(nn.Module):
+    def __init__(self, channels, dilation=1):
+        super().__init__()
+        padding = dilation
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=padding, dilation=dilation, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=padding, dilation=dilation, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
+        self.se = SqueezeExcite(channels)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        identity = x
+        out = self.act(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.se(out)
+        out = out + identity
+        return self.act(out)
+
+
 class ConvTeacher(nn.Module):
     def __init__(self):
         super().__init__()
@@ -279,6 +315,35 @@ class ConvTeacher(nn.Module):
             nn.BatchNorm2d(64),
             nn.SiLU(),
         )
+        self.stage1 = nn.Sequential(
+            TeacherResidualBlock(16),
+            TeacherResidualBlock(16),
+        )
+        self.stage2 = nn.Sequential(
+            TeacherResidualBlock(32),
+            TeacherResidualBlock(32),
+        )
+        self.stage3 = nn.Sequential(
+            TeacherResidualBlock(64),
+            TeacherResidualBlock(64),
+            TeacherResidualBlock(64, dilation=2),
+        )
+        self.skip1 = nn.Sequential(
+            nn.Conv2d(16, 64, kernel_size=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+        )
+        self.skip2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+        )
+        self.context = nn.Sequential(
+            TeacherResidualBlock(64),
+            nn.Conv2d(64, 64, kernel_size=3, padding=2, dilation=2, bias=False),
+            nn.BatchNorm2d(64),
+            nn.SiLU(),
+        )
         self.refine = nn.Sequential(
             nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(64),
@@ -292,9 +357,14 @@ class ConvTeacher(nn.Module):
     def forward(self, x):
         if x.shape[1] > 1:
             x = x.mean(dim=1, keepdim=True)
-        f = self.conv1(x)
-        f = self.conv2(f)
-        f = self.conv3(f)
+
+        x1 = self.stage1(self.conv1(x))
+        x2 = self.stage2(self.conv2(x1))
+        x3 = self.stage3(self.conv3(x2))
+
+        skip1 = F.interpolate(self.skip1(x1), size=x3.shape[-2:], mode="bilinear", align_corners=False)
+        skip2 = F.interpolate(self.skip2(x2), size=x3.shape[-2:], mode="bilinear", align_corners=False)
+        f = self.context(x3 + skip1 + skip2)
         f = self.refine(f)
         f = self.project(f)
         f = torch.abs(f)
@@ -393,6 +463,8 @@ def load_joint_checkpoint(model: TeacherWithDetector, checkpoint_path: Path, dev
     checkpoint = torch.load(windows_safe_path(checkpoint_path), map_location=device)
     teacher_loaded = 0
     detector_loaded = 0
+    teacher_total = len(model.teacher.state_dict())
+    detector_total = len(model.detector.state_dict())
 
     if isinstance(checkpoint, dict) and "teacher_state_dict" in checkpoint and "detector_state_dict" in checkpoint:
         teacher_state = extract_state_dict(checkpoint["teacher_state_dict"])
@@ -401,7 +473,12 @@ def load_joint_checkpoint(model: TeacherWithDetector, checkpoint_path: Path, dev
         model.detector.load_state_dict(detector_state, strict=False)
         teacher_loaded = len(teacher_state)
         detector_loaded = len(detector_state)
-        return teacher_loaded, detector_loaded
+        return {
+            "teacher_loaded": teacher_loaded,
+            "detector_loaded": detector_loaded,
+            "teacher_total": teacher_total,
+            "detector_total": detector_total,
+        }
 
     state_dict = extract_state_dict(checkpoint)
     teacher_target = model.teacher.state_dict()
@@ -437,7 +514,12 @@ def load_joint_checkpoint(model: TeacherWithDetector, checkpoint_path: Path, dev
     if len(teacher_compatible) == 0 and len(detector_compatible) == 0:
         raise RuntimeError(f"No compatible teacher/detector weights found in checkpoint: {checkpoint_path}")
 
-    return len(teacher_compatible), len(detector_compatible)
+    return {
+        "teacher_loaded": len(teacher_compatible),
+        "detector_loaded": len(detector_compatible),
+        "teacher_total": teacher_total,
+        "detector_total": detector_total,
+    }
 
 
 class InferenceDataset(Dataset):
@@ -814,6 +896,10 @@ def evaluate_and_visualize(model, dataloader, args, class_names, output_dir, mod
 
 
 def build_summary_text(args, metrics, evaluated_images, saved_visualizations, checkpoint_info, mode_description):
+    partial_load = (
+        checkpoint_info["teacher_loaded"] < checkpoint_info["teacher_total"] or
+        checkpoint_info["detector_loaded"] < checkpoint_info["detector_total"]
+    )
     lines = [
         "Optical YOLO Model Results Summary",
         f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -830,7 +916,10 @@ def build_summary_text(args, metrics, evaluated_images, saved_visualizations, ch
         f"Class-agnostic NMS: {args.agnostic_nms}",
         f"Evaluated images: {evaluated_images}",
         f"Saved visualizations: {len(saved_visualizations)}",
-        f"Checkpoint load info: teacher={checkpoint_info[0]}, detector={checkpoint_info[1]}",
+        "Checkpoint load info: "
+        f"teacher={checkpoint_info['teacher_loaded']}/{checkpoint_info['teacher_total']}, "
+        f"detector={checkpoint_info['detector_loaded']}/{checkpoint_info['detector_total']}",
+        f"Partial checkpoint load: {partial_load}",
         "",
         "[Overall Metrics]",
         f"Precision: {metrics['precision']:.6f}",
@@ -922,6 +1011,14 @@ def main():
 
     model = TeacherWithDetector(num_classes=num_classes).to(args.device)
     checkpoint_info = load_joint_checkpoint(model, args.checkpoint, args.device)
+    if (
+        checkpoint_info["teacher_loaded"] < checkpoint_info["teacher_total"] or
+        checkpoint_info["detector_loaded"] < checkpoint_info["detector_total"]
+    ):
+        print(
+            "Warning: checkpoint only partially matched the current inference model. "
+            "Please confirm the model structure matches the training script."
+        )
 
     metrics, saved_visualizations, evaluated_images = evaluate_and_visualize(
         model=model,
