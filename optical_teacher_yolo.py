@@ -17,6 +17,7 @@ import matplotlib.patches as patches
 from collections import Counter
 
 # 本地实现所有需要的函数，避免依赖optical_teacher.py的配置
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 def load_class_names(yaml_path):
     """从YAML文件加载类别名称"""
@@ -833,33 +834,33 @@ class ConfigYOLO:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     IMG_SIZE = 640
     BATCH_SIZE = 8
-    EPOCHS = 100
+    EPOCHS = 120
 
     # 经常调整的训练参数
-    BOX_WEIGHT_BASE = 1.35  # 略微抬高框回归权重，帮助大目标更完整地包围
-    OBJ_WEIGHT_BASE = 0.5  # 再压低目标置信度权重，减少背景被激活成目标
-    NOOBJ_WEIGHT_BASE = 0.3  # 提高负样本惩罚，针对背景假框做更强抑制
-    CLS_WEIGHT_BASE = 0.35  # 继续增强分类监督，配合类别平衡采样缓解 aircraft 偏置
+    BOX_WEIGHT_BASE = 1.32  # 保留大目标回归力度，但略收一点，减少框体过大
+    OBJ_WEIGHT_BASE = 0.56  # 从上一版回调，给真实目标更多正样本驱动
+    NOOBJ_WEIGHT_BASE = 0.26  # 背景抑制保留，但不再过强
+    CLS_WEIGHT_BASE = 0.32  # 保留分类监督，同时回到更接近旧稳态
 
-    POSITION_PHASE_EPOCHS = 12  # 略拉长框定位阶段，让目标轮廓先学稳
-    BALANCE_PHASE_EPOCHS = 10  # 延长过渡阶段，减缓过早进入易过拟合区间
+    POSITION_PHASE_EPOCHS = 12  # 继续让前期定位学稳
+    BALANCE_PHASE_EPOCHS = 8  # 缩短过渡段，减少中期被塑形权重拖慢
 
     IOU_THRESHOLD = 0.5  # 主要正样本匹配阈值；较大的值使正样本分配更严格，可能降低召回率
-    POSITIVE_ANCHOR_IOU = 0.3  # 略微收紧正样本分配，减少碎片化匹配
+    POSITIVE_ANCHOR_IOU = 0.25  # 回退到旧版更稳的正样本匹配阈值
     MAX_POSITIVE_ANCHORS = 1  # 收回到单锚点分配，优先减少重复框
-    NOOBJ_IGNORE_IOU = 0.7  # 让更多近邻锚点承担 noobj 惩罚，进一步抑制重复框
+    NOOBJ_IGNORE_IOU = 0.6  # 避免把近邻潜在正样本也过度压成背景
 
     SMALL_OBJ_AREA = 32 * 32  # 将对象分组为小目标的阈值
     LARGE_OBJ_AREA = 128 * 128  # 将对象分组为大目标的阈值
-    SMALL_OBJ_WEIGHT = 0.75  # 小幅回调小目标权重，避免背景纹理被过度当作小目标
+    SMALL_OBJ_WEIGHT = 0.8  # 给小目标一点权重恢复，减少小目标漏检
     MEDIUM_OBJ_WEIGHT = 1.0  # 中等目标的基准损失权重
-    LARGE_OBJ_WEIGHT = 1.6  # 略微恢复大目标权重，帮助大目标学到更完整外接框
+    LARGE_OBJ_WEIGHT = 1.5  # 保留大目标强调，但降低一个目标多框的倾向
 
-    FOCAL_ALPHA = 0.25  # 给负样本更高权重，压制背景误检
-    FOCAL_GAMMA = 1.8  # 更关注困难负样本和重复框
+    FOCAL_ALPHA = 0.28  # 向旧稳态回调，避免过度偏向负样本
+    FOCAL_GAMMA = 1.6  # 略降，减少后期被困难背景样本牵制
 
-    CONF_THRESH = 0.6  # 稍微提高可视化/评估阈值，减少背景假框
-    NMS_THRESH = 0.25  # 更强的 NMS，优先压掉一个目标上的重复框
+    CONF_THRESH = 0.58  # 略回调，给真实目标更多召回空间
+    NMS_THRESH = 0.22  # 用旧版更稳的压框强度
     MAX_DET = 4  # 进一步压缩单图最大输出，保留多目标余量同时减少碎框
     AGNOSTIC_NMS = False  # 多类别任务使用按类 NMS，避免不同类别互相压制
 
@@ -868,22 +869,22 @@ class ConfigYOLO:
     METRIC_IOU_THRESHOLD = 0.5  # 较大的值在评估期间使TP匹配更严格，可能降低召回率，但可能增加假阳性
 
     # Teacher feature shaping and staged training
-    DETECTOR_FREEZE_EPOCH = 55
+    DETECTOR_FREEZE_EPOCH = 85
     DETECTOR_FINETUNE_LR = 2e-4
-    FEATURE_HEATMAP_WEIGHT_JOINT = 0.12
-    FEATURE_HEATMAP_WEIGHT_FROZEN = 0.28
-    FEATURE_CONTRAST_WEIGHT_JOINT = 0.04
-    FEATURE_CONTRAST_WEIGHT_FROZEN = 0.08
-    FEATURE_SPARSITY_WEIGHT_JOINT = 0.02
-    FEATURE_SPARSITY_WEIGHT_FROZEN = 0.05
-    FEATURE_TV_WEIGHT_JOINT = 0.005
-    FEATURE_TV_WEIGHT_FROZEN = 0.01
-    FEATURE_FOREGROUND_TARGET = 0.72
-    FEATURE_BACKGROUND_TARGET = 0.12
+    FEATURE_HEATMAP_WEIGHT_JOINT = 0.06
+    FEATURE_HEATMAP_WEIGHT_FROZEN = 0.14
+    FEATURE_CONTRAST_WEIGHT_JOINT = 0.02
+    FEATURE_CONTRAST_WEIGHT_FROZEN = 0.04
+    FEATURE_SPARSITY_WEIGHT_JOINT = 0.008
+    FEATURE_SPARSITY_WEIGHT_FROZEN = 0.02
+    FEATURE_TV_WEIGHT_JOINT = 0.003
+    FEATURE_TV_WEIGHT_FROZEN = 0.006
+    FEATURE_FOREGROUND_TARGET = 0.68
+    FEATURE_BACKGROUND_TARGET = 0.08
     FEATURE_HEATMAP_SIGMA = 0.35
-    FEATURE_BOX_FILL_VALUE = 0.22
-    FEATURE_CORE_FILL_VALUE = 0.6
-    FEATURE_CORE_RATIO = 0.55
+    FEATURE_BOX_FILL_VALUE = 0.10
+    FEATURE_CORE_FILL_VALUE = 0.32
+    FEATURE_CORE_RATIO = 0.40
 
     # Class balance sampler
     USE_CLASS_BALANCED_SAMPLER = True
@@ -906,7 +907,7 @@ class ConfigYOLO:
     ANCHOR_SOURCE = "default"
 
     # Optimizer and checkpoints
-    LEARNING_RATE = 3e-4
+    LEARNING_RATE = 4e-4
     WEIGHT_DECAY = 3e-5
     OPTIMIZER = "Adam"
     TEACHER_INIT_MODE = "checkpoint"  # "scratch" 或 "checkpoint"
@@ -1029,8 +1030,11 @@ class ConfigYOLO:
         cls.ANCHOR_SOURCE = "default"
         if cls.USE_EXTERNAL_ANCHORS:
             try:
-                cls.ANCHORS = load_anchor_groups(cls.ANCHOR_CONFIG_PATH)
-                cls.ANCHOR_SOURCE = cls.ANCHOR_CONFIG_PATH
+                anchor_config_path = cls.ANCHOR_CONFIG_PATH
+                if not os.path.isabs(anchor_config_path):
+                    anchor_config_path = os.path.join(PROJECT_ROOT, anchor_config_path)
+                cls.ANCHORS = load_anchor_groups(anchor_config_path)
+                cls.ANCHOR_SOURCE = anchor_config_path
             except Exception as exc:
                 cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
                 cls.ANCHOR_SOURCE = f"default (external load failed: {exc})"
