@@ -19,7 +19,7 @@ from torchvision.ops import nms
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_YAML = ROOT / "data" / "military" / "data.yaml"
-DEFAULT_CHECKPOINT = ROOT / "output" / "OpticalTeacherYOLO" / "teacher_detector_final.pth"
+DEFAULT_CHECKPOINT = ROOT / "output" / "oty_m1" / "teacher_detector_final.pth"
 DEFAULT_OUTPUT_DIR = ROOT / "Optical_yolo_detect" / "Optical_yolo_model_results"
 DEFAULT_ANCHOR_YAML = ROOT / "output" / "anchor_clustering" / "yolo_anchors.yaml"
 DEFAULT_STRIDES = [8, 16, 32]

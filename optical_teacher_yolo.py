@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import copy
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import transforms
 from torchvision.ops import nms
@@ -18,6 +19,16 @@ from collections import Counter
 
 # 本地实现所有需要的函数，避免依赖optical_teacher.py的配置
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+def resolve_project_path(path):
+    if path is None:
+        return None
+    path = str(path).strip()
+    if not path:
+        return None
+    if os.path.isabs(path):
+        return path
+    return os.path.join(PROJECT_ROOT, path)
 
 def load_class_names(yaml_path):
     """从YAML文件加载类别名称"""
@@ -92,11 +103,18 @@ def append_plain_log(message=""):
     with open(ConfigYOLO.LOG_FILE, 'a', encoding='utf-8') as f:
         f.write(message + "\n")
 
-def init_epoch_log_table():
-    separator = ConfigYOLO.get_epoch_table_separator()
+def _format_table_cell(value, width):
+    text = str(value)
+    if len(text) >= width:
+        text = text[: max(width - 1, 1)]
+    return f"{text:<{width}}"
+
+
+def init_epoch_log_table(stage_name=None):
+    separator = ConfigYOLO.get_epoch_table_separator(stage_name)
     append_plain_log("")
     append_plain_log(separator)
-    append_plain_log(ConfigYOLO.get_epoch_table_header())
+    append_plain_log(ConfigYOLO.get_epoch_table_header(stage_name))
     append_plain_log(separator)
 
 def _format_table_value(value, width, decimals=4):
@@ -109,20 +127,49 @@ def _format_table_value(value, width, decimals=4):
         pass
     return f"{value:<{width}.{decimals}f}"
 
-def log_epoch_table_row(epoch, phase, train_loss, val_loss, precision, recall, f1_score, map50, lr, best_status):
-    phase_text = str(phase)[: ConfigYOLO.EPOCH_TABLE_PHASE_WIDTH - 1]
-    append_plain_log(
-        f"{epoch + 1:<{ConfigYOLO.EPOCH_TABLE_EPOCH_WIDTH}}"
-        f"{phase_text:<{ConfigYOLO.EPOCH_TABLE_PHASE_WIDTH}}"
-        f"{_format_table_value(train_loss, ConfigYOLO.EPOCH_TABLE_TRAIN_LOSS_WIDTH)}"
-        f"{_format_table_value(val_loss, ConfigYOLO.EPOCH_TABLE_VAL_LOSS_WIDTH)}"
-        f"{_format_table_value(precision, ConfigYOLO.EPOCH_TABLE_METRIC_WIDTH, 3)}"
-        f"{_format_table_value(recall, ConfigYOLO.EPOCH_TABLE_METRIC_WIDTH, 3)}"
-        f"{_format_table_value(f1_score, ConfigYOLO.EPOCH_TABLE_METRIC_WIDTH, 3)}"
-        f"{_format_table_value(map50, ConfigYOLO.EPOCH_TABLE_METRIC_WIDTH, 3)}"
-        f"{_format_table_value(lr, ConfigYOLO.EPOCH_TABLE_LR_WIDTH, 6)}"
-        f"{str(best_status):<{ConfigYOLO.EPOCH_TABLE_BEST_WIDTH}}"
-    )
+def _format_epoch_table_row(columns, values):
+    return "".join(_format_table_cell(values.get(title, ""), width) for title, width in columns)
+
+
+def log_epoch_table_row(
+    epoch,
+    phase,
+    train_loss,
+    val_loss,
+    precision,
+    recall,
+    f1_score,
+    map50,
+    map5095,
+    lr,
+    best_status,
+    stage_name=None,
+    feature_stats=None,
+):
+    feature_stats = feature_stats or {}
+    values = {
+        "Epoch": epoch + 1,
+        "Phase": phase,
+        "Train": _format_table_value(train_loss, ConfigYOLO.EPOCH_TABLE_TRAIN_LOSS_WIDTH).strip(),
+        "Val": _format_table_value(val_loss, ConfigYOLO.EPOCH_TABLE_VAL_LOSS_WIDTH).strip(),
+        "Prec": _format_table_value(precision, ConfigYOLO.EPOCH_TABLE_METRIC_WIDTH, 3).strip(),
+        "Recall": _format_table_value(recall, ConfigYOLO.EPOCH_TABLE_METRIC_WIDTH, 3).strip(),
+        "F1": _format_table_value(f1_score, ConfigYOLO.EPOCH_TABLE_METRIC_WIDTH, 3).strip(),
+        "mAP50": _format_table_value(map50, ConfigYOLO.EPOCH_TABLE_METRIC_WIDTH, 3).strip(),
+        "mAP5095": _format_table_value(map5095, ConfigYOLO.EPOCH_TABLE_METRIC_WIDTH, 3).strip(),
+        "LR": _format_table_value(lr, ConfigYOLO.EPOCH_TABLE_LR_WIDTH, 6).strip(),
+        "Best": best_status,
+        "Feat": f"{feature_stats.get('feature_total', 0.0):.4f}",
+        "Heat": f"{feature_stats.get('feature_heatmap', 0.0):.4f}",
+        "Fg": f"{feature_stats.get('feature_fg_mean', 0.0):.4f}",
+        "Bg": f"{feature_stats.get('feature_bg_mean', 0.0):.4f}",
+        "Edge": f"{feature_stats.get('feature_edge_mean', 0.0):.4f}",
+        "Std": f"{feature_stats.get('feature_std', 0.0):.4f}",
+        "DetAux": f"{feature_stats.get('detector_aux', 0.0):.4f}",
+        "DetFeat": f"{feature_stats.get('detector_feat_aux', 0.0):.4f}",
+        "DetObj": f"{feature_stats.get('detector_obj_aux', 0.0):.4f}",
+    }
+    append_plain_log(_format_epoch_table_row(ConfigYOLO.get_epoch_table_columns(stage_name), values))
 
 # =========================================================
 # 光学层（相位 + 幅度调制）
@@ -304,7 +351,8 @@ class ConvTeacher(nn.Module):
             nn.SiLU()
         )
 
-        self.project = nn.Conv2d(32, 1, kernel_size=1, bias=False)
+        self.project = nn.Conv2d(32, 1, kernel_size=1, bias=True)
+        nn.init.zeros_(self.project.bias)
 
     def forward(self, x):
         if x.shape[1] > 1:
@@ -319,7 +367,6 @@ class ConvTeacher(nn.Module):
         f = self.context(x3 + skip1 + skip2)
         f = self.refine(f)
         f = self.project(f)
-        f = torch.abs(f)
         f = F.interpolate(
             f, size=x.shape[-2:], mode="bilinear", align_corners=False
         )
@@ -370,6 +417,19 @@ class YOLOLightHead(nn.Module):
         self.head_p5 = nn.Conv2d(base_ch * 8, out_channels, 1)
         self.head_p4 = nn.Conv2d(base_ch * 4, out_channels, 1)
         self.head_p3 = nn.Conv2d(base_ch * 2, out_channels, 1)
+        self._init_detection_biases()
+
+    def _init_detection_biases(self):
+        attrs = 5 + Config.NUM_CLASSES if Config.NUM_CLASSES is not None else None
+        if attrs is None or attrs <= 5:
+            return
+        for head in (self.head_p3, self.head_p4, self.head_p5):
+            if head.bias is None or head.bias.numel() % attrs != 0:
+                continue
+            with torch.no_grad():
+                bias = head.bias.view(-1, attrs)
+                bias[:, 4].fill_(Config.DETECTOR_INIT_OBJ_BIAS)
+                bias[:, 5:].fill_(Config.DETECTOR_INIT_CLS_BIAS)
 
     def forward(self, x):
         x_init = self.init_conv(x)
@@ -408,7 +468,48 @@ def enhance_feature_for_display(feature_map):
     return np.power(feature_map, 0.8)
 
 
-def build_teacher_target_map(targets, img_size, device, dtype):
+def minmax_normalize_map(value, eps=1e-6):
+    min_value = value.amin(dim=(-2, -1), keepdim=True)
+    max_value = value.amax(dim=(-2, -1), keepdim=True)
+    return (value - min_value) / (max_value - min_value + eps)
+
+
+def build_image_texture_map(images, img_size, device, dtype):
+    if images is None:
+        return None
+
+    gray = images.to(device=device, dtype=dtype)
+    if gray.shape[1] > 1:
+        gray = gray.mean(dim=1, keepdim=True)
+    if gray.shape[-1] != img_size or gray.shape[-2] != img_size:
+        gray = F.interpolate(gray, size=(img_size, img_size), mode="bilinear", align_corners=False)
+
+    gray = minmax_normalize_map(gray.float())
+    smooth = F.avg_pool2d(gray, kernel_size=9, stride=1, padding=4)
+    local_contrast = (gray - smooth).abs()
+
+    sobel_x = torch.tensor(
+        [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
+        device=device,
+        dtype=gray.dtype,
+    ).view(1, 1, 3, 3)
+    sobel_y = torch.tensor(
+        [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]],
+        device=device,
+        dtype=gray.dtype,
+    ).view(1, 1, 3, 3)
+    grad_x = F.conv2d(gray, sobel_x, padding=1)
+    grad_y = F.conv2d(gray, sobel_y, padding=1)
+    gradient = torch.sqrt(grad_x.pow(2) + grad_y.pow(2) + 1e-8)
+
+    texture = (
+        Config.FEATURE_TEXTURE_CONTRAST_WEIGHT * minmax_normalize_map(local_contrast) +
+        Config.FEATURE_TEXTURE_EDGE_WEIGHT * minmax_normalize_map(gradient)
+    )
+    return minmax_normalize_map(texture).to(dtype=dtype)
+
+
+def build_teacher_target_map(targets, img_size, device, dtype, images=None):
     batch_size = len(targets)
     target_map = torch.zeros((batch_size, 1, img_size, img_size), device=device, dtype=dtype)
     foreground_mask = torch.zeros((batch_size, 1, img_size, img_size), device=device, dtype=torch.bool)
@@ -416,6 +517,7 @@ def build_teacher_target_map(targets, img_size, device, dtype):
     box_fill_value = float(np.clip(Config.FEATURE_BOX_FILL_VALUE, 0.0, 1.0))
     core_fill_value = float(np.clip(Config.FEATURE_CORE_FILL_VALUE, box_fill_value, 1.0))
     core_ratio = float(np.clip(Config.FEATURE_CORE_RATIO, 0.1, 1.0))
+    texture_map = build_image_texture_map(images, img_size, device, dtype)
 
     for batch_idx, sample_targets in enumerate(targets):
         if len(sample_targets) == 0:
@@ -444,7 +546,14 @@ def build_teacher_target_map(targets, img_size, device, dtype):
             heat = torch.exp(-(xx.pow(2) + yy.pow(2)) / (2.0 * sigma * sigma))
             region = target_map[batch_idx, 0, y1:y2, x1:x2]
             base_fill = torch.full_like(region, box_fill_value)
-            region_target = torch.maximum(torch.maximum(region, base_fill), heat)
+            gaussian_target = Config.FEATURE_GAUSSIAN_TARGET_GAIN * heat
+            region_target = torch.maximum(torch.maximum(region, base_fill), gaussian_target)
+
+            if texture_map is not None and Config.FEATURE_TEXTURE_TARGET_GAIN > 0:
+                texture_region = texture_map[batch_idx, 0, y1:y2, x1:x2]
+                texture_target = Config.FEATURE_TEXTURE_TARGET_BASE + Config.FEATURE_TEXTURE_TARGET_GAIN * texture_region
+                texture_target = texture_target.clamp(0.0, 1.0)
+                region_target = torch.maximum(region_target, texture_target)
 
             core_w = max(1, int(round(box_w * core_ratio)))
             core_h = max(1, int(round(box_h * core_ratio)))
@@ -463,38 +572,87 @@ def build_teacher_target_map(targets, img_size, device, dtype):
     return target_map, foreground_mask
 
 
-def compute_teacher_guidance_loss(teacher_feature, targets, detector_frozen=False):
+def build_feature_border_mask(batch_size, img_size, device, margin_ratio):
+    margin = max(1, int(round(img_size * margin_ratio)))
+    border_mask = torch.zeros((batch_size, 1, img_size, img_size), device=device, dtype=torch.bool)
+    border_mask[:, :, :margin, :] = True
+    border_mask[:, :, -margin:, :] = True
+    border_mask[:, :, :, :margin] = True
+    border_mask[:, :, :, -margin:] = True
+    return border_mask
+
+
+def compute_teacher_guidance_loss(teacher_feature, targets, stage="joint", images=None):
     target_map, foreground_mask = build_teacher_target_map(
         targets=targets,
         img_size=teacher_feature.shape[-1],
         device=teacher_feature.device,
         dtype=teacher_feature.dtype,
+        images=images,
     )
     background_mask = ~foreground_mask
-
-    heatmap_loss = F.binary_cross_entropy(teacher_feature.clamp(1e-4, 1.0 - 1e-4), target_map)
-
-    if foreground_mask.any():
-        fg_mean = teacher_feature[foreground_mask].mean()
-    else:
-        fg_mean = torch.zeros((), device=teacher_feature.device, dtype=teacher_feature.dtype)
-
-    if background_mask.any():
-        bg_mean = teacher_feature[background_mask].mean()
-    else:
-        bg_mean = torch.zeros((), device=teacher_feature.device, dtype=teacher_feature.dtype)
-
-    contrast_loss = (
-        F.relu(Config.FEATURE_FOREGROUND_TARGET - fg_mean) +
-        F.relu(bg_mean - Config.FEATURE_BACKGROUND_TARGET)
+    border_mask = build_feature_border_mask(
+        batch_size=teacher_feature.shape[0],
+        img_size=teacher_feature.shape[-1],
+        device=teacher_feature.device,
+        margin_ratio=Config.FEATURE_EDGE_MARGIN_RATIO,
     )
-    sparsity_loss = bg_mean
-    tv_loss = (
-        torch.abs(teacher_feature[:, :, 1:, :] - teacher_feature[:, :, :-1, :]).mean() +
-        torch.abs(teacher_feature[:, :, :, 1:] - teacher_feature[:, :, :, :-1]).mean()
-    )
+    edge_background_mask = background_mask & border_mask
+    inner_background_mask = background_mask & ~border_mask
 
-    weights = Config.get_teacher_guidance_weights(detector_frozen=detector_frozen)
+    autocast_device = teacher_feature.device.type if teacher_feature.device.type in {"cuda", "cpu"} else "cpu"
+    with torch.autocast(device_type=autocast_device, enabled=False):
+        teacher_feature_fp32 = teacher_feature.float().clamp(1e-4, 1.0 - 1e-4)
+        target_map_fp32 = target_map.float()
+
+        def masked_bce(mask):
+            if mask.any():
+                return F.binary_cross_entropy(
+                    teacher_feature_fp32[mask],
+                    target_map_fp32[mask],
+                )
+            return torch.zeros((), device=teacher_feature.device, dtype=torch.float32)
+
+        fg_pixel_count = foreground_mask.float().sum()
+        bg_pixel_count = background_mask.float().sum()
+        fg_weight = torch.sqrt(bg_pixel_count / fg_pixel_count.clamp(min=1.0))
+        fg_weight = fg_weight.clamp(min=1.0, max=Config.FEATURE_FOREGROUND_BCE_MAX_GAIN)
+
+        fg_heatmap_loss = masked_bce(foreground_mask)
+        bg_heatmap_loss = masked_bce(inner_background_mask)
+        edge_heatmap_loss = masked_bce(edge_background_mask)
+        heatmap_loss = (
+            fg_weight * fg_heatmap_loss +
+            bg_heatmap_loss +
+            Config.FEATURE_EDGE_BCE_GAIN * edge_heatmap_loss
+        )
+
+        if foreground_mask.any():
+            fg_mean = teacher_feature_fp32[foreground_mask].mean()
+        else:
+            fg_mean = torch.zeros((), device=teacher_feature.device, dtype=torch.float32)
+
+        if background_mask.any():
+            bg_mean = teacher_feature_fp32[background_mask].mean()
+        else:
+            bg_mean = torch.zeros((), device=teacher_feature.device, dtype=torch.float32)
+
+        if edge_background_mask.any():
+            edge_bg_mean = teacher_feature_fp32[edge_background_mask].mean()
+        else:
+            edge_bg_mean = torch.zeros((), device=teacher_feature.device, dtype=torch.float32)
+
+        contrast_loss = (
+            F.relu(torch.tensor(Config.FEATURE_FOREGROUND_TARGET, device=teacher_feature.device, dtype=torch.float32) - fg_mean) +
+            F.relu(bg_mean - torch.tensor(Config.FEATURE_BACKGROUND_TARGET, device=teacher_feature.device, dtype=torch.float32))
+        )
+        sparsity_loss = bg_mean
+        tv_loss = (
+            torch.abs(teacher_feature_fp32[:, :, 1:, :] - teacher_feature_fp32[:, :, :-1, :]).mean() +
+            torch.abs(teacher_feature_fp32[:, :, :, 1:] - teacher_feature_fp32[:, :, :, :-1]).mean()
+        )
+
+    weights = Config.get_teacher_guidance_weights(stage=stage)
     total = (
         weights["heatmap"] * heatmap_loss +
         weights["contrast"] * contrast_loss +
@@ -503,9 +661,18 @@ def compute_teacher_guidance_loss(teacher_feature, targets, detector_frozen=Fals
     )
     stats = {
         "feature_heatmap": float(heatmap_loss.detach().item()),
+        "feature_fg_bce": float(fg_heatmap_loss.detach().item()),
+        "feature_bg_bce": float(bg_heatmap_loss.detach().item()),
+        "feature_edge_bce": float(edge_heatmap_loss.detach().item()),
         "feature_contrast": float(contrast_loss.detach().item()),
         "feature_sparsity": float(sparsity_loss.detach().item()),
         "feature_tv": float(tv_loss.detach().item()),
+        "feature_fg_mean": float(fg_mean.detach().item()),
+        "feature_bg_mean": float(bg_mean.detach().item()),
+        "feature_edge_mean": float(edge_bg_mean.detach().item()),
+        "feature_mean": float(teacher_feature_fp32.mean().detach().item()),
+        "feature_std": float(teacher_feature_fp32.std(unbiased=False).detach().item()),
+        "feature_fg_weight": float(fg_weight.detach().item()),
         "feature_total": float(total.detach().item()),
     }
     return total, stats
@@ -665,11 +832,11 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
         detections: 每个样本的检测结果列表，每个检测为 [x_center, y_center, w, h, conf, cls_id]
     """
     if conf_thresh is None:
-        conf_thresh = Config.CONF_THRESH
+        conf_thresh = Config.EVAL_CONF_THRESH
     if nms_thresh is None:
-        nms_thresh = Config.NMS_THRESH
+        nms_thresh = Config.EVAL_NMS_THRESH
     if max_det is None:
-        max_det = Config.MAX_DET
+        max_det = Config.EVAL_MAX_DET
     if img_size is None:
         img_size = Config.IMG_SIZE
     
@@ -743,11 +910,11 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
 
 def decode_detections_fixed(preds, conf_thresh=None, nms_thresh=None, max_det=None, img_size=None):
     if conf_thresh is None:
-        conf_thresh = Config.CONF_THRESH
+        conf_thresh = Config.EVAL_CONF_THRESH
     if nms_thresh is None:
-        nms_thresh = Config.NMS_THRESH
+        nms_thresh = Config.EVAL_NMS_THRESH
     if max_det is None:
-        max_det = Config.MAX_DET
+        max_det = Config.EVAL_MAX_DET
     if img_size is None:
         img_size = Config.IMG_SIZE
 
@@ -824,7 +991,7 @@ class ConfigYOLO:
     YAML_PATH = r"data\military\data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output\OpticalTeacherYOLO_deep_teacher"
+    TEACHER_OUTPUT_DIR = r"output\OpticalTeacherYOLO_enhance_teacher"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -835,6 +1002,9 @@ class ConfigYOLO:
     IMG_SIZE = 640
     BATCH_SIZE = 8
     EPOCHS = 120
+    TEACHER_STAGE_EPOCHS = 20  # 教师阶段训练轮数
+    DETECTOR_STAGE_EPOCHS = 70  # 检测器训练轮数
+    JOINT_FINETUNE_EPOCHS = 30  # 联合微调训练轮数
 
     # 经常调整的训练参数
     BOX_WEIGHT_BASE = 1.32  # 保留大目标回归力度，但略收一点，减少框体过大
@@ -847,8 +1017,10 @@ class ConfigYOLO:
 
     IOU_THRESHOLD = 0.5  # 主要正样本匹配阈值；较大的值使正样本分配更严格，可能降低召回率
     POSITIVE_ANCHOR_IOU = 0.25  # 回退到旧版更稳的正样本匹配阈值
-    MAX_POSITIVE_ANCHORS = 1  # 收回到单锚点分配，优先减少重复框
+    MAX_POSITIVE_ANCHORS = 0  # 0 表示不额外限制，优先放宽正样本覆盖
     NOOBJ_IGNORE_IOU = 0.6  # 避免把近邻潜在正样本也过度压成背景
+    ANCHOR_MATCH_RATIO_THRESH = 4.0
+    ASSIGN_NEIGHBOR_CELLS = True
 
     SMALL_OBJ_AREA = 32 * 32  # 将对象分组为小目标的阈值
     LARGE_OBJ_AREA = 128 * 128  # 将对象分组为大目标的阈值
@@ -859,32 +1031,62 @@ class ConfigYOLO:
     FOCAL_ALPHA = 0.28  # 向旧稳态回调，避免过度偏向负样本
     FOCAL_GAMMA = 1.6  # 略降，减少后期被困难背景样本牵制
 
-    CONF_THRESH = 0.58  # 略回调，给真实目标更多召回空间
-    NMS_THRESH = 0.22  # 用旧版更稳的压框强度
-    MAX_DET = 4  # 进一步压缩单图最大输出，保留多目标余量同时减少碎框
+    EVAL_CONF_THRESH = 0.001
+    VIS_CONF_THRESH = 0.25
+    DEPLOY_CONF_THRESH = 0.58
+    EVAL_NMS_THRESH = 0.45
+    VIS_NMS_THRESH = 0.40
+    DEPLOY_NMS_THRESH = 0.22
+    EVAL_MAX_DET = 300
+    VIS_MAX_DET = 100
+    MAX_DET = 100
     AGNOSTIC_NMS = False  # 多类别任务使用按类 NMS，避免不同类别互相压制
 
     # 验证和指标
     VAL_INTERVAL = 5
     METRIC_IOU_THRESHOLD = 0.5  # 较大的值在评估期间使TP匹配更严格，可能降低召回率，但可能增加假阳性
+    MAP_IOU_THRESHOLDS = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
 
     # Teacher feature shaping and staged training
-    DETECTOR_FREEZE_EPOCH = 85
-    DETECTOR_FINETUNE_LR = 2e-4
-    FEATURE_HEATMAP_WEIGHT_JOINT = 0.06
-    FEATURE_HEATMAP_WEIGHT_FROZEN = 0.14
-    FEATURE_CONTRAST_WEIGHT_JOINT = 0.02
-    FEATURE_CONTRAST_WEIGHT_FROZEN = 0.04
-    FEATURE_SPARSITY_WEIGHT_JOINT = 0.008
-    FEATURE_SPARSITY_WEIGHT_FROZEN = 0.02
-    FEATURE_TV_WEIGHT_JOINT = 0.003
-    FEATURE_TV_WEIGHT_FROZEN = 0.006
+    TEACHER_STAGE_LR = 1.5e-4
+    DETECTOR_STAGE_LR = 3e-4
+    JOINT_TEACHER_LR = 3e-5
+    JOINT_DETECTOR_LR = 1e-4
+    WARMUP_EPOCHS = 3
+    WARMUP_START_FACTOR = 0.1
+    USE_AMP = True
+    USE_EMA = True
+    EMA_DECAY = 0.9998
+    GRAD_CLIP_NORM = 1.0
+    MIXUP_PROB = 0.15
+    MIXUP_ALPHA = 8.0
+    FEATURE_HEATMAP_WEIGHT_TEACHER = 0.08
+    FEATURE_CONTRAST_WEIGHT_TEACHER = 0.015
+    FEATURE_SPARSITY_WEIGHT_TEACHER = 0.004
+    FEATURE_TV_WEIGHT_TEACHER = 0.001
+    FEATURE_HEATMAP_WEIGHT_JOINT = 0.03
+    FEATURE_CONTRAST_WEIGHT_JOINT = 0.008
+    FEATURE_SPARSITY_WEIGHT_JOINT = 0.002
+    FEATURE_TV_WEIGHT_JOINT = 0.0005
     FEATURE_FOREGROUND_TARGET = 0.68
-    FEATURE_BACKGROUND_TARGET = 0.08
+    FEATURE_BACKGROUND_TARGET = 0.04
     FEATURE_HEATMAP_SIGMA = 0.35
-    FEATURE_BOX_FILL_VALUE = 0.10
-    FEATURE_CORE_FILL_VALUE = 0.32
-    FEATURE_CORE_RATIO = 0.40
+    FEATURE_BOX_FILL_VALUE = 0.04
+    FEATURE_CORE_FILL_VALUE = 0.14
+    FEATURE_CORE_RATIO = 0.35
+    FEATURE_FOREGROUND_BCE_MAX_GAIN = 6.0
+    FEATURE_EDGE_BCE_GAIN = 2.5
+    FEATURE_EDGE_MARGIN_RATIO = 0.06
+    FEATURE_GAUSSIAN_TARGET_GAIN = 0.45
+    FEATURE_TEXTURE_TARGET_BASE = 0.08
+    FEATURE_TEXTURE_TARGET_GAIN = 0.80
+    FEATURE_TEXTURE_CONTRAST_WEIGHT = 0.55
+    FEATURE_TEXTURE_EDGE_WEIGHT = 0.45
+    DETECTOR_HEAT_AUX_WEIGHT = 0.18
+    DETECTOR_FEATURE_AUX_WEIGHT = 0.10
+    DETECTOR_OBJ_HEAT_AUX_WEIGHT = 0.03
+    DETECTOR_INIT_OBJ_BIAS = -4.5
+    DETECTOR_INIT_CLS_BIAS = -1.5
 
     # Class balance sampler
     USE_CLASS_BALANCED_SAMPLER = True
@@ -907,20 +1109,27 @@ class ConfigYOLO:
     ANCHOR_SOURCE = "default"
 
     # Optimizer and checkpoints
-    LEARNING_RATE = 4e-4
+    LEARNING_RATE = 3e-4
     WEIGHT_DECAY = 3e-5
     OPTIMIZER = "Adam"
-    TEACHER_INIT_MODE = "checkpoint"  # "scratch" 或 "checkpoint"
-    TEACHER_INIT_CHECKPOINT = r"output\OpticalTeacherYOLO\teacher_final.pth"
+    TEACHER_INIT_MODE = "scratch"  # "scratch" 或 "checkpoint"
+    TEACHER_INIT_CHECKPOINT = r"output\oty_m1\teacher_final.pth"
+    DETECTOR_INIT_MODE = "scratch"
+    DETECTOR_INIT_CHECKPOINT = r"output\oty_m1\detector_final.pth"
     FREEZE_TEACHER = False
     SAVE_TEACHER_WEIGHTS = True
+    SKIP_TEACHER_STAGE_IF_INIT = False # 初始化时跳过教师阶段，直接开始检测训练
+    TEACHER_CONSISTENCY_WEIGHT = 0.05
 
     # Visualization
-    VIS_INTERVAL = 5
+    VIS_INTERVAL = 1
     VIS_BATCH_SIZE = 4
     VIS_DPI = 130
     VIS_DATASET_SPLIT = "val"  # 可视化时使用的数据集分割
-    VIS_SEED = 20260421  # 保持与本次 ft 实验一致，便于前后对比
+    VIS_SEED = 20260425  # 保持与本次 ft 实验一致，便于前后对比
+    VIS_DETECTOR_CONF_THRESH = 0.45
+    VIS_EDGE_CONF_THRESH = 0.55
+    VIS_EDGE_MARGIN_RATIO = 0.04
 
     # Logging table
     EPOCH_TABLE_EPOCH_WIDTH = 8
@@ -930,6 +1139,7 @@ class ConfigYOLO:
     EPOCH_TABLE_METRIC_WIDTH = 11
     EPOCH_TABLE_LR_WIDTH = 12
     EPOCH_TABLE_BEST_WIDTH = 8
+    EPOCH_TABLE_STAT_WIDTH = 10
     EPOCH_TABLE_BEST_MARK = "Yes"
     SKIP_FILE_LOG_MESSAGES = (
         "best checkpoint updated",
@@ -977,19 +1187,26 @@ class ConfigYOLO:
         }
 
     @classmethod
-    def get_teacher_guidance_weights(cls, detector_frozen=False):
-        if detector_frozen:
+    def get_teacher_guidance_weights(cls, stage="joint"):
+        if stage == "teacher":
             return {
-                "heatmap": cls.FEATURE_HEATMAP_WEIGHT_FROZEN,
-                "contrast": cls.FEATURE_CONTRAST_WEIGHT_FROZEN,
-                "sparsity": cls.FEATURE_SPARSITY_WEIGHT_FROZEN,
-                "tv": cls.FEATURE_TV_WEIGHT_FROZEN,
+                "heatmap": cls.FEATURE_HEATMAP_WEIGHT_TEACHER,
+                "contrast": cls.FEATURE_CONTRAST_WEIGHT_TEACHER,
+                "sparsity": cls.FEATURE_SPARSITY_WEIGHT_TEACHER,
+                "tv": cls.FEATURE_TV_WEIGHT_TEACHER,
+            }
+        if stage == "joint":
+            return {
+                "heatmap": cls.FEATURE_HEATMAP_WEIGHT_JOINT,
+                "contrast": cls.FEATURE_CONTRAST_WEIGHT_JOINT,
+                "sparsity": cls.FEATURE_SPARSITY_WEIGHT_JOINT,
+                "tv": cls.FEATURE_TV_WEIGHT_JOINT,
             }
         return {
-            "heatmap": cls.FEATURE_HEATMAP_WEIGHT_JOINT,
-            "contrast": cls.FEATURE_CONTRAST_WEIGHT_JOINT,
-            "sparsity": cls.FEATURE_SPARSITY_WEIGHT_JOINT,
-            "tv": cls.FEATURE_TV_WEIGHT_JOINT,
+            "heatmap": 0.0,
+            "contrast": 0.0,
+            "sparsity": 0.0,
+            "tv": 0.0,
         }
 
     @classmethod
@@ -1010,6 +1227,22 @@ class ConfigYOLO:
         if teacher_init_checkpoint:
             cls.TEACHER_INIT_CHECKPOINT = teacher_init_checkpoint
 
+        detector_init_mode = os.environ.get("OPTICAL_DETECTOR_INIT_MODE")
+        if detector_init_mode:
+            cls.DETECTOR_INIT_MODE = detector_init_mode
+
+        detector_init_checkpoint = os.environ.get("OPTICAL_DETECTOR_INIT_CHECKPOINT")
+        if detector_init_checkpoint:
+            cls.DETECTOR_INIT_CHECKPOINT = detector_init_checkpoint
+
+        anchor_config_path = os.environ.get("OPTICAL_TEACHER_ANCHOR_CONFIG_PATH")
+        if anchor_config_path:
+            cls.ANCHOR_CONFIG_PATH = anchor_config_path
+
+        use_external_anchors = os.environ.get("OPTICAL_TEACHER_USE_EXTERNAL_ANCHORS")
+        if use_external_anchors:
+            cls.USE_EXTERNAL_ANCHORS = use_external_anchors.strip().lower() in {"1", "true", "yes", "on"}
+
         freeze_teacher = os.environ.get("OPTICAL_TEACHER_FREEZE_TEACHER")
         if freeze_teacher:
             cls.FREEZE_TEACHER = freeze_teacher.strip().lower() in {"1", "true", "yes", "on"}
@@ -1025,19 +1258,23 @@ class ConfigYOLO:
     @classmethod
     def initialize(cls):
         cls.apply_runtime_overrides()
+        cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
+        cls.TEACHER_OUTPUT_DIR = resolve_project_path(cls.TEACHER_OUTPUT_DIR)
+        cls.TEACHER_INIT_CHECKPOINT = resolve_project_path(cls.TEACHER_INIT_CHECKPOINT)
+        cls.DETECTOR_INIT_CHECKPOINT = resolve_project_path(cls.DETECTOR_INIT_CHECKPOINT)
+        cls.ANCHOR_CONFIG_PATH = resolve_project_path(cls.ANCHOR_CONFIG_PATH)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
         cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
         cls.ANCHOR_SOURCE = "default"
         if cls.USE_EXTERNAL_ANCHORS:
             try:
                 anchor_config_path = cls.ANCHOR_CONFIG_PATH
-                if not os.path.isabs(anchor_config_path):
-                    anchor_config_path = os.path.join(PROJECT_ROOT, anchor_config_path)
                 cls.ANCHORS = load_anchor_groups(anchor_config_path)
                 cls.ANCHOR_SOURCE = anchor_config_path
             except Exception as exc:
                 cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
                 cls.ANCHOR_SOURCE = f"default (external load failed: {exc})"
+        cls.EPOCHS = cls.get_total_epochs()
         os.makedirs(cls.TEACHER_OUTPUT_DIR, exist_ok=True)
         cls.LOG_ROOT_DIR = os.path.join(cls.TEACHER_OUTPUT_DIR, "logs")
         os.makedirs(cls.LOG_ROOT_DIR, exist_ok=True)
@@ -1053,8 +1290,32 @@ class ConfigYOLO:
     def get_teacher_init_checkpoint(cls):
         if cls.get_teacher_init_mode() != "checkpoint":
             return None
-        checkpoint_path = str(cls.TEACHER_INIT_CHECKPOINT).strip()
+        checkpoint_path = str(resolve_project_path(cls.TEACHER_INIT_CHECKPOINT)).strip()
         return checkpoint_path if checkpoint_path else None
+
+    @classmethod
+    def get_detector_init_mode(cls):
+        mode = str(cls.DETECTOR_INIT_MODE).strip().lower()
+        return mode if mode in {"scratch", "checkpoint"} else "scratch"
+
+    @classmethod
+    def get_detector_init_checkpoint(cls):
+        if cls.get_detector_init_mode() != "checkpoint":
+            return None
+        checkpoint_path = str(resolve_project_path(cls.DETECTOR_INIT_CHECKPOINT)).strip()
+        return checkpoint_path if checkpoint_path else None
+
+    @classmethod
+    def get_total_epochs(cls):
+        return max(0, cls.TEACHER_STAGE_EPOCHS) + max(0, cls.DETECTOR_STAGE_EPOCHS) + max(0, cls.JOINT_FINETUNE_EPOCHS)
+
+    @classmethod
+    def get_training_stage(cls, epoch):
+        if epoch < cls.TEACHER_STAGE_EPOCHS:
+            return "teacher"
+        if epoch < cls.TEACHER_STAGE_EPOCHS + cls.DETECTOR_STAGE_EPOCHS:
+            return "detector"
+        return "joint"
     
     @classmethod
     def get_detector_output_channels(cls):
@@ -1065,27 +1326,43 @@ class ConfigYOLO:
         return any(token in message for token in cls.SKIP_FILE_LOG_MESSAGES)
 
     @classmethod
-    def get_epoch_table_separator(cls):
-        return "-" * sum(width for _, width in cls.get_epoch_table_columns())
+    def get_epoch_table_separator(cls, stage_name=None):
+        return "-" * sum(width for _, width in cls.get_epoch_table_columns(stage_name))
 
     @classmethod
-    def get_epoch_table_columns(cls):
-        return [
+    def get_epoch_table_columns(cls, stage_name=None):
+        base = [
             ("Epoch", cls.EPOCH_TABLE_EPOCH_WIDTH),
             ("Phase", cls.EPOCH_TABLE_PHASE_WIDTH),
-            ("Train Loss", cls.EPOCH_TABLE_TRAIN_LOSS_WIDTH),
-            ("Val Loss", cls.EPOCH_TABLE_VAL_LOSS_WIDTH),
-            ("Precision", cls.EPOCH_TABLE_METRIC_WIDTH),
+            ("Train", cls.EPOCH_TABLE_TRAIN_LOSS_WIDTH),
+            ("Val", cls.EPOCH_TABLE_VAL_LOSS_WIDTH),
+        ]
+        if stage_name == "teacher":
+            return base + [
+                ("Feat", cls.EPOCH_TABLE_STAT_WIDTH),
+                ("Heat", cls.EPOCH_TABLE_STAT_WIDTH),
+                ("Fg", cls.EPOCH_TABLE_STAT_WIDTH),
+                ("Bg", cls.EPOCH_TABLE_STAT_WIDTH),
+                ("Edge", cls.EPOCH_TABLE_STAT_WIDTH),
+                ("Std", cls.EPOCH_TABLE_STAT_WIDTH),
+                ("LR", cls.EPOCH_TABLE_LR_WIDTH),
+            ]
+        return base + [
+            ("Prec", cls.EPOCH_TABLE_METRIC_WIDTH),
             ("Recall", cls.EPOCH_TABLE_METRIC_WIDTH),
             ("F1", cls.EPOCH_TABLE_METRIC_WIDTH),
             ("mAP50", cls.EPOCH_TABLE_METRIC_WIDTH),
+            ("mAP5095", cls.EPOCH_TABLE_METRIC_WIDTH),
+            ("DetAux", cls.EPOCH_TABLE_STAT_WIDTH),
+            ("DetFeat", cls.EPOCH_TABLE_STAT_WIDTH),
+            ("DetObj", cls.EPOCH_TABLE_STAT_WIDTH),
             ("LR", cls.EPOCH_TABLE_LR_WIDTH),
             ("Best", cls.EPOCH_TABLE_BEST_WIDTH),
         ]
 
     @classmethod
-    def get_epoch_table_header(cls):
-        return "".join(f"{title:<{width}}" for title, width in cls.get_epoch_table_columns())
+    def get_epoch_table_header(cls, stage_name=None):
+        return "".join(f"{title:<{width}}" for title, width in cls.get_epoch_table_columns(stage_name))
     
     @classmethod
     def print_config(cls):
@@ -1129,6 +1406,7 @@ def log_all_parameters():
     log_to_file(f"  Image size: {Config.IMG_SIZE}")
     log_to_file(f"  Batch size: {Config.BATCH_SIZE}")
     log_to_file(f"  Epochs: {Config.EPOCHS}")
+    log_to_file(f"  Stage epochs (teacher/detector/joint): {Config.TEACHER_STAGE_EPOCHS} / {Config.DETECTOR_STAGE_EPOCHS} / {Config.JOINT_FINETUNE_EPOCHS}")
     
     log_to_file("\n[Loss Weights]")
     log_to_file(f"  Box weight: {Config.BOX_WEIGHT_BASE}")
@@ -1150,32 +1428,56 @@ def log_all_parameters():
     log_to_file(f"  Positive anchor IoU: {Config.POSITIVE_ANCHOR_IOU}")
     log_to_file(f"  Max positive anchors: {Config.MAX_POSITIVE_ANCHORS}")
     log_to_file(f"  Ignore IoU for noobj: {Config.NOOBJ_IGNORE_IOU}")
+    log_to_file(f"  Anchor match ratio threshold: {Config.ANCHOR_MATCH_RATIO_THRESH}")
+    log_to_file(f"  Assign neighbor cells: {Config.ASSIGN_NEIGHBOR_CELLS}")
     
     log_to_file("\n[Optimizer]")
     log_to_file(f"  Optimizer: {Config.OPTIMIZER}")
     log_to_file(f"  Learning rate: {Config.LEARNING_RATE}")
     log_to_file(f"  Weight decay: {Config.WEIGHT_DECAY}")
+    log_to_file(f"  Stage LR (teacher/detector/joint_t/joint_d): {Config.TEACHER_STAGE_LR} / {Config.DETECTOR_STAGE_LR} / {Config.JOINT_TEACHER_LR} / {Config.JOINT_DETECTOR_LR}")
     log_to_file(f"  Teacher init mode: {Config.get_teacher_init_mode()}")
     log_to_file(f"  Teacher init checkpoint: {Config.get_teacher_init_checkpoint() or 'None'}")
+    log_to_file(f"  Detector init mode: {Config.get_detector_init_mode()}")
+    log_to_file(f"  Detector init checkpoint: {Config.get_detector_init_checkpoint() or 'None'}")
     log_to_file(f"  Freeze teacher: {Config.FREEZE_TEACHER}")
+    log_to_file(f"  Skip teacher stage if init teacher exists: {Config.SKIP_TEACHER_STAGE_IF_INIT}")
+    log_to_file(f"  Teacher consistency weight: {Config.TEACHER_CONSISTENCY_WEIGHT}")
     
     log_to_file("\n[Detection]")
-    log_to_file(f"  Confidence threshold: {Config.CONF_THRESH}")
-    log_to_file(f"  NMS threshold: {Config.NMS_THRESH}")
-    log_to_file(f"  Max detections: {Config.MAX_DET}")
+    log_to_file(f"  Eval conf / vis conf / deploy conf: {Config.EVAL_CONF_THRESH} / {Config.VIS_CONF_THRESH} / {Config.DEPLOY_CONF_THRESH}")
+    log_to_file(f"  Eval nms / vis nms / deploy nms: {Config.EVAL_NMS_THRESH} / {Config.VIS_NMS_THRESH} / {Config.DEPLOY_NMS_THRESH}")
+    log_to_file(f"  Eval max det / vis max det: {Config.EVAL_MAX_DET} / {Config.VIS_MAX_DET}")
 
     log_to_file("\n[Teacher Feature Shaping]")
-    log_to_file(f"  Detector freeze epoch: {Config.DETECTOR_FREEZE_EPOCH}")
-    log_to_file(f"  Detector-frozen LR: {Config.DETECTOR_FINETUNE_LR}")
-    log_to_file(f"  Heatmap weight (joint/frozen): {Config.FEATURE_HEATMAP_WEIGHT_JOINT} / {Config.FEATURE_HEATMAP_WEIGHT_FROZEN}")
-    log_to_file(f"  Contrast weight (joint/frozen): {Config.FEATURE_CONTRAST_WEIGHT_JOINT} / {Config.FEATURE_CONTRAST_WEIGHT_FROZEN}")
-    log_to_file(f"  Sparsity weight (joint/frozen): {Config.FEATURE_SPARSITY_WEIGHT_JOINT} / {Config.FEATURE_SPARSITY_WEIGHT_FROZEN}")
-    log_to_file(f"  TV weight (joint/frozen): {Config.FEATURE_TV_WEIGHT_JOINT} / {Config.FEATURE_TV_WEIGHT_FROZEN}")
+    log_to_file(f"  Warmup epochs / start factor: {Config.WARMUP_EPOCHS} / {Config.WARMUP_START_FACTOR}")
+    log_to_file(f"  AMP / EMA / grad clip: {Config.USE_AMP} / {Config.USE_EMA} / {Config.GRAD_CLIP_NORM}")
+    log_to_file(f"  Mixup prob / alpha: {Config.MIXUP_PROB} / {Config.MIXUP_ALPHA}")
+    log_to_file(f"  Heatmap weight (teacher/joint): {Config.FEATURE_HEATMAP_WEIGHT_TEACHER} / {Config.FEATURE_HEATMAP_WEIGHT_JOINT}")
+    log_to_file(f"  Contrast weight (teacher/joint): {Config.FEATURE_CONTRAST_WEIGHT_TEACHER} / {Config.FEATURE_CONTRAST_WEIGHT_JOINT}")
+    log_to_file(f"  Sparsity weight (teacher/joint): {Config.FEATURE_SPARSITY_WEIGHT_TEACHER} / {Config.FEATURE_SPARSITY_WEIGHT_JOINT}")
+    log_to_file(f"  TV weight (teacher/joint): {Config.FEATURE_TV_WEIGHT_TEACHER} / {Config.FEATURE_TV_WEIGHT_JOINT}")
     log_to_file(f"  Foreground target: {Config.FEATURE_FOREGROUND_TARGET}")
     log_to_file(f"  Background target: {Config.FEATURE_BACKGROUND_TARGET}")
     log_to_file(f"  Heatmap sigma: {Config.FEATURE_HEATMAP_SIGMA}")
     log_to_file(f"  Box / core fill value: {Config.FEATURE_BOX_FILL_VALUE} / {Config.FEATURE_CORE_FILL_VALUE}")
     log_to_file(f"  Core ratio: {Config.FEATURE_CORE_RATIO}")
+    log_to_file(f"  Foreground BCE max gain: {Config.FEATURE_FOREGROUND_BCE_MAX_GAIN}")
+    log_to_file(f"  Edge BCE gain / margin ratio: {Config.FEATURE_EDGE_BCE_GAIN} / {Config.FEATURE_EDGE_MARGIN_RATIO}")
+    log_to_file(f"  Gaussian target gain: {Config.FEATURE_GAUSSIAN_TARGET_GAIN}")
+    log_to_file(
+        f"  Texture target base/gain: {Config.FEATURE_TEXTURE_TARGET_BASE} / "
+        f"{Config.FEATURE_TEXTURE_TARGET_GAIN}"
+    )
+    log_to_file(
+        f"  Texture contrast/edge weight: {Config.FEATURE_TEXTURE_CONTRAST_WEIGHT} / "
+        f"{Config.FEATURE_TEXTURE_EDGE_WEIGHT}"
+    )
+    log_to_file(
+        f"  Detector heat aux weights (heat/feat/obj): {Config.DETECTOR_HEAT_AUX_WEIGHT} / "
+        f"{Config.DETECTOR_FEATURE_AUX_WEIGHT} / {Config.DETECTOR_OBJ_HEAT_AUX_WEIGHT}"
+    )
+    log_to_file(f"  Detector init obj/cls bias: {Config.DETECTOR_INIT_OBJ_BIAS} / {Config.DETECTOR_INIT_CLS_BIAS}")
 
     log_to_file("\n[Sampling]")
     log_to_file(f"  Use class balanced sampler: {Config.USE_CLASS_BALANCED_SAMPLER}")
@@ -1191,6 +1493,7 @@ def log_all_parameters():
     log_to_file(f"  Visualization DPI: {Config.VIS_DPI}")
     log_to_file(f"  Visualization split: {Config.VIS_DATASET_SPLIT}")
     log_to_file(f"  Visualization seed: {Config.VIS_SEED}")
+    log_to_file(f"  Detector visualization conf / edge conf: {Config.VIS_DETECTOR_CONF_THRESH} / {Config.VIS_EDGE_CONF_THRESH}")
     
     log_to_file("\n[Paths]")
     log_to_file(f"  Teacher output path: {Config.TEACHER_OUTPUT_DIR}")
@@ -1736,44 +2039,70 @@ class EnhancedYOLOLoss(nn.Module):
 
                 size_weight = self._get_size_weight(tw.item(), th.item())
                 candidate_matches = []
+                ratio_matches = []
                 for scale_idx, scale_data in enumerate(prepared_scales):
                     for anchor_idx in range(3):
                         anchor_w, anchor_h = scale_data["anchors"][anchor_idx]
                         inter = torch.minimum(tw, anchor_w) * torch.minimum(th, anchor_h)
                         union = tw * th + anchor_w * anchor_h - inter + 1e-6
                         iou = (inter / union).item()
-                        candidate_matches.append((iou, scale_idx, anchor_idx))
+                        rw = max(float(tw.item() / (anchor_w.item() + 1e-6)), float(anchor_w.item() / (tw.item() + 1e-6)))
+                        rh = max(float(th.item() / (anchor_h.item() + 1e-6)), float(anchor_h.item() / (th.item() + 1e-6)))
+                        ratio = max(rw, rh)
+                        candidate_matches.append((iou, ratio, scale_idx, anchor_idx))
+                        if ratio < Config.ANCHOR_MATCH_RATIO_THRESH:
+                            ratio_matches.append((iou, ratio, scale_idx, anchor_idx))
 
-                candidate_matches.sort(key=lambda item: item[0], reverse=True)
-                selected_matches = []
-                for match_iou, scale_idx, anchor_idx in candidate_matches:
-                    if not selected_matches or match_iou >= Config.POSITIVE_ANCHOR_IOU:
-                        selected_matches.append((match_iou, scale_idx, anchor_idx))
-                    if len(selected_matches) >= Config.MAX_POSITIVE_ANCHORS:
-                        break
+                if len(ratio_matches) == 0:
+                    ratio_matches = [max(candidate_matches, key=lambda item: item[0])]
 
-                for match_iou, scale_idx, anchor_idx in selected_matches:
+                ratio_matches.sort(key=lambda item: (-item[0], item[1]))
+                if Config.MAX_POSITIVE_ANCHORS > 0:
+                    ratio_matches = ratio_matches[:Config.MAX_POSITIVE_ANCHORS]
+
+                for match_iou, _, scale_idx, anchor_idx in ratio_matches:
                     scale_data = prepared_scales[scale_idx]
                     gx = tx * scale_data["grid_w"]
                     gy = ty * scale_data["grid_h"]
                     grid_x = max(0, min(int(gx.item()), scale_data["grid_w"] - 1))
                     grid_y = max(0, min(int(gy.item()), scale_data["grid_h"] - 1))
-                    if scale_data["target_match_iou"][b, grid_y, grid_x, anchor_idx] >= match_iou:
-                        continue
 
                     anchor_w, anchor_h = scale_data["anchors"][anchor_idx]
-                    scale_data["target_boxes"][b, grid_y, grid_x, anchor_idx, 0] = gx - grid_x
-                    scale_data["target_boxes"][b, grid_y, grid_x, anchor_idx, 1] = gy - grid_y
-                    scale_data["target_boxes"][b, grid_y, grid_x, anchor_idx, 2] = torch.log(tw / anchor_w + 1e-6)
-                    scale_data["target_boxes"][b, grid_y, grid_x, anchor_idx, 3] = torch.log(th / anchor_h + 1e-6)
-                    scale_data["target_boxes_abs"][b, grid_y, grid_x, anchor_idx, 0] = tx * Config.IMG_SIZE
-                    scale_data["target_boxes_abs"][b, grid_y, grid_x, anchor_idx, 1] = ty * Config.IMG_SIZE
-                    scale_data["target_boxes_abs"][b, grid_y, grid_x, anchor_idx, 2] = tw
-                    scale_data["target_boxes_abs"][b, grid_y, grid_x, anchor_idx, 3] = th
-                    scale_data["target_obj"][b, grid_y, grid_x, anchor_idx] = 1.0
-                    scale_data["target_cls"][b, grid_y, grid_x, anchor_idx, cls_id] = 1.0
-                    scale_data["target_match_iou"][b, grid_y, grid_x, anchor_idx] = match_iou
-                    scale_data["target_scale_weight"][b, grid_y, grid_x, anchor_idx] = size_weight
+                    offsets = [(0, 0)]
+                    if Config.ASSIGN_NEIGHBOR_CELLS:
+                        dx_l = gx.item() - grid_x
+                        dx_r = (grid_x + 1) - gx.item()
+                        dy_t = gy.item() - grid_y
+                        dy_b = (grid_y + 1) - gy.item()
+                        if dx_l < 0.5:
+                            offsets.append((-1, 0))
+                        if dx_r < 0.5:
+                            offsets.append((1, 0))
+                        if dy_t < 0.5:
+                            offsets.append((0, -1))
+                        if dy_b < 0.5:
+                            offsets.append((0, 1))
+
+                    for offset_x, offset_y in offsets:
+                        assign_x = grid_x + offset_x
+                        assign_y = grid_y + offset_y
+                        if assign_x < 0 or assign_x >= scale_data["grid_w"] or assign_y < 0 or assign_y >= scale_data["grid_h"]:
+                            continue
+                        if scale_data["target_match_iou"][b, assign_y, assign_x, anchor_idx] >= match_iou:
+                            continue
+
+                        scale_data["target_boxes"][b, assign_y, assign_x, anchor_idx, 0] = gx - assign_x
+                        scale_data["target_boxes"][b, assign_y, assign_x, anchor_idx, 1] = gy - assign_y
+                        scale_data["target_boxes"][b, assign_y, assign_x, anchor_idx, 2] = torch.log(tw / anchor_w + 1e-6)
+                        scale_data["target_boxes"][b, assign_y, assign_x, anchor_idx, 3] = torch.log(th / anchor_h + 1e-6)
+                        scale_data["target_boxes_abs"][b, assign_y, assign_x, anchor_idx, 0] = tx * Config.IMG_SIZE
+                        scale_data["target_boxes_abs"][b, assign_y, assign_x, anchor_idx, 1] = ty * Config.IMG_SIZE
+                        scale_data["target_boxes_abs"][b, assign_y, assign_x, anchor_idx, 2] = tw
+                        scale_data["target_boxes_abs"][b, assign_y, assign_x, anchor_idx, 3] = th
+                        scale_data["target_obj"][b, assign_y, assign_x, anchor_idx] = 1.0
+                        scale_data["target_cls"][b, assign_y, assign_x, anchor_idx, cls_id] = 1.0
+                        scale_data["target_match_iou"][b, assign_y, assign_x, anchor_idx] = match_iou
+                        scale_data["target_scale_weight"][b, assign_y, assign_x, anchor_idx] = size_weight
 
         gt_boxes_abs_by_batch = [
             torch.stack(sample_boxes).to(device=device, dtype=predictions[0].dtype)
@@ -1840,6 +2169,68 @@ class EnhancedYOLOLoss(nn.Module):
         self.last_components = stats
         return total_loss, stats
 
+
+def compute_detector_heatmap_aux_loss(predictions, teacher_features, targets):
+    device = teacher_features.device
+    if (
+        Config.DETECTOR_HEAT_AUX_WEIGHT <= 0 and
+        Config.DETECTOR_FEATURE_AUX_WEIGHT <= 0 and
+        Config.DETECTOR_OBJ_HEAT_AUX_WEIGHT <= 0
+    ):
+        zero = torch.zeros((), device=device)
+        return zero, {"detector_aux": 0.0, "detector_heat_aux": 0.0, "detector_feat_aux": 0.0, "detector_obj_aux": 0.0}
+
+    target_heat = teacher_features.detach().float().clamp(0.0, 1.0)
+    heat_aux = torch.zeros((), device=device)
+    feat_aux = torch.zeros((), device=device)
+    obj_aux = torch.zeros((), device=device)
+    bce_logits = nn.BCEWithLogitsLoss()
+
+    if teacher_features.requires_grad and Config.DETECTOR_HEAT_AUX_WEIGHT > 0:
+        count = 0
+        _, _, heat_h, heat_w = teacher_features.shape
+        for sample_idx, sample_targets in enumerate(targets):
+            if len(sample_targets) == 0:
+                continue
+            sample_targets = sample_targets.to(device)
+            cx = (sample_targets[:, 1] * heat_w).long().clamp(0, heat_w - 1)
+            cy = (sample_targets[:, 2] * heat_h).long().clamp(0, heat_h - 1)
+            heat_aux = heat_aux + (1.0 - teacher_features[sample_idx, 0, cy, cx]).mean()
+            count += 1
+        if count > 0:
+            heat_aux = heat_aux / count
+
+    for pred in predictions:
+        batch_size, _, grid_h, grid_w = pred.shape
+        pred_view = pred.view(batch_size, 3, 5 + Config.NUM_CLASSES, grid_h, grid_w)
+        pred_obj = pred_view[:, :, 4:5, :, :]
+        target_scale = F.interpolate(
+            target_heat,
+            size=(grid_h, grid_w),
+            mode="bilinear",
+            align_corners=False,
+        ).unsqueeze(1)
+
+        obj_aux = obj_aux + bce_logits(pred_obj, target_scale.expand_as(pred_obj))
+        obj_prob = torch.sigmoid(pred_obj).mean(dim=1)
+        feat_aux = feat_aux + F.mse_loss(obj_prob, target_scale.squeeze(1))
+
+    num_scales = max(len(predictions), 1)
+    feat_aux = feat_aux / num_scales
+    obj_aux = obj_aux / num_scales
+    total = (
+        Config.DETECTOR_HEAT_AUX_WEIGHT * heat_aux +
+        Config.DETECTOR_FEATURE_AUX_WEIGHT * feat_aux +
+        Config.DETECTOR_OBJ_HEAT_AUX_WEIGHT * obj_aux
+    )
+    stats = {
+        "detector_aux": float(total.detach().item()),
+        "detector_heat_aux": float(heat_aux.detach().item()),
+        "detector_feat_aux": float(feat_aux.detach().item()),
+        "detector_obj_aux": float(obj_aux.detach().item()),
+    }
+    return total, stats
+
 def prepare_batch(batch, device):
     batch_targets = []
     batch_images = []
@@ -1848,6 +2239,60 @@ def prepare_batch(batch, device):
         batch_targets.append(targets)
     batch_images = torch.stack(batch_images).to(device)
     return batch_images, batch_targets
+
+
+def apply_mixup_batch(batch_images, batch_targets):
+    if (
+        batch_images.shape[0] < 2 or
+        Config.MIXUP_PROB <= 0.0 or
+        np.random.rand() >= Config.MIXUP_PROB
+    ):
+        return batch_images, batch_targets
+
+    lam = float(np.random.beta(Config.MIXUP_ALPHA, Config.MIXUP_ALPHA))
+    indices = torch.randperm(batch_images.shape[0], device=batch_images.device)
+    mixed_images = lam * batch_images + (1.0 - lam) * batch_images[indices]
+    mixed_targets = []
+    for sample_idx, targets in enumerate(batch_targets):
+        paired_targets = batch_targets[int(indices[sample_idx].item())]
+        if len(targets) == 0:
+            mixed_targets.append(paired_targets.clone())
+        elif len(paired_targets) == 0:
+            mixed_targets.append(targets.clone())
+        else:
+            mixed_targets.append(torch.cat([targets, paired_targets], dim=0))
+    return mixed_images, mixed_targets
+
+
+def apply_warmup_lr(optimizer, base_lrs, global_step, warmup_steps):
+    if warmup_steps <= 0:
+        return
+    ratio = min((global_step + 1) / warmup_steps, 1.0)
+    factor = Config.WARMUP_START_FACTOR + (1.0 - Config.WARMUP_START_FACTOR) * ratio
+    for param_group, base_lr in zip(optimizer.param_groups, base_lrs):
+        param_group["lr"] = base_lr * factor
+
+
+class ModelEMA:
+    def __init__(self, model, decay=0.9998):
+        self.ema = copy.deepcopy(model).eval()
+        self.decay = decay
+        self.updates = 0
+        for p in self.ema.parameters():
+            p.requires_grad = False
+
+    def update(self, model):
+        self.updates += 1
+        with torch.no_grad():
+            msd = model.state_dict()
+            for key, value in self.ema.state_dict().items():
+                if key not in msd:
+                    continue
+                model_value = msd[key].detach()
+                if value.dtype.is_floating_point:
+                    value.mul_(self.decay).add_(model_value, alpha=1.0 - self.decay)
+                else:
+                    value.copy_(model_value)
 
 def compute_average_precision(detections, total_gt):
     if total_gt == 0:
@@ -1872,9 +2317,13 @@ def compute_average_precision(detections, total_gt):
     idx = np.where(mrec[1:] != mrec[:-1])[0]
     return float(np.sum((mrec[idx + 1] - mrec[idx]) * mpre[idx + 1]))
 
-def evaluate_model(model, dataloader, criterion, device):
+def evaluate_model(model, dataloader, criterion, device, stage="joint", detector_module=None):
     model.eval()
-    metric_storage = {cls_id: [] for cls_id in range(Config.NUM_CLASSES)}
+    eval_detector = detector_module if detector_module is not None else model.detector
+    metric_storage = {
+        iou_thr: {cls_id: [] for cls_id in range(Config.NUM_CLASSES)}
+        for iou_thr in Config.MAP_IOU_THRESHOLDS
+    }
     gt_counts = {cls_id: 0 for cls_id in range(Config.NUM_CLASSES)}
     component_totals = {
         "total": 0.0,
@@ -1891,19 +2340,31 @@ def evaluate_model(model, dataloader, criterion, device):
     total_tp = 0
     total_fp = 0
     total_fn = 0
-    detector_frozen = is_detector_frozen(model)
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validation", leave=False):
             batch_images, batch_targets = prepare_batch(batch, device)
-            teacher_features, predictions = model.forward_with_feature(batch_images)
-            loss, loss_stats = criterion(predictions, batch_targets)
+            teacher_features = model.teacher(batch_images)
             feature_loss, feature_stats = compute_teacher_guidance_loss(
                 teacher_features,
                 batch_targets,
-                detector_frozen=detector_frozen,
+                stage=stage,
+                images=batch_images,
             )
-            loss = loss + feature_loss
+            if stage == "teacher":
+                loss = feature_loss
+                loss_stats = {"box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
+                predictions = None
+            else:
+                predictions = eval_detector(teacher_features)
+                loss, loss_stats = criterion(predictions, batch_targets)
+                detector_aux_loss, detector_aux_stats = compute_detector_heatmap_aux_loss(
+                    predictions,
+                    teacher_features,
+                    batch_targets,
+                )
+                loss = loss + feature_loss + detector_aux_loss
+                feature_stats.update(detector_aux_stats)
 
             component_totals["total"] += float(loss.detach().item())
             component_totals["box"] += loss_stats["box"]
@@ -1916,7 +2377,15 @@ def evaluate_model(model, dataloader, criterion, device):
             component_totals["feature_sparsity"] += feature_stats["feature_sparsity"]
             component_totals["feature_tv"] += feature_stats["feature_tv"]
 
-            detections = decode_detections(predictions)
+            if predictions is None:
+                continue
+
+            detections = decode_detections(
+                predictions,
+                conf_thresh=Config.EVAL_CONF_THRESH,
+                nms_thresh=Config.EVAL_NMS_THRESH,
+                max_det=Config.EVAL_MAX_DET,
+            )
 
             for sample_idx, sample_detections in enumerate(detections):
                 gt_by_class = {}
@@ -1933,35 +2402,43 @@ def evaluate_model(model, dataloader, criterion, device):
                     gt_by_class.setdefault(cls_id, []).append(gt_box)
                     gt_counts[cls_id] += 1
 
-                matched = {cls_id: set() for cls_id in gt_by_class}
                 sample_detections = sorted(sample_detections, key=lambda det: det[4], reverse=True)
+                matched_by_threshold = {
+                    iou_thr: {cls_id: set() for cls_id in gt_by_class}
+                    for iou_thr in Config.MAP_IOU_THRESHOLDS
+                }
 
                 for det in sample_detections:
                     cls_id = int(det[5])
                     gt_boxes = gt_by_class.get(cls_id, [])
-                    best_iou = 0.0
-                    best_gt_idx = -1
+                    det_tensor = torch.tensor(det[:4], dtype=torch.float32).unsqueeze(0)
 
-                    for gt_idx, gt_box in enumerate(gt_boxes):
-                        if gt_idx in matched.get(cls_id, set()):
-                            continue
-                        det_tensor = torch.tensor(det[:4], dtype=torch.float32).unsqueeze(0)
-                        gt_tensor = torch.tensor(gt_box, dtype=torch.float32).unsqueeze(0)
-                        iou = float(bbox_iou_xywh(det_tensor, gt_tensor).item())
-                        if iou > best_iou:
-                            best_iou = iou
-                            best_gt_idx = gt_idx
+                    for iou_thr in Config.MAP_IOU_THRESHOLDS:
+                        best_iou = 0.0
+                        best_gt_idx = -1
+                        matched = matched_by_threshold[iou_thr].setdefault(cls_id, set())
+                        for gt_idx, gt_box in enumerate(gt_boxes):
+                            if gt_idx in matched:
+                                continue
+                            gt_tensor = torch.tensor(gt_box, dtype=torch.float32).unsqueeze(0)
+                            iou = float(bbox_iou_xywh(det_tensor, gt_tensor).item())
+                            if iou > best_iou:
+                                best_iou = iou
+                                best_gt_idx = gt_idx
 
-                    is_tp = best_iou >= Config.METRIC_IOU_THRESHOLD
-                    metric_storage[cls_id].append((float(det[4]), 1.0 if is_tp else 0.0))
-                    if is_tp:
-                        total_tp += 1
-                        matched.setdefault(cls_id, set()).add(best_gt_idx)
-                    else:
-                        total_fp += 1
+                        is_tp = best_iou >= iou_thr
+                        metric_storage[iou_thr][cls_id].append((float(det[4]), 1.0 if is_tp else 0.0))
+                        if is_tp:
+                            matched.add(best_gt_idx)
+                        if iou_thr == Config.METRIC_IOU_THRESHOLD:
+                            if is_tp:
+                                total_tp += 1
+                            else:
+                                total_fp += 1
 
+                metric_matched = matched_by_threshold[Config.METRIC_IOU_THRESHOLD]
                 for cls_id, gt_boxes in gt_by_class.items():
-                    total_fn += len(gt_boxes) - len(matched.get(cls_id, set()))
+                    total_fn += len(gt_boxes) - len(metric_matched.get(cls_id, set()))
 
     num_batches = max(len(dataloader), 1)
     avg_losses = {key: value / num_batches for key, value in component_totals.items()}
@@ -1969,18 +2446,24 @@ def evaluate_model(model, dataloader, criterion, device):
     recall = total_tp / (total_tp + total_fn + 1e-6)
     f1_score = 2.0 * precision * recall / (precision + recall + 1e-6)
 
-    ap_values = []
-    for cls_id in range(Config.NUM_CLASSES):
-        ap = compute_average_precision(metric_storage[cls_id], gt_counts[cls_id])
-        if ap is not None:
-            ap_values.append(ap)
-    map50 = float(np.mean(ap_values)) if len(ap_values) > 0 else 0.0
+    ap_by_threshold = {}
+    for iou_thr in Config.MAP_IOU_THRESHOLDS:
+        ap_values = []
+        for cls_id in range(Config.NUM_CLASSES):
+            ap = compute_average_precision(metric_storage[iou_thr][cls_id], gt_counts[cls_id])
+            if ap is not None:
+                ap_values.append(ap)
+        ap_by_threshold[iou_thr] = float(np.mean(ap_values)) if len(ap_values) > 0 else 0.0
+
+    map50 = ap_by_threshold.get(0.5, 0.0)
+    map5095 = float(np.mean(list(ap_by_threshold.values()))) if len(ap_by_threshold) > 0 else 0.0
 
     metrics = {
         "precision": float(precision),
         "recall": float(recall),
         "f1": float(f1_score),
         "map50": map50,
+        "map5095": map5095,
     }
     return avg_losses, metrics
 
@@ -2012,6 +2495,7 @@ def save_training_curves(history, output_dir):
     recall_x, recall_y = _valid_history_points(history["recall"])
     f1_x, f1_y = _valid_history_points(history["f1"])
     map_x, map_y = _valid_history_points(history["map50"])
+    map5095_x, map5095_y = _valid_history_points(history["map5095"])
     if len(precision_x) > 0:
         axes[1].plot(precision_x, precision_y, label="Precision", linewidth=2, marker="o", markersize=4)
     if len(recall_x) > 0:
@@ -2020,6 +2504,8 @@ def save_training_curves(history, output_dir):
         axes[1].plot(f1_x, f1_y, label="F1", linewidth=2, marker="o", markersize=4)
     if len(map_x) > 0:
         axes[1].plot(map_x, map_y, label="mAP@0.5", linewidth=2, marker="o", markersize=4)
+    if len(map5095_x) > 0:
+        axes[1].plot(map5095_x, map5095_y, label="mAP@0.5:0.95", linewidth=2, marker="o", markersize=4)
     axes[1].set_xlabel("Epoch")
     axes[1].set_ylabel("Metric")
     axes[1].set_title("Validation Metrics")
@@ -2033,13 +2519,40 @@ def save_training_curves(history, output_dir):
 
 YOLOLoss = EnhancedYOLOLoss
 
-def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train", device=None):
+
+def filter_visual_detections(detections, img_size):
+    if detections is None or len(detections) == 0:
+        return detections
+    det = np.asarray(detections, dtype=np.float32)
+    if det.size == 0:
+        return det.reshape(0, 6)
+
+    margin = float(img_size) * Config.VIS_EDGE_MARGIN_RATIO
+    x_center = det[:, 0]
+    y_center = det[:, 1]
+    width = det[:, 2]
+    height = det[:, 3]
+    conf = det[:, 4]
+    x1 = x_center - width / 2.0
+    y1 = y_center - height / 2.0
+    x2 = x_center + width / 2.0
+    y2 = y_center + height / 2.0
+    touches_edge = (x1 <= margin) | (y1 <= margin) | (x2 >= img_size - margin) | (y2 >= img_size - margin)
+    keep = (~touches_edge) | (conf >= Config.VIS_EDGE_CONF_THRESH)
+    det = det[keep]
+    if len(det) > Config.VIS_MAX_DET:
+        det = det[np.argsort(det[:, 4])[::-1][:Config.VIS_MAX_DET]]
+    return det
+
+
+def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train", device=None, detector_module=None, stage_name=None):
     # Save a detection visualization image for the current epoch.
     if dataset is None or len(dataset) == 0:
         return
 
     if device is None:
         device = Config.DEVICE
+    eval_detector = detector_module if detector_module is not None else model.detector
     
     # Create the save directory if it doesn't exist
     os.makedirs(save_dir, exist_ok=True)
@@ -2072,18 +2585,40 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
             img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)  # Convert to RGB if grayscale
             
             # Get the teacher feature
-            teacher_output = model.teacher(img_tensor)
-            teacher_output = teacher_output.squeeze(0).cpu().numpy()
+            teacher_feature_tensor = model.teacher(img_tensor)
+            teacher_output = teacher_feature_tensor.squeeze(0).cpu().numpy()
             teacher_output = enhance_feature_for_display(teacher_output)  # Enhance the feature for display purposes
+            target_map_tensor, foreground_mask = build_teacher_target_map(
+                targets=[targets],
+                img_size=teacher_feature_tensor.shape[-1],
+                device=teacher_feature_tensor.device,
+                dtype=teacher_feature_tensor.dtype,
+                images=img_tensor,
+            )
+            target_map_np = target_map_tensor.squeeze(0).squeeze(0).cpu().numpy()
+            feature_fp32 = teacher_feature_tensor[0].float()
+            fg_mask_sample = foreground_mask[0]
+            bg_mask_sample = ~fg_mask_sample
+            feature_mean = float(feature_fp32.mean().item())
+            feature_std = float(feature_fp32.std(unbiased=False).item())
+            fg_mean = float(feature_fp32[fg_mask_sample].mean().item()) if fg_mask_sample.any() else 0.0
+            bg_mean = float(feature_fp32[bg_mask_sample].mean().item()) if bg_mask_sample.any() else 0.0
             
             # Process the teacher feature
             if teacher_output.ndim == 3:
                 teacher_output = teacher_output.squeeze(0)
             
-            # Get the model predictions 
-            pred_p3, pred_p4, pred_p5 = model(img_tensor)
-            preds = [pred_p3, pred_p4, pred_p5]
-            detections = decode_detections(preds)  # Decode the detections
+            detections = [np.zeros((0, 6), dtype=np.float32)]
+            if stage_name != "teacher":
+                vis_conf_thresh = Config.VIS_DETECTOR_CONF_THRESH if stage_name in {"detector", "joint"} else Config.VIS_CONF_THRESH
+                preds = eval_detector(teacher_feature_tensor)
+                detections = decode_detections(
+                    preds,
+                    conf_thresh=vis_conf_thresh,
+                    nms_thresh=Config.VIS_NMS_THRESH,
+                    max_det=Config.VIS_MAX_DET,
+                )
+                detections[0] = filter_visual_detections(detections[0], Config.IMG_SIZE)
             
             # Display the original image
             axes[i, 0].imshow(img_np)
@@ -2091,8 +2626,10 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
             axes[i, 0].axis("off")
             
             # Display the teacher feature
-            axes[i, 1].imshow(teacher_output, cmap="hot")
-            axes[i, 1].set_title(f"Teacher Feature {i+1}")
+            axes[i, 1].imshow(teacher_output, cmap="hot") # 使用热映射显示教师特征
+            axes[i, 1].set_title(
+                f"Teacher Feature {i+1}\nmean={feature_mean:.3f} std={feature_std:.3f} fg={fg_mean:.3f} bg={bg_mean:.3f}"
+            )
             axes[i, 1].axis("off")
             
             # Display the ground truth
@@ -2120,35 +2657,35 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
                               color='green', fontsize=10, fontweight='bold')
             
             # Display the model predictions
-            axes[i, 3].imshow(img_np)
-            axes[i, 3].set_title(f"Predictions {i+1}")
-            axes[i, 3].axis("off")
-            
-            # Display the model predictions
-            if len(detections[0]) > 0:
-                for det in detections[0]:
-                    x_center, y_center, w, h, conf, cls_id = det
-                    cls_id = int(cls_id)
-                    
-                    # Calculate the coordinates of the bounding box
-                    x1 = int(x_center - w / 2)
-                    y1 = int(y_center - h / 2)
-                    w = int(w)
-                    h = int(h)
-                    
-                    # Draw the bounding box
-                    color = plt.cm.tab20(cls_id / max(Config.NUM_CLASSES, 1))
-                    # Draw the bounding box
-                    rect = patches.Rectangle((x1, y1), w, h, linewidth=2, 
-                                            edgecolor=color, facecolor='none')
-                    axes[i, 3].add_patch(rect)
-                    
-                    # Add the class name and confidence
-                    label = f"{Config.CLASS_NAMES[cls_id]}: {conf:.2f}"
-                    axes[i, 3].text(x1, y1 - 5, label, 
-                                  color=color, fontsize=10, fontweight='bold',
-                                  bbox=dict(boxstyle='round,pad=0.3', 
-                                          facecolor=color, alpha=0.7))
+            if stage_name == "teacher":
+                axes[i, 3].imshow(target_map_np, cmap="magma", vmin=0.0, vmax=1.0)
+                axes[i, 3].set_title(f"Teacher Target {i+1}")
+                axes[i, 3].axis("off")
+            else:
+                axes[i, 3].imshow(img_np)
+                axes[i, 3].set_title(f"Predictions {i+1}")
+                axes[i, 3].axis("off")
+
+                if len(detections[0]) > 0:
+                    for det in detections[0]:
+                        x_center, y_center, w, h, conf, cls_id = det
+                        cls_id = int(cls_id)
+
+                        x1 = int(x_center - w / 2)
+                        y1 = int(y_center - h / 2)
+                        w = int(w)
+                        h = int(h)
+
+                        color = plt.cm.tab20(cls_id / max(Config.NUM_CLASSES, 1))
+                        rect = patches.Rectangle((x1, y1), w, h, linewidth=2,
+                                                edgecolor=color, facecolor='none')
+                        axes[i, 3].add_patch(rect)
+
+                        label = f"{Config.CLASS_NAMES[cls_id]}: {conf:.2f}"
+                        axes[i, 3].text(x1, y1 - 5, label,
+                                      color=color, fontsize=10, fontweight='bold',
+                                      bbox=dict(boxstyle='round,pad=0.3',
+                                              facecolor=color, alpha=0.7))
     
     # Save the figure
     plt.tight_layout()
@@ -2197,7 +2734,10 @@ def load_teacher_checkpoint(teacher, checkpoint_path, device):
     if not os.path.exists(checkpoint_path):
         return False, f"Teacher checkpoint not found: {checkpoint_path}"
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = extract_state_dict(checkpoint)
     teacher_state = teacher.state_dict()
     compatible_state = {}
@@ -2219,7 +2759,10 @@ def load_teacher_checkpoint_safe(teacher, checkpoint_path, device):
     if not os.path.exists(checkpoint_path):
         return False, f"Teacher checkpoint not found: {checkpoint_path}"
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = extract_state_dict(checkpoint)
     teacher_state = teacher.state_dict()
     compatible_state = {}
@@ -2248,11 +2791,72 @@ def initialize_teacher_weights(teacher, device):
     return False, f"Teacher init mode: checkpoint requested but unavailable, fallback to scratch ({teacher_message})"
 
 
-def build_optimizer_from_model(model, lr=None):
-    if lr is None:
-        lr = Config.LEARNING_RATE
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    return torch.optim.Adam(trainable_params, lr=lr, weight_decay=Config.WEIGHT_DECAY)
+def load_detector_checkpoint(detector, checkpoint_path, device):
+    if not checkpoint_path:
+        return False, "Detector checkpoint: not configured"
+    if not os.path.exists(checkpoint_path):
+        return False, f"Detector checkpoint not found: {checkpoint_path}"
+
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    state_dict = checkpoint
+    if isinstance(checkpoint, dict):
+        for key in ("detector_state_dict", "model_state_dict", "state_dict", "model"):
+            if key in checkpoint:
+                state_dict = checkpoint[key]
+                break
+
+    detector_state = detector.state_dict()
+    compatible_state = {}
+    for key, value in state_dict.items():
+        normalized_key = key[9:] if key.startswith("detector.") else key
+        if normalized_key in detector_state and detector_state[normalized_key].shape == value.shape:
+            compatible_state[normalized_key] = value
+
+    if len(compatible_state) == 0:
+        return False, f"No compatible YOLOLightHead weights found in: {checkpoint_path}"
+
+    detector.load_state_dict({**detector_state, **compatible_state}, strict=False)
+    return True, f"Loaded {len(compatible_state)} detector tensors from: {checkpoint_path}"
+
+
+def initialize_detector_weights(detector, device):
+    init_mode = Config.get_detector_init_mode()
+    if init_mode == "scratch":
+        return False, "Detector init mode: scratch (training from random initialization)"
+
+    checkpoint_path = Config.get_detector_init_checkpoint()
+    loaded_detector, detector_message = load_detector_checkpoint(detector, checkpoint_path, device)
+    if loaded_detector:
+        return True, f"Detector init mode: checkpoint ({detector_message})"
+
+    return False, f"Detector init mode: checkpoint requested but unavailable, fallback to scratch ({detector_message})"
+
+
+def build_optimizer_from_model(model, stage):
+    if stage == "teacher":
+        trainable_params = [p for p in model.teacher.parameters() if p.requires_grad]
+        return torch.optim.Adam(trainable_params, lr=Config.TEACHER_STAGE_LR, weight_decay=Config.WEIGHT_DECAY)
+    if stage == "detector":
+        trainable_params = [p for p in model.detector.parameters() if p.requires_grad]
+        return torch.optim.Adam(trainable_params, lr=Config.DETECTOR_STAGE_LR, weight_decay=Config.WEIGHT_DECAY)
+
+    param_groups = []
+    teacher_params = [p for p in model.teacher.parameters() if p.requires_grad]
+    detector_params = [p for p in model.detector.parameters() if p.requires_grad]
+    if teacher_params:
+        param_groups.append({"params": teacher_params, "lr": Config.JOINT_TEACHER_LR})
+    if detector_params:
+        param_groups.append({"params": detector_params, "lr": Config.JOINT_DETECTOR_LR})
+    return torch.optim.Adam(param_groups, weight_decay=Config.WEIGHT_DECAY)
+
+
+def set_teacher_trainable(model, trainable):
+    for p in model.teacher.parameters():
+        p.requires_grad = trainable
 
 
 def set_detector_trainable(model, trainable):
@@ -2262,6 +2866,17 @@ def set_detector_trainable(model, trainable):
 
 def is_detector_frozen(model):
     return not any(p.requires_grad for p in model.detector.parameters())
+
+
+def compute_teacher_consistency_loss(teacher_reference, batch_images, teacher_features):
+    if teacher_reference is None or Config.TEACHER_CONSISTENCY_WEIGHT <= 0:
+        zero = torch.zeros((), device=teacher_features.device, dtype=teacher_features.dtype)
+        return zero, 0.0
+
+    with torch.no_grad():
+        reference_features = teacher_reference(batch_images)
+    consistency = F.mse_loss(teacher_features, reference_features)
+    return consistency * Config.TEACHER_CONSISTENCY_WEIGHT, float(consistency.detach().item())
 
 def train():
     device = Config.DEVICE
@@ -2279,18 +2894,25 @@ def train():
     for p in teacher.parameters():
         p.requires_grad = not freeze_teacher
     log_to_file(f"Teacher status: {'frozen' if freeze_teacher else 'trainable'}")
-    log_to_file("Teacher parameter setup applied") 
+    log_to_file("Teacher parameter setup applied")
     
     log_to_file("Loading YOLOLightHead...")
     detector = YOLOLightHead(in_channels=1, 
                            out_channels=Config.get_detector_output_channels())
+    loaded_detector, detector_message = initialize_detector_weights(detector, device)
+    log_to_file(detector_message)
     
     log_to_file("Loading model components...")
     model = TeacherWithDetector(teacher=teacher, detector=detector).to(device)
+    teacher_reference = None
+    if loaded_teacher:
+        teacher_reference = copy.deepcopy(model.teacher).eval()
+        for p in teacher_reference.parameters():
+            p.requires_grad = False
     
     for p in model.teacher.parameters():
         p.requires_grad = not freeze_teacher
-    set_detector_trainable(model, True)
+    set_detector_trainable(model, False)
     
     log_to_file("Loading training dataset...")
     train_dataset = YOLODataset(split="train")
@@ -2317,8 +2939,6 @@ def train():
         collate_fn=lambda x: x,
     )
     log_to_file(f"Training dataset size: {len(train_dataset)}")
-    
-    optimizer = build_optimizer_from_model(model, lr=Config.LEARNING_RATE)
     
     criterion = YOLOLoss(anchors=Config.ANCHORS, 
                         num_classes=Config.NUM_CLASSES, 
@@ -2358,144 +2978,242 @@ def train():
         "recall": [],
         "f1": [],
         "map50": [],
+        "map5095": [],
     }
     best_loss = float('inf')
+    best_map5095 = -1.0
     best_map50 = -1.0
-    detector_stage_frozen = False
+    use_amp = Config.USE_AMP and str(device).startswith("cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    ema = ModelEMA(model.detector, decay=Config.EMA_DECAY) if Config.USE_EMA else None
+
+    stage_plan = []
+    skip_teacher_stage = (
+        loaded_teacher and
+        Config.SKIP_TEACHER_STAGE_IF_INIT and
+        Config.get_teacher_init_mode() == "checkpoint"
+    )
+    if skip_teacher_stage:
+        log_to_file("Teacher checkpoint is available; skip teacher-only bootstrap stage to avoid collapsing teacher features.")
+    elif not freeze_teacher and Config.TEACHER_STAGE_EPOCHS > 0:
+        stage_plan.append(("teacher", Config.TEACHER_STAGE_EPOCHS))
+    if Config.DETECTOR_STAGE_EPOCHS > 0:
+        stage_plan.append(("detector", Config.DETECTOR_STAGE_EPOCHS))
+    if Config.JOINT_FINETUNE_EPOCHS > 0:
+        stage_plan.append(("joint", Config.JOINT_FINETUNE_EPOCHS))
     
     log_to_file("="*60)
     log_to_file("Training model...")
     log_to_file("="*60)
-    init_epoch_log_table()
-    
-    for epoch in range(Config.EPOCHS):
-        model.train()
-        train_component_sums = {
-            "total": 0.0,
-            "box": 0.0,
-            "obj": 0.0,
-            "noobj": 0.0,
-            "cls": 0.0,
-        }
-        
-        # Set phase weights
-        phase = criterion.set_epoch_weights(epoch)
-
-        if (not detector_stage_frozen) and epoch >= Config.DETECTOR_FREEZE_EPOCH:
-            detector_stage_frozen = True
+    global_epoch = 0
+    for stage_name, stage_epochs in stage_plan:
+        if stage_name == "teacher":
+            set_teacher_trainable(model, True)
             set_detector_trainable(model, False)
-            optimizer = build_optimizer_from_model(model, lr=Config.DETECTOR_FINETUNE_LR)
-            log_to_file(
-                f"Epoch {epoch}: detector frozen; continue shaping teacher features only "
-                f"(lr={Config.DETECTOR_FINETUNE_LR})"
-            )
-        if detector_stage_frozen:
-            phase = f"{phase}+teacher_shape"
-        
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True):
-            batch_images, batch_targets = prepare_batch(batch, device)
-            
-            optimizer.zero_grad()
-            
-            teacher_features, predictions = model.forward_with_feature(batch_images)
-            loss, loss_stats = criterion(predictions, batch_targets)
-            feature_loss, feature_stats = compute_teacher_guidance_loss(
-                teacher_features,
-                batch_targets,
-                detector_frozen=detector_stage_frozen,
-            )
-            loss = loss + feature_loss
-            
-            loss.backward()
-            optimizer.step()
-            
-            train_component_sums["total"] += float(loss.detach().item())
-            train_component_sums["box"] += loss_stats["box"]
-            train_component_sums["obj"] += loss_stats["obj"]
-            train_component_sums["noobj"] += loss_stats["noobj"]
-            train_component_sums["cls"] += loss_stats["cls"]
-
-        avg_train = {key: value / max(len(train_loader), 1) for key, value in train_component_sums.items()}
-        history["train_total"].append(avg_train["total"])
-        current_lr = optimizer.param_groups[0]["lr"]
-        
-        val_losses = None
-        val_metrics = None
-        if val_loader is not None and ((epoch + 1) % Config.VAL_INTERVAL == 0):
-            val_losses, val_metrics = evaluate_model(model, val_loader, criterion, device)
-            history["val_total"].append(val_losses["total"])
-            history["precision"].append(val_metrics["precision"])
-            history["recall"].append(val_metrics["recall"])
-            history["f1"].append(val_metrics["f1"])
-            history["map50"].append(val_metrics["map50"])
+        elif stage_name == "detector":
+            set_teacher_trainable(model, False)
+            set_detector_trainable(model, True)
         else:
-            history["val_total"].append(np.nan)
-            history["precision"].append(np.nan)
-            history["recall"].append(np.nan)
-            history["f1"].append(np.nan)
-            history["map50"].append(np.nan)
+            set_teacher_trainable(model, True)
+            set_detector_trainable(model, True)
 
-        is_best = False
-        if val_metrics is not None:
-            if val_metrics["map50"] > best_map50:
-                best_map50 = val_metrics["map50"]
-                is_best = True
-        elif avg_train["total"] < best_loss:
-            is_best = True
+        optimizer = build_optimizer_from_model(model, stage_name)
+        base_lrs = [param_group["lr"] for param_group in optimizer.param_groups]
+        stage_warmup_steps = Config.WARMUP_EPOCHS * max(len(train_loader), 1)
+        stage_global_step = 0
+        log_to_file(f"Entering stage: {stage_name} ({stage_epochs} epochs)")
+        init_epoch_log_table(stage_name)
 
-        if is_best:
-            best_loss = avg_train["total"]
-            best_model_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_best.pth")
-            torch.save(model.detector.state_dict(), best_model_path)
-            if Config.SAVE_TEACHER_WEIGHTS:
-                torch.save(model.teacher.state_dict(), teacher_best_path)
-                torch.save({
-                    "teacher_state_dict": model.teacher.state_dict(),
-                    "detector_state_dict": model.detector.state_dict(),
-                    "epoch": epoch,
-                    "loss": avg_train["total"],
-                    "val_map50": best_map50 if val_metrics is not None else None,
-                }, joint_best_path)
-            if val_metrics is not None:
-                print(
-                    f"Epoch {epoch}: best checkpoint updated "
-                    f"(train_loss={avg_train['total']:.6f}, val_map50={val_metrics['map50']:.4f})"
+        for stage_epoch in range(stage_epochs):
+            epoch = global_epoch
+            model.train()
+            train_component_sums = {
+                "total": 0.0,
+                "box": 0.0,
+                "obj": 0.0,
+                "noobj": 0.0,
+                "cls": 0.0,
+            }
+            feature_stat_sums = {}
+
+            if stage_name == "teacher":
+                phase = "teacher_bootstrap"
+            else:
+                detector_epoch = stage_epoch if stage_name == "detector" else Config.DETECTOR_STAGE_EPOCHS + stage_epoch
+                phase = f"{stage_name}_{criterion.set_epoch_weights(detector_epoch)}"
+
+            for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{Config.EPOCHS} [{phase}]", leave=True):
+                batch_images, batch_targets = prepare_batch(batch, device)
+                if stage_name != "teacher":
+                    batch_images, batch_targets = apply_mixup_batch(batch_images, batch_targets)
+
+                if stage_global_step < stage_warmup_steps:
+                    apply_warmup_lr(optimizer, base_lrs, stage_global_step, stage_warmup_steps)
+
+                optimizer.zero_grad(set_to_none=True)
+                autocast_device = "cuda" if use_amp else "cpu"
+                with torch.autocast(device_type=autocast_device, enabled=use_amp):
+                    teacher_features = model.teacher(batch_images)
+                    feature_loss, feature_stats = compute_teacher_guidance_loss(
+                        teacher_features,
+                        batch_targets,
+                        stage=stage_name,
+                        images=batch_images,
+                    )
+                    consistency_loss, _ = compute_teacher_consistency_loss(
+                        teacher_reference if stage_name == "joint" else None,
+                        batch_images,
+                        teacher_features,
+                    )
+                    if stage_name == "teacher":
+                        loss = feature_loss + consistency_loss
+                        loss_stats = {"box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
+                    else:
+                        predictions = model.detector(teacher_features)
+                        det_loss, loss_stats = criterion(predictions, batch_targets)
+                        detector_aux_loss, detector_aux_stats = compute_detector_heatmap_aux_loss(
+                            predictions,
+                            teacher_features,
+                            batch_targets,
+                        )
+                        loss = det_loss + feature_loss + consistency_loss + detector_aux_loss
+                        feature_stats.update(detector_aux_stats)
+
+                scaler.scale(loss).backward()
+                if Config.GRAD_CLIP_NORM > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for p in model.parameters() if p.requires_grad],
+                        Config.GRAD_CLIP_NORM,
+                    )
+                scaler.step(optimizer)
+                scaler.update()
+                if stage_name != "teacher" and ema is not None:
+                    ema.update(model.detector)
+
+                train_component_sums["total"] += float(loss.detach().item())
+                train_component_sums["box"] += loss_stats["box"]
+                train_component_sums["obj"] += loss_stats["obj"]
+                train_component_sums["noobj"] += loss_stats["noobj"]
+                train_component_sums["cls"] += loss_stats["cls"]
+                for key, value in feature_stats.items():
+                    feature_stat_sums[key] = feature_stat_sums.get(key, 0.0) + float(value)
+                stage_global_step += 1
+
+            avg_train = {key: value / max(len(train_loader), 1) for key, value in train_component_sums.items()}
+            avg_feature_stats = {
+                key: value / max(len(train_loader), 1)
+                for key, value in feature_stat_sums.items()
+            }
+            history["train_total"].append(avg_train["total"])
+            current_lr = max(param_group["lr"] for param_group in optimizer.param_groups)
+
+            val_losses = None
+            val_metrics = None
+            if val_loader is not None and ((epoch + 1) % Config.VAL_INTERVAL == 0):
+                eval_detector = ema.ema if (ema is not None and stage_name != "teacher") else model.detector
+                val_losses, val_metrics = evaluate_model(
+                    model,
+                    val_loader,
+                    criterion,
+                    device,
+                    stage=stage_name,
+                    detector_module=eval_detector,
                 )
-            # log_to_file(f"Epoch {epoch}: 保存最佳模型(Loss: {best_loss:.6f})", also_print=False)
-        
-        if epoch % Config.VIS_INTERVAL == 0:
-            save_detection_visualization(epoch, model, vis_dataset, vis_dir, prefix=vis_prefix, device=device)
+                history["val_total"].append(val_losses["total"])
+                history["precision"].append(val_metrics["precision"])
+                history["recall"].append(val_metrics["recall"])
+                history["f1"].append(val_metrics["f1"])
+                history["map50"].append(val_metrics["map50"])
+                history["map5095"].append(val_metrics["map5095"])
+            else:
+                history["val_total"].append(np.nan)
+                history["precision"].append(np.nan)
+                history["recall"].append(np.nan)
+                history["f1"].append(np.nan)
+                history["map50"].append(np.nan)
+                history["map5095"].append(np.nan)
 
-        log_epoch_table_row(
-            epoch=epoch,
-            phase=phase,
-            train_loss=avg_train["total"],
-            val_loss=val_losses["total"] if val_losses is not None else None,
-            precision=val_metrics["precision"] if val_metrics is not None else None,
-            recall=val_metrics["recall"] if val_metrics is not None else None,
-            f1_score=val_metrics["f1"] if val_metrics is not None else None,
-            map50=val_metrics["map50"] if val_metrics is not None else None,
-            lr=current_lr,
-            best_status=Config.EPOCH_TABLE_BEST_MARK if is_best else "",
-        )
+            is_best = False
+            if val_metrics is not None and stage_name != "teacher":
+                if val_metrics["map5095"] > best_map5095:
+                    best_map5095 = val_metrics["map5095"]
+                    best_map50 = val_metrics["map50"]
+                    is_best = True
+            elif stage_name == "teacher" and avg_train["total"] < best_loss:
+                best_loss = avg_train["total"]
 
-        save_training_curves(history, Config.TEACHER_OUTPUT_DIR)
+            if is_best:
+                best_loss = avg_train["total"]
+                best_model_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_best.pth")
+                detector_to_save = ema.ema if ema is not None else model.detector
+                torch.save(detector_to_save.state_dict(), best_model_path)
+                if Config.SAVE_TEACHER_WEIGHTS:
+                    torch.save(model.teacher.state_dict(), teacher_best_path)
+                    torch.save({
+                        "teacher_state_dict": model.teacher.state_dict(),
+                        "detector_state_dict": detector_to_save.state_dict(),
+                        "epoch": epoch,
+                        "loss": avg_train["total"],
+                        "val_map50": best_map50 if val_metrics is not None else None,
+                        "val_map5095": best_map5095 if val_metrics is not None else None,
+                    }, joint_best_path)
+                if val_metrics is not None:
+                    print(
+                        f"Epoch {epoch + 1}: best checkpoint updated "
+                        f"(train_loss={avg_train['total']:.6f}, val_map50={val_metrics['map50']:.4f}, "
+                        f"val_map5095={val_metrics['map5095']:.4f})"
+                    )
+
+            if (epoch + 1) % Config.VIS_INTERVAL == 0:
+                vis_detector = ema.ema if (ema is not None and stage_name != "teacher") else model.detector
+                save_detection_visualization(
+                    epoch,
+                    model,
+                    vis_dataset,
+                    vis_dir,
+                    prefix=f"{vis_prefix}_{stage_name}",
+                    device=device,
+                    detector_module=vis_detector,
+                    stage_name=stage_name,
+                )
+
+            log_epoch_table_row(
+                epoch=epoch,
+                phase=phase,
+                train_loss=avg_train["total"],
+                val_loss=val_losses["total"] if val_losses is not None else None,
+                precision=val_metrics["precision"] if val_metrics is not None else None,
+                recall=val_metrics["recall"] if val_metrics is not None else None,
+                f1_score=val_metrics["f1"] if val_metrics is not None else None,
+                map50=val_metrics["map50"] if val_metrics is not None else None,
+                map5095=val_metrics["map5095"] if val_metrics is not None else None,
+                lr=current_lr,
+                best_status=Config.EPOCH_TABLE_BEST_MARK if is_best else "",
+                stage_name=stage_name,
+                feature_stats=avg_feature_stats,
+            )
+
+            save_training_curves(history, Config.TEACHER_OUTPUT_DIR)
+            global_epoch += 1
 
     model_save_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_final.pth")
-    torch.save(model.detector.state_dict(), model_save_path)
+    final_detector_to_save = ema.ema if ema is not None else model.detector
+    torch.save(final_detector_to_save.state_dict(), model_save_path)
     if Config.SAVE_TEACHER_WEIGHTS:
         torch.save(model.teacher.state_dict(), teacher_final_path)
         torch.save({
             "teacher_state_dict": model.teacher.state_dict(),
-            "detector_state_dict": model.detector.state_dict(),
-            "epoch": Config.EPOCHS - 1,
+            "detector_state_dict": final_detector_to_save.state_dict(),
+            "epoch": global_epoch - 1,
             "loss": history["train_total"][-1] if len(history["train_total"]) > 0 else None,
             "val_map50": best_map50 if best_map50 >= 0 else None,
+            "val_map5095": best_map5095 if best_map5095 >= 0 else None,
         }, joint_final_path)
         log_to_file(f"Teacher best weights saved to: {teacher_best_path}")
         log_to_file(f"Teacher final weights saved to: {teacher_final_path}")
     
-    append_plain_log(Config.get_epoch_table_separator())
+    append_plain_log(Config.get_epoch_table_separator(stage_plan[-1][0] if len(stage_plan) > 0 else None))
     log_to_file("="*60)
     log_to_file("Training complete")
     log_to_file(f"Best detector model saved to: {os.path.join(Config.TEACHER_OUTPUT_DIR, 'detector_best.pth')}")

@@ -14,6 +14,19 @@ from tqdm import tqdm
 from datetime import datetime
 from PIL import Image
 
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def resolve_project_path(path):
+    if path is None:
+        return None
+    path = str(path).strip()
+    if not path:
+        return None
+    if os.path.isabs(path):
+        return path
+    return os.path.join(PROJECT_ROOT, path)
+
 def extract_state_dict(checkpoint):
     if not isinstance(checkpoint, dict):
         return checkpoint
@@ -26,6 +39,7 @@ def extract_state_dict(checkpoint):
 def load_teacher_checkpoint(teacher, checkpoint_path, device):
     if not checkpoint_path:
         return False, "Teacher checkpoint: not configured"
+    checkpoint_path = resolve_project_path(checkpoint_path)
     if not os.path.exists(checkpoint_path):
         return False, f"Teacher checkpoint not found: {checkpoint_path}"
 
@@ -52,6 +66,7 @@ def load_teacher_checkpoint(teacher, checkpoint_path, device):
 def load_detector_checkpoint(detector, checkpoint_path, device):
     if not checkpoint_path:
         return False, "Detector checkpoint: not configured"
+    checkpoint_path = resolve_project_path(checkpoint_path)
     if not os.path.exists(checkpoint_path):
         return False, f"Detector checkpoint not found: {checkpoint_path}"
 
@@ -139,8 +154,8 @@ class Config:
     
     # 输出路径配置
     TEACHER_OUTPUT_DIR = r"output\OpticalTeacher_deep_teacher"
-    TEACHER_CHECKPOINT = r"output\OpticalTeacherYOLO_deep_teacher\teacher_best.pth" # path to teacher checkpoint
-    DETECTOR_CHECKPOINT = r"output\OpticalTeacherYOLO_deep_teacher\detector_best.pth"
+    TEACHER_CHECKPOINT = r"output\oty_m1\teacher_best.pth" # path to teacher checkpoint
+    DETECTOR_CHECKPOINT = r"output\oty_m1\detector_best.pth"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -169,7 +184,7 @@ class Config:
         [[241,354], [534,299], [568,528]]  # P5: 大目标 / 超大目标（军舰等）
     ]
     ANCHOR_CONFIG_PATH = r"output\anchor_clustering\yolo_anchors.yaml"
-    USE_EXTERNAL_ANCHORS = False
+    USE_EXTERNAL_ANCHORS = True
     ANCHORS = None
     ANCHOR_SOURCE = "default"
     
@@ -221,6 +236,24 @@ class Config:
     @classmethod
     def initialize(cls):
         """初始化配置，加载类别信息和创建输出目录"""
+        teacher_checkpoint = os.environ.get("OPTICAL_STUDENT_TEACHER_CHECKPOINT")
+        if teacher_checkpoint:
+            cls.TEACHER_CHECKPOINT = teacher_checkpoint
+        detector_checkpoint = os.environ.get("OPTICAL_STUDENT_DETECTOR_CHECKPOINT")
+        if detector_checkpoint:
+            cls.DETECTOR_CHECKPOINT = detector_checkpoint
+        output_dir = os.environ.get("OPTICAL_STUDENT_OUTPUT_DIR")
+        if output_dir:
+            cls.TEACHER_OUTPUT_DIR = output_dir
+        anchor_config_path = os.environ.get("OPTICAL_STUDENT_ANCHOR_CONFIG_PATH")
+        if anchor_config_path:
+            cls.ANCHOR_CONFIG_PATH = anchor_config_path
+
+        cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
+        cls.TEACHER_OUTPUT_DIR = resolve_project_path(cls.TEACHER_OUTPUT_DIR)
+        cls.TEACHER_CHECKPOINT = resolve_project_path(cls.TEACHER_CHECKPOINT)
+        cls.DETECTOR_CHECKPOINT = resolve_project_path(cls.DETECTOR_CHECKPOINT)
+        cls.ANCHOR_CONFIG_PATH = resolve_project_path(cls.ANCHOR_CONFIG_PATH)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
         cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
         cls.ANCHOR_SOURCE = "default"
