@@ -509,11 +509,30 @@ def build_image_texture_map(images, img_size, device, dtype):
     return minmax_normalize_map(texture).to(dtype=dtype)
 
 
+def sharpen_local_texture(texture_region):
+    if texture_region.numel() == 0:
+        return texture_region
+    local_min = texture_region.amin()
+    local_max = texture_region.amax()
+    local = (texture_region - local_min) / (local_max - local_min + 1e-6)
+    keep_quantile = float(np.clip(Config.FEATURE_TEXTURE_KEEP_QUANTILE, 0.0, 0.95))
+    threshold = torch.quantile(local.reshape(-1), keep_quantile)
+    local = ((local - threshold) / (1.0 - threshold + 1e-6)).clamp(0.0, 1.0)
+    return local.pow(Config.FEATURE_TEXTURE_POWER)
+
+
+def get_small_object_gain(box_w, box_h):
+    area = max(float(box_w * box_h), 1.0)
+    gain = np.sqrt(Config.FEATURE_SMALL_OBJECT_AREA_REF / area)
+    return float(np.clip(gain, 1.0, Config.FEATURE_SMALL_OBJECT_MAX_GAIN))
+
+
 def build_teacher_target_map(targets, img_size, device, dtype, images=None):
     batch_size = len(targets)
     target_map = torch.zeros((batch_size, 1, img_size, img_size), device=device, dtype=dtype)
     foreground_mask = torch.zeros((batch_size, 1, img_size, img_size), device=device, dtype=torch.bool)
     sigma = max(Config.FEATURE_HEATMAP_SIGMA, 1e-3)
+    heatmap_power = max(Config.FEATURE_HEATMAP_POWER, 1.0)
     box_fill_value = float(np.clip(Config.FEATURE_BOX_FILL_VALUE, 0.0, 1.0))
     core_fill_value = float(np.clip(Config.FEATURE_CORE_FILL_VALUE, box_fill_value, 1.0))
     core_ratio = float(np.clip(Config.FEATURE_CORE_RATIO, 0.1, 1.0))
@@ -544,15 +563,23 @@ def build_teacher_target_map(targets, img_size, device, dtype, images=None):
             ys = torch.linspace(-1.0, 1.0, box_h, device=device, dtype=dtype)
             yy, xx = torch.meshgrid(ys, xs, indexing="ij")
             heat = torch.exp(-(xx.pow(2) + yy.pow(2)) / (2.0 * sigma * sigma))
+            heat = heat.pow(heatmap_power)
+            small_object_gain = get_small_object_gain(box_w, box_h)
             region = target_map[batch_idx, 0, y1:y2, x1:x2]
             base_fill = torch.full_like(region, box_fill_value)
-            gaussian_target = Config.FEATURE_GAUSSIAN_TARGET_GAIN * heat
+            gaussian_target = (Config.FEATURE_GAUSSIAN_TARGET_GAIN * small_object_gain * heat).clamp(0.0, 1.0)
             region_target = torch.maximum(torch.maximum(region, base_fill), gaussian_target)
 
             if texture_map is not None and Config.FEATURE_TEXTURE_TARGET_GAIN > 0:
-                texture_region = texture_map[batch_idx, 0, y1:y2, x1:x2]
-                texture_target = Config.FEATURE_TEXTURE_TARGET_BASE + Config.FEATURE_TEXTURE_TARGET_GAIN * texture_region
-                texture_target = texture_target.clamp(0.0, 1.0)
+                texture_region = sharpen_local_texture(texture_map[batch_idx, 0, y1:y2, x1:x2])
+                center_gate = (
+                    Config.FEATURE_TEXTURE_CENTER_BIAS +
+                    (1.0 - Config.FEATURE_TEXTURE_CENTER_BIAS) * heat.sqrt()
+                ).clamp(0.0, 1.0)
+                texture_target = Config.FEATURE_TEXTURE_TARGET_BASE + (
+                    Config.FEATURE_TEXTURE_TARGET_GAIN * small_object_gain * texture_region
+                )
+                texture_target = (texture_target * center_gate).clamp(0.0, 1.0)
                 region_target = torch.maximum(region_target, texture_target)
 
             core_w = max(1, int(round(box_w * core_ratio)))
@@ -591,6 +618,9 @@ def compute_teacher_guidance_loss(teacher_feature, targets, stage="joint", image
         images=images,
     )
     background_mask = ~foreground_mask
+    active_foreground_mask = foreground_mask & (target_map >= Config.FEATURE_ACTIVE_TARGET_THRESH)
+    if not active_foreground_mask.any():
+        active_foreground_mask = foreground_mask
     border_mask = build_feature_border_mask(
         batch_size=teacher_feature.shape[0],
         img_size=teacher_feature.shape[-1],
@@ -627,8 +657,8 @@ def compute_teacher_guidance_loss(teacher_feature, targets, stage="joint", image
             Config.FEATURE_EDGE_BCE_GAIN * edge_heatmap_loss
         )
 
-        if foreground_mask.any():
-            fg_mean = teacher_feature_fp32[foreground_mask].mean()
+        if active_foreground_mask.any():
+            fg_mean = teacher_feature_fp32[active_foreground_mask].mean()
         else:
             fg_mean = torch.zeros((), device=teacher_feature.device, dtype=torch.float32)
 
@@ -1001,26 +1031,27 @@ class ConfigYOLO:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     IMG_SIZE = 640
     BATCH_SIZE = 8
-    EPOCHS = 120
-    TEACHER_STAGE_EPOCHS = 20  # 教师阶段训练轮数
-    DETECTOR_STAGE_EPOCHS = 70  # 检测器训练轮数
-    JOINT_FINETUNE_EPOCHS = 30  # 联合微调训练轮数
+    EPOCHS = 120*2
+    TEACHER_STAGE_EPOCHS = 20*2  # 教师阶段训练轮数
+    DETECTOR_STAGE_EPOCHS = 70*2  # 检测器训练轮数
+    JOINT_FINETUNE_EPOCHS = 30*2  # 联合微调训练轮数
 
     # 经常调整的训练参数
     BOX_WEIGHT_BASE = 1.32  # 保留大目标回归力度，但略收一点，减少框体过大
     OBJ_WEIGHT_BASE = 0.56  # 从上一版回调，给真实目标更多正样本驱动
-    NOOBJ_WEIGHT_BASE = 0.26  # 背景抑制保留，但不再过强
-    CLS_WEIGHT_BASE = 0.32  # 保留分类监督，同时回到更接近旧稳态
+    NOOBJ_WEIGHT_BASE = 0.40  # 提高背景抑制，避免 detector 长期“多报框”
+    CLS_WEIGHT_BASE = 0.40  # 提高分类约束，减少同一目标多类别重复框
 
     POSITION_PHASE_EPOCHS = 12  # 继续让前期定位学稳
     BALANCE_PHASE_EPOCHS = 8  # 缩短过渡段，减少中期被塑形权重拖慢
 
     IOU_THRESHOLD = 0.5  # 主要正样本匹配阈值；较大的值使正样本分配更严格，可能降低召回率
-    POSITIVE_ANCHOR_IOU = 0.25  # 回退到旧版更稳的正样本匹配阈值
-    MAX_POSITIVE_ANCHORS = 0  # 0 表示不额外限制，优先放宽正样本覆盖
-    NOOBJ_IGNORE_IOU = 0.6  # 避免把近邻潜在正样本也过度压成背景
+    POSITIVE_ANCHOR_IOU = 0.30  # 进一步过滤掉形状偏差太大的锚框
+    MAX_POSITIVE_ANCHORS = 3  # 每个尺度最多保留一个代表性锚框
+    NOOBJ_IGNORE_IOU = 0.72  # 让更多近邻伪框接受背景抑制
     ANCHOR_MATCH_RATIO_THRESH = 4.0
     ASSIGN_NEIGHBOR_CELLS = True
+    NEIGHBOR_ASSIGN_MARGIN = 0.25
 
     SMALL_OBJ_AREA = 32 * 32  # 将对象分组为小目标的阈值
     LARGE_OBJ_AREA = 128 * 128  # 将对象分组为大目标的阈值
@@ -1068,23 +1099,32 @@ class ConfigYOLO:
     FEATURE_CONTRAST_WEIGHT_JOINT = 0.008
     FEATURE_SPARSITY_WEIGHT_JOINT = 0.002
     FEATURE_TV_WEIGHT_JOINT = 0.0005
-    FEATURE_FOREGROUND_TARGET = 0.68
-    FEATURE_BACKGROUND_TARGET = 0.04
-    FEATURE_HEATMAP_SIGMA = 0.35
-    FEATURE_BOX_FILL_VALUE = 0.04
-    FEATURE_CORE_FILL_VALUE = 0.14
-    FEATURE_CORE_RATIO = 0.35
+    FEATURE_FOREGROUND_TARGET = 0.72
+    FEATURE_BACKGROUND_TARGET = 0.03
+    FEATURE_HEATMAP_SIGMA = 0.18
+    FEATURE_HEATMAP_POWER = 1.35
+    FEATURE_BOX_FILL_VALUE = 0.01
+    FEATURE_CORE_FILL_VALUE = 0.18
+    FEATURE_CORE_RATIO = 0.28
     FEATURE_FOREGROUND_BCE_MAX_GAIN = 6.0
     FEATURE_EDGE_BCE_GAIN = 2.5
     FEATURE_EDGE_MARGIN_RATIO = 0.06
-    FEATURE_GAUSSIAN_TARGET_GAIN = 0.45
-    FEATURE_TEXTURE_TARGET_BASE = 0.08
-    FEATURE_TEXTURE_TARGET_GAIN = 0.80
+    FEATURE_GAUSSIAN_TARGET_GAIN = 0.16
+    FEATURE_TEXTURE_TARGET_BASE = 0.01
+    FEATURE_TEXTURE_TARGET_GAIN = 0.92
     FEATURE_TEXTURE_CONTRAST_WEIGHT = 0.55
     FEATURE_TEXTURE_EDGE_WEIGHT = 0.45
-    DETECTOR_HEAT_AUX_WEIGHT = 0.18
-    DETECTOR_FEATURE_AUX_WEIGHT = 0.10
-    DETECTOR_OBJ_HEAT_AUX_WEIGHT = 0.03
+    FEATURE_TEXTURE_KEEP_QUANTILE = 0.70
+    FEATURE_TEXTURE_POWER = 2.2
+    FEATURE_TEXTURE_CENTER_BIAS = 0.30
+    FEATURE_SMALL_OBJECT_AREA_REF = 32 * 32
+    FEATURE_SMALL_OBJECT_MAX_GAIN = 2.4
+    FEATURE_ACTIVE_TARGET_THRESH = 0.12
+    DETECTOR_HEAT_AUX_WEIGHT = 0.08
+    DETECTOR_FEATURE_AUX_WEIGHT = 0.04
+    DETECTOR_OBJ_HEAT_AUX_WEIGHT = 0.01
+    DETECTOR_AUX_TARGET_POWER = 1.8
+    DETECTOR_AUX_TARGET_THRESH = 0.12
     DETECTOR_INIT_OBJ_BIAS = -4.5
     DETECTOR_INIT_CLS_BIAS = -1.5
 
@@ -1122,14 +1162,16 @@ class ConfigYOLO:
     TEACHER_CONSISTENCY_WEIGHT = 0.05
 
     # Visualization
-    VIS_INTERVAL = 1
+    VIS_INTERVAL = 1*2
     VIS_BATCH_SIZE = 4
     VIS_DPI = 130
     VIS_DATASET_SPLIT = "val"  # 可视化时使用的数据集分割
     VIS_SEED = 20260425  # 保持与本次 ft 实验一致，便于前后对比
-    VIS_DETECTOR_CONF_THRESH = 0.45
-    VIS_EDGE_CONF_THRESH = 0.55
+    VIS_DETECTOR_CONF_THRESH = 0.30
+    VIS_EDGE_CONF_THRESH = 0.45
     VIS_EDGE_MARGIN_RATIO = 0.04
+    VIS_MATCHED_ONLY = True
+    VIS_MATCHED_IOU_THRESH = 0.30
 
     # Logging table
     EPOCH_TABLE_EPOCH_WIDTH = 8
@@ -1430,6 +1472,7 @@ def log_all_parameters():
     log_to_file(f"  Ignore IoU for noobj: {Config.NOOBJ_IGNORE_IOU}")
     log_to_file(f"  Anchor match ratio threshold: {Config.ANCHOR_MATCH_RATIO_THRESH}")
     log_to_file(f"  Assign neighbor cells: {Config.ASSIGN_NEIGHBOR_CELLS}")
+    log_to_file(f"  Neighbor assign margin: {Config.NEIGHBOR_ASSIGN_MARGIN}")
     
     log_to_file("\n[Optimizer]")
     log_to_file(f"  Optimizer: {Config.OPTIMIZER}")
@@ -1460,6 +1503,7 @@ def log_all_parameters():
     log_to_file(f"  Foreground target: {Config.FEATURE_FOREGROUND_TARGET}")
     log_to_file(f"  Background target: {Config.FEATURE_BACKGROUND_TARGET}")
     log_to_file(f"  Heatmap sigma: {Config.FEATURE_HEATMAP_SIGMA}")
+    log_to_file(f"  Heatmap power: {Config.FEATURE_HEATMAP_POWER}")
     log_to_file(f"  Box / core fill value: {Config.FEATURE_BOX_FILL_VALUE} / {Config.FEATURE_CORE_FILL_VALUE}")
     log_to_file(f"  Core ratio: {Config.FEATURE_CORE_RATIO}")
     log_to_file(f"  Foreground BCE max gain: {Config.FEATURE_FOREGROUND_BCE_MAX_GAIN}")
@@ -1474,8 +1518,22 @@ def log_all_parameters():
         f"{Config.FEATURE_TEXTURE_EDGE_WEIGHT}"
     )
     log_to_file(
+        f"  Texture keep quantile / power: {Config.FEATURE_TEXTURE_KEEP_QUANTILE} / "
+        f"{Config.FEATURE_TEXTURE_POWER}"
+    )
+    log_to_file(f"  Texture center bias: {Config.FEATURE_TEXTURE_CENTER_BIAS}")
+    log_to_file(
+        f"  Small object area ref / max gain: {Config.FEATURE_SMALL_OBJECT_AREA_REF} / "
+        f"{Config.FEATURE_SMALL_OBJECT_MAX_GAIN}"
+    )
+    log_to_file(f"  Active foreground target threshold: {Config.FEATURE_ACTIVE_TARGET_THRESH}")
+    log_to_file(
         f"  Detector heat aux weights (heat/feat/obj): {Config.DETECTOR_HEAT_AUX_WEIGHT} / "
         f"{Config.DETECTOR_FEATURE_AUX_WEIGHT} / {Config.DETECTOR_OBJ_HEAT_AUX_WEIGHT}"
+    )
+    log_to_file(
+        f"  Detector aux target power / threshold: {Config.DETECTOR_AUX_TARGET_POWER} / "
+        f"{Config.DETECTOR_AUX_TARGET_THRESH}"
     )
     log_to_file(f"  Detector init obj/cls bias: {Config.DETECTOR_INIT_OBJ_BIAS} / {Config.DETECTOR_INIT_CLS_BIAS}")
 
@@ -1494,6 +1552,7 @@ def log_all_parameters():
     log_to_file(f"  Visualization split: {Config.VIS_DATASET_SPLIT}")
     log_to_file(f"  Visualization seed: {Config.VIS_SEED}")
     log_to_file(f"  Detector visualization conf / edge conf: {Config.VIS_DETECTOR_CONF_THRESH} / {Config.VIS_EDGE_CONF_THRESH}")
+    log_to_file(f"  Detector visualization matched only / IoU: {Config.VIS_MATCHED_ONLY} / {Config.VIS_MATCHED_IOU_THRESH}")
     
     log_to_file("\n[Paths]")
     log_to_file(f"  Teacher output path: {Config.TEACHER_OUTPUT_DIR}")
@@ -2039,7 +2098,7 @@ class EnhancedYOLOLoss(nn.Module):
 
                 size_weight = self._get_size_weight(tw.item(), th.item())
                 candidate_matches = []
-                ratio_matches = []
+                scale_best_matches = {}
                 for scale_idx, scale_data in enumerate(prepared_scales):
                     for anchor_idx in range(3):
                         anchor_w, anchor_h = scale_data["anchors"][anchor_idx]
@@ -2049,16 +2108,30 @@ class EnhancedYOLOLoss(nn.Module):
                         rw = max(float(tw.item() / (anchor_w.item() + 1e-6)), float(anchor_w.item() / (tw.item() + 1e-6)))
                         rh = max(float(th.item() / (anchor_h.item() + 1e-6)), float(anchor_h.item() / (th.item() + 1e-6)))
                         ratio = max(rw, rh)
-                        candidate_matches.append((iou, ratio, scale_idx, anchor_idx))
-                        if ratio < Config.ANCHOR_MATCH_RATIO_THRESH:
-                            ratio_matches.append((iou, ratio, scale_idx, anchor_idx))
+                        match_item = (iou, ratio, scale_idx, anchor_idx)
+                        candidate_matches.append(match_item)
+                        if ratio < Config.ANCHOR_MATCH_RATIO_THRESH and iou >= Config.POSITIVE_ANCHOR_IOU:
+                            best_item = scale_best_matches.get(scale_idx)
+                            if best_item is None or (iou > best_item[0]) or (iou == best_item[0] and ratio < best_item[1]):
+                                scale_best_matches[scale_idx] = match_item
 
+                if len(scale_best_matches) == 0:
+                    relaxed_scale_matches = {}
+                    for match_item in candidate_matches:
+                        iou, ratio, scale_idx, _ = match_item
+                        if ratio >= Config.ANCHOR_MATCH_RATIO_THRESH:
+                            continue
+                        best_item = relaxed_scale_matches.get(scale_idx)
+                        if best_item is None or (iou > best_item[0]) or (iou == best_item[0] and ratio < best_item[1]):
+                            relaxed_scale_matches[scale_idx] = match_item
+                    scale_best_matches = relaxed_scale_matches
+
+                ratio_matches = sorted(scale_best_matches.values(), key=lambda item: (-item[0], item[1]))
                 if len(ratio_matches) == 0:
-                    ratio_matches = [max(candidate_matches, key=lambda item: item[0])]
+                    ratio_matches = [max(candidate_matches, key=lambda item: (item[0], -item[1]))]
 
-                ratio_matches.sort(key=lambda item: (-item[0], item[1]))
-                if Config.MAX_POSITIVE_ANCHORS > 0:
-                    ratio_matches = ratio_matches[:Config.MAX_POSITIVE_ANCHORS]
+                max_positive = Config.MAX_POSITIVE_ANCHORS if Config.MAX_POSITIVE_ANCHORS > 0 else len(prepared_scales)
+                ratio_matches = ratio_matches[:max_positive]
 
                 for match_iou, _, scale_idx, anchor_idx in ratio_matches:
                     scale_data = prepared_scales[scale_idx]
@@ -2074,13 +2147,13 @@ class EnhancedYOLOLoss(nn.Module):
                         dx_r = (grid_x + 1) - gx.item()
                         dy_t = gy.item() - grid_y
                         dy_b = (grid_y + 1) - gy.item()
-                        if dx_l < 0.5:
+                        if dx_l < Config.NEIGHBOR_ASSIGN_MARGIN:
                             offsets.append((-1, 0))
-                        if dx_r < 0.5:
+                        if dx_r < Config.NEIGHBOR_ASSIGN_MARGIN:
                             offsets.append((1, 0))
-                        if dy_t < 0.5:
+                        if dy_t < Config.NEIGHBOR_ASSIGN_MARGIN:
                             offsets.append((0, -1))
-                        if dy_b < 0.5:
+                        if dy_b < Config.NEIGHBOR_ASSIGN_MARGIN:
                             offsets.append((0, 1))
 
                     for offset_x, offset_y in offsets:
@@ -2181,6 +2254,12 @@ def compute_detector_heatmap_aux_loss(predictions, teacher_features, targets):
         return zero, {"detector_aux": 0.0, "detector_heat_aux": 0.0, "detector_feat_aux": 0.0, "detector_obj_aux": 0.0}
 
     target_heat = teacher_features.detach().float().clamp(0.0, 1.0)
+    target_heat = target_heat.pow(Config.DETECTOR_AUX_TARGET_POWER)
+    target_heat = torch.where(
+        target_heat >= Config.DETECTOR_AUX_TARGET_THRESH,
+        target_heat,
+        torch.zeros_like(target_heat),
+    )
     heat_aux = torch.zeros((), device=device)
     feat_aux = torch.zeros((), device=device)
     obj_aux = torch.zeros((), device=device)
@@ -2545,6 +2624,86 @@ def filter_visual_detections(detections, img_size):
     return det
 
 
+def _xywh_iou_np(box1, box2, eps=1e-6):
+    x1_1 = box1[0] - box1[2] / 2.0
+    y1_1 = box1[1] - box1[3] / 2.0
+    x2_1 = box1[0] + box1[2] / 2.0
+    y2_1 = box1[1] + box1[3] / 2.0
+    x1_2 = box2[0] - box2[2] / 2.0
+    y1_2 = box2[1] - box2[3] / 2.0
+    x2_2 = box2[0] + box2[2] / 2.0
+    y2_2 = box2[1] + box2[3] / 2.0
+
+    inter_x1 = max(x1_1, x1_2)
+    inter_y1 = max(y1_1, y1_2)
+    inter_x2 = min(x2_1, x2_2)
+    inter_y2 = min(y2_1, y2_2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter = inter_w * inter_h
+
+    area1 = max(0.0, x2_1 - x1_1) * max(0.0, y2_1 - y1_1)
+    area2 = max(0.0, x2_2 - x1_2) * max(0.0, y2_2 - y1_2)
+    union = area1 + area2 - inter + eps
+    return inter / union
+
+
+def select_matched_visual_detections(detections, targets, img_size, iou_thresh=None):
+    det = np.asarray(detections, dtype=np.float32)
+    if det.size == 0:
+        det = det.reshape(0, 6)
+    if iou_thresh is None:
+        iou_thresh = Config.VIS_MATCHED_IOU_THRESH
+
+    gt_boxes = []
+    for target in targets:
+        if target.shape[0] < 5:
+            continue
+        gt_boxes.append([
+            float(target[1].item() * img_size),
+            float(target[2].item() * img_size),
+            float(target[3].item() * img_size),
+            float(target[4].item() * img_size),
+            int(target[0].item()),
+        ])
+
+    if len(det) == 0 or len(gt_boxes) == 0:
+        return np.zeros((0, 6), dtype=np.float32), {
+            "matched": 0,
+            "total": int(len(det)),
+            "gt": int(len(gt_boxes)),
+        }
+
+    matched_det_indices = []
+    used_det_indices = set()
+    for gt_box in gt_boxes:
+        gt_cls = gt_box[4]
+        best_idx = -1
+        best_iou = iou_thresh
+        for det_idx, det_item in enumerate(det):
+            if det_idx in used_det_indices or int(det_item[5]) != gt_cls:
+                continue
+            iou = _xywh_iou_np(det_item[:4], gt_box[:4])
+            if iou > best_iou:
+                best_iou = iou
+                best_idx = det_idx
+        if best_idx >= 0:
+            used_det_indices.add(best_idx)
+            matched_det_indices.append(best_idx)
+
+    if len(matched_det_indices) == 0:
+        matched = np.zeros((0, 6), dtype=np.float32)
+    else:
+        matched = det[matched_det_indices]
+        matched = matched[np.argsort(matched[:, 4])[::-1]]
+
+    return matched, {
+        "matched": int(len(matched_det_indices)),
+        "total": int(len(det)),
+        "gt": int(len(gt_boxes)),
+    }
+
+
 def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train", device=None, detector_module=None, stage_name=None):
     # Save a detection visualization image for the current epoch.
     if dataset is None or len(dataset) == 0:
@@ -2609,6 +2768,7 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
                 teacher_output = teacher_output.squeeze(0)
             
             detections = [np.zeros((0, 6), dtype=np.float32)]
+            vis_match_stats = {"matched": 0, "total": 0, "gt": int(len(targets))}
             if stage_name != "teacher":
                 vis_conf_thresh = Config.VIS_DETECTOR_CONF_THRESH if stage_name in {"detector", "joint"} else Config.VIS_CONF_THRESH
                 preds = eval_detector(teacher_feature_tensor)
@@ -2619,6 +2779,13 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
                     max_det=Config.VIS_MAX_DET,
                 )
                 detections[0] = filter_visual_detections(detections[0], Config.IMG_SIZE)
+                vis_match_stats["total"] = int(len(detections[0]))
+                if Config.VIS_MATCHED_ONLY and stage_name in {"detector", "joint"}:
+                    detections[0], vis_match_stats = select_matched_visual_detections(
+                        detections[0],
+                        targets,
+                        Config.IMG_SIZE,
+                    )
             
             # Display the original image
             axes[i, 0].imshow(img_np)
@@ -2663,7 +2830,9 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
                 axes[i, 3].axis("off")
             else:
                 axes[i, 3].imshow(img_np)
-                axes[i, 3].set_title(f"Predictions {i+1}")
+                axes[i, 3].set_title(
+                    f"Predictions {i+1}\nmatched={vis_match_stats['matched']}/{vis_match_stats['gt']} shown={len(detections[0])} raw={vis_match_stats['total']}"
+                )
                 axes[i, 3].axis("off")
 
                 if len(detections[0]) > 0:
