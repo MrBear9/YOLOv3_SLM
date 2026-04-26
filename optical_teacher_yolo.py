@@ -407,6 +407,46 @@ def enhance_feature_for_display(feature_map):
     feature_map = np.clip((feature_map - low) / (high - low), 0.0, 1.0)
     return np.power(feature_map, 0.8)
 
+def wh_iou_scalar(w1, h1, w2, h2, eps=1e-6):
+    inter = min(float(w1), float(w2)) * min(float(h1), float(h2))
+    union = float(w1) * float(h1) + float(w2) * float(h2) - inter + eps
+    return inter / union
+
+def draw_best_matching_anchor_boxes(ax, x_center, y_center, width, height):
+    anchor_colors = ["#ffd166", "#00d1ff", "#ff5db1"]
+    for scale_idx, scale_anchors in enumerate(Config.ANCHORS):
+        best_anchor = scale_anchors[0]
+        best_iou = -1.0
+        for anchor_w, anchor_h in scale_anchors:
+            match_iou = wh_iou_scalar(width, height, anchor_w, anchor_h)
+            if match_iou > best_iou:
+                best_iou = match_iou
+                best_anchor = (anchor_w, anchor_h)
+
+        anchor_w, anchor_h = best_anchor
+        x1 = x_center - anchor_w / 2.0
+        y1 = y_center - anchor_h / 2.0
+        rect = patches.Rectangle(
+            (x1, y1),
+            anchor_w,
+            anchor_h,
+            linewidth=1.1,
+            edgecolor=anchor_colors[scale_idx % len(anchor_colors)],
+            facecolor="none",
+            linestyle="--",
+            alpha=0.85,
+        )
+        ax.add_patch(rect)
+        ax.text(
+            x1,
+            max(8, y1 - 4),
+            f"A@{Config.STRIDES[scale_idx]}",
+            color=anchor_colors[scale_idx % len(anchor_colors)],
+            fontsize=8,
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.15", facecolor="black", alpha=0.25, edgecolor="none"),
+        )
+
 
 def build_teacher_target_map(targets, img_size, device, dtype):
     batch_size = len(targets)
@@ -428,6 +468,22 @@ def build_teacher_target_map(targets, img_size, device, dtype):
             y_center = float(target[2].item() * img_size)
             width = max(float(target[3].item() * img_size), 1.0)
             height = max(float(target[4].item() * img_size), 1.0)
+            area_ratio = min((width * height) / max(float(Config.FEATURE_LARGE_OBJECT_AREA), 1.0), 1.0)
+            adaptive_box_fill = float(np.clip(
+                box_fill_value + area_ratio * Config.FEATURE_LARGE_BOX_FILL_BOOST,
+                0.0,
+                1.0,
+            ))
+            adaptive_core_fill = float(np.clip(
+                core_fill_value + area_ratio * Config.FEATURE_LARGE_CORE_FILL_BOOST,
+                adaptive_box_fill,
+                1.0,
+            ))
+            adaptive_core_ratio = float(np.clip(
+                core_ratio + area_ratio * Config.FEATURE_LARGE_CORE_RATIO_BOOST,
+                0.1,
+                0.9,
+            ))
 
             x1 = max(0, int(np.floor(x_center - width / 2.0)))
             y1 = max(0, int(np.floor(y_center - height / 2.0)))
@@ -443,18 +499,18 @@ def build_teacher_target_map(targets, img_size, device, dtype):
             yy, xx = torch.meshgrid(ys, xs, indexing="ij")
             heat = torch.exp(-(xx.pow(2) + yy.pow(2)) / (2.0 * sigma * sigma))
             region = target_map[batch_idx, 0, y1:y2, x1:x2]
-            base_fill = torch.full_like(region, box_fill_value)
+            base_fill = torch.full_like(region, adaptive_box_fill)
             region_target = torch.maximum(torch.maximum(region, base_fill), heat)
 
-            core_w = max(1, int(round(box_w * core_ratio)))
-            core_h = max(1, int(round(box_h * core_ratio)))
+            core_w = max(1, int(round(box_w * adaptive_core_ratio)))
+            core_h = max(1, int(round(box_h * adaptive_core_ratio)))
             core_x1 = x1 + max(0, (box_w - core_w) // 2)
             core_y1 = y1 + max(0, (box_h - core_h) // 2)
             core_x2 = min(x2, core_x1 + core_w)
             core_y2 = min(y2, core_y1 + core_h)
             if core_x2 > core_x1 and core_y2 > core_y1:
                 core_region = region_target[(core_y1 - y1):(core_y2 - y1), (core_x1 - x1):(core_x2 - x1)]
-                core_fill = torch.full_like(core_region, core_fill_value)
+                core_fill = torch.full_like(core_region, adaptive_core_fill)
                 region_target[(core_y1 - y1):(core_y2 - y1), (core_x1 - x1):(core_x2 - x1)] = torch.maximum(core_region, core_fill)
 
             target_map[batch_idx, 0, y1:y2, x1:x2] = region_target
@@ -586,6 +642,61 @@ def bbox_iou_matrix_xywh(box1, box2, eps=1e-7):
     union = area1[:, None] + area2[None, :] - inter_area + eps
     return inter_area / union
 
+def box_intersection_over_smaller_xyxy(box1_xyxy, box2_xyxy, eps=1e-7):
+    inter_x1 = torch.maximum(box1_xyxy[:, None, 0], box2_xyxy[None, :, 0])
+    inter_y1 = torch.maximum(box1_xyxy[:, None, 1], box2_xyxy[None, :, 1])
+    inter_x2 = torch.minimum(box1_xyxy[:, None, 2], box2_xyxy[None, :, 2])
+    inter_y2 = torch.minimum(box1_xyxy[:, None, 3], box2_xyxy[None, :, 3])
+
+    inter_w = (inter_x2 - inter_x1).clamp(min=0)
+    inter_h = (inter_y2 - inter_y1).clamp(min=0)
+    inter_area = inter_w * inter_h
+
+    area1 = (box1_xyxy[:, 2] - box1_xyxy[:, 0]).clamp(min=0) * (box1_xyxy[:, 3] - box1_xyxy[:, 1]).clamp(min=0)
+    area2 = (box2_xyxy[:, 2] - box2_xyxy[:, 0]).clamp(min=0) * (box2_xyxy[:, 3] - box2_xyxy[:, 1]).clamp(min=0)
+    smaller_area = torch.minimum(area1[:, None], area2[None, :]).clamp(min=eps)
+    return inter_area / smaller_area
+
+def suppress_contained_detections(det_tensor, containment_ratio, area_ratio_limit, class_agnostic=False):
+    if det_tensor.numel() == 0 or det_tensor.shape[0] <= 1:
+        return det_tensor
+
+    det_tensor = det_tensor[det_tensor[:, 4].argsort(descending=True)]
+    boxes_xyxy = xywh_to_xyxy(det_tensor[:, :4])
+    class_ids = det_tensor[:, 5]
+    areas = det_tensor[:, 2] * det_tensor[:, 3]
+    keep_mask = torch.ones(det_tensor.shape[0], dtype=torch.bool, device=det_tensor.device)
+
+    for i in range(det_tensor.shape[0]):
+        if not keep_mask[i]:
+            continue
+        for j in range(i + 1, det_tensor.shape[0]):
+            if not keep_mask[j]:
+                continue
+            if not class_agnostic and class_ids[i] != class_ids[j]:
+                continue
+
+            smaller_area = torch.minimum(areas[i], areas[j]).clamp(min=1e-6)
+            larger_area = torch.maximum(areas[i], areas[j]).clamp(min=1e-6)
+            if (smaller_area / larger_area).item() > area_ratio_limit:
+                continue
+
+            overlap_on_smaller = box_intersection_over_smaller_xyxy(
+                boxes_xyxy[i:i + 1],
+                boxes_xyxy[j:j + 1],
+            )[0, 0].item()
+            if overlap_on_smaller < containment_ratio:
+                continue
+
+            # Keep the higher-score / larger context box, suppress the contained fragment.
+            if areas[i] >= areas[j]:
+                keep_mask[j] = False
+            else:
+                keep_mask[i] = False
+                break
+
+    return det_tensor[keep_mask]
+
 def weighted_mean(values, weights=None, eps=1e-6):
     if values.numel() == 0:
         return torch.zeros((), device=values.device, dtype=values.dtype)
@@ -624,6 +735,14 @@ def apply_nms(detections, nms_thresh, max_det, class_agnostic=None):
         if len(kept) == 0:
             return np.zeros((0, 6), dtype=np.float32)
         det_tensor = torch.cat(kept, dim=0)
+
+    if Config.ENABLE_CONTAINMENT_SUPPRESSION:
+        det_tensor = suppress_contained_detections(
+            det_tensor,
+            containment_ratio=Config.CONTAINMENT_SUPPRESS_RATIO,
+            area_ratio_limit=Config.CONTAINMENT_AREA_RATIO_LIMIT,
+            class_agnostic=class_agnostic,
+        )
 
     det_tensor = det_tensor[det_tensor[:, 4].argsort(descending=True)]
     return det_tensor[:max_det].cpu().numpy()
@@ -859,10 +978,13 @@ class ConfigYOLO:
     FOCAL_ALPHA = 0.28  # 向旧稳态回调，避免过度偏向负样本
     FOCAL_GAMMA = 1.6  # 略降，减少后期被困难背景样本牵制
 
-    CONF_THRESH = 0.58  # 略回调，给真实目标更多召回空间
-    NMS_THRESH = 0.22  # 用旧版更稳的压框强度
-    MAX_DET = 4  # 进一步压缩单图最大输出，保留多目标余量同时减少碎框
+    CONF_THRESH = 0.62  # 再收一点背景召回，优先抑制虚警和碎框
+    NMS_THRESH = 0.18  # 对同类近邻框更强抑制，减少一个大目标多个小框
+    MAX_DET = 3  # 单图输出继续收紧，减少画面噪声
     AGNOSTIC_NMS = False  # 多类别任务使用按类 NMS，避免不同类别互相压制
+    ENABLE_CONTAINMENT_SUPPRESSION = True
+    CONTAINMENT_SUPPRESS_RATIO = 0.88  # 小框大部分被同类大框包住时直接压掉
+    CONTAINMENT_AREA_RATIO_LIMIT = 0.55  # 只抑制明显更小的碎框，避免压掉相邻独立目标
 
     # 验证和指标
     VAL_INTERVAL = 5
@@ -873,18 +995,22 @@ class ConfigYOLO:
     DETECTOR_FINETUNE_LR = 2e-4
     FEATURE_HEATMAP_WEIGHT_JOINT = 0.06
     FEATURE_HEATMAP_WEIGHT_FROZEN = 0.14
-    FEATURE_CONTRAST_WEIGHT_JOINT = 0.02
-    FEATURE_CONTRAST_WEIGHT_FROZEN = 0.04
-    FEATURE_SPARSITY_WEIGHT_JOINT = 0.008
-    FEATURE_SPARSITY_WEIGHT_FROZEN = 0.02
-    FEATURE_TV_WEIGHT_JOINT = 0.003
-    FEATURE_TV_WEIGHT_FROZEN = 0.006
-    FEATURE_FOREGROUND_TARGET = 0.68
-    FEATURE_BACKGROUND_TARGET = 0.08
+    FEATURE_CONTRAST_WEIGHT_JOINT = 0.024
+    FEATURE_CONTRAST_WEIGHT_FROZEN = 0.055
+    FEATURE_SPARSITY_WEIGHT_JOINT = 0.012
+    FEATURE_SPARSITY_WEIGHT_FROZEN = 0.028
+    FEATURE_TV_WEIGHT_JOINT = 0.004
+    FEATURE_TV_WEIGHT_FROZEN = 0.008
+    FEATURE_FOREGROUND_TARGET = 0.74
+    FEATURE_BACKGROUND_TARGET = 0.05
     FEATURE_HEATMAP_SIGMA = 0.35
-    FEATURE_BOX_FILL_VALUE = 0.10
-    FEATURE_CORE_FILL_VALUE = 0.32
-    FEATURE_CORE_RATIO = 0.40
+    FEATURE_BOX_FILL_VALUE = 0.14
+    FEATURE_CORE_FILL_VALUE = 0.40
+    FEATURE_CORE_RATIO = 0.48
+    FEATURE_LARGE_OBJECT_AREA = 160 * 160
+    FEATURE_LARGE_BOX_FILL_BOOST = 0.05
+    FEATURE_LARGE_CORE_FILL_BOOST = 0.08
+    FEATURE_LARGE_CORE_RATIO_BOOST = 0.12
 
     # Class balance sampler
     USE_CLASS_BALANCED_SAMPLER = True
@@ -921,6 +1047,11 @@ class ConfigYOLO:
     VIS_DPI = 130
     VIS_DATASET_SPLIT = "val"  # 可视化时使用的数据集分割
     VIS_SEED = 20260421  # 保持与本次 ft 实验一致，便于前后对比
+    VIS_CONF_THRESH = 0.70  # 可视化单独用更干净的显示阈值
+    VIS_NMS_THRESH = 0.16
+    VIS_MAX_DET = 3
+    VIS_SHOW_BEST_MATCHED_ANCHORS = True
+    VIS_MAX_GT_ANCHOR_OVERLAYS = 2
 
     # Logging table
     EPOCH_TABLE_EPOCH_WIDTH = 8
@@ -1163,6 +1294,8 @@ def log_all_parameters():
     log_to_file(f"  Confidence threshold: {Config.CONF_THRESH}")
     log_to_file(f"  NMS threshold: {Config.NMS_THRESH}")
     log_to_file(f"  Max detections: {Config.MAX_DET}")
+    log_to_file(f"  Containment suppression: {Config.ENABLE_CONTAINMENT_SUPPRESSION}")
+    log_to_file(f"  Containment ratio / area limit: {Config.CONTAINMENT_SUPPRESS_RATIO} / {Config.CONTAINMENT_AREA_RATIO_LIMIT}")
 
     log_to_file("\n[Teacher Feature Shaping]")
     log_to_file(f"  Detector freeze epoch: {Config.DETECTOR_FREEZE_EPOCH}")
@@ -1176,6 +1309,11 @@ def log_all_parameters():
     log_to_file(f"  Heatmap sigma: {Config.FEATURE_HEATMAP_SIGMA}")
     log_to_file(f"  Box / core fill value: {Config.FEATURE_BOX_FILL_VALUE} / {Config.FEATURE_CORE_FILL_VALUE}")
     log_to_file(f"  Core ratio: {Config.FEATURE_CORE_RATIO}")
+    log_to_file(
+        f"  Large-object area / fill boosts: {Config.FEATURE_LARGE_OBJECT_AREA} / "
+        f"{Config.FEATURE_LARGE_BOX_FILL_BOOST} / {Config.FEATURE_LARGE_CORE_FILL_BOOST} / "
+        f"{Config.FEATURE_LARGE_CORE_RATIO_BOOST}"
+    )
 
     log_to_file("\n[Sampling]")
     log_to_file(f"  Use class balanced sampler: {Config.USE_CLASS_BALANCED_SAMPLER}")
@@ -1191,6 +1329,8 @@ def log_all_parameters():
     log_to_file(f"  Visualization DPI: {Config.VIS_DPI}")
     log_to_file(f"  Visualization split: {Config.VIS_DATASET_SPLIT}")
     log_to_file(f"  Visualization seed: {Config.VIS_SEED}")
+    log_to_file(f"  Visualization conf / nms / max det: {Config.VIS_CONF_THRESH} / {Config.VIS_NMS_THRESH} / {Config.VIS_MAX_DET}")
+    log_to_file(f"  Visualization anchor overlays: {Config.VIS_SHOW_BEST_MATCHED_ANCHORS} (max GT: {Config.VIS_MAX_GT_ANCHOR_OVERLAYS})")
     
     log_to_file("\n[Paths]")
     log_to_file(f"  Teacher output path: {Config.TEACHER_OUTPUT_DIR}")
@@ -2034,127 +2174,148 @@ def save_training_curves(history, output_dir):
 YOLOLoss = EnhancedYOLOLoss
 
 def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train", device=None):
-    # Save a detection visualization image for the current epoch.
     if dataset is None or len(dataset) == 0:
         return
 
     if device is None:
         device = Config.DEVICE
-    
-    # Create the save directory if it doesn't exist
+
     os.makedirs(save_dir, exist_ok=True)
-    
-    # Set the model to evaluation mode
     was_training = model.training
     model.eval()
-    
-    # Use a fixed seeded subset so visualizations stay comparable across runs
+
     num_samples = min(Config.VIS_BATCH_SIZE, len(dataset))
     generator = torch.Generator()
     generator.manual_seed(Config.VIS_SEED)
     indices = torch.randperm(len(dataset), generator=generator)[:num_samples]
-    
-    # Create the figure and axes for the visualization image
+
     fig, axes = plt.subplots(num_samples, 4, figsize=(24, 6 * num_samples))
     if num_samples == 1:
         axes = axes.reshape(1, -1)
-    
-    # Process each sample in the dataset
+
     with torch.no_grad():
         for i, idx in enumerate(indices):
-            # Load the image and targets
             img_tensor, targets = dataset[idx]
-            img_tensor = img_tensor.unsqueeze(0).to(device)  # Add batch dimension and move to device
-            
-            # Convert the image to numpy array
+            img_tensor = img_tensor.unsqueeze(0).to(device)
+
             img_np = img_tensor.squeeze(0).cpu().numpy().transpose(1, 2, 0)
             img_np = (img_np * 255).astype(np.uint8)
-            img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)  # Convert to RGB if grayscale
-            
-            # Get the teacher feature
+            img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
+
             teacher_output = model.teacher(img_tensor)
             teacher_output = teacher_output.squeeze(0).cpu().numpy()
-            teacher_output = enhance_feature_for_display(teacher_output)  # Enhance the feature for display purposes
-            
-            # Process the teacher feature
+            teacher_output = enhance_feature_for_display(teacher_output)
             if teacher_output.ndim == 3:
                 teacher_output = teacher_output.squeeze(0)
-            
-            # Get the model predictions 
-            pred_p3, pred_p4, pred_p5 = model(img_tensor)
-            preds = [pred_p3, pred_p4, pred_p5]
-            detections = decode_detections(preds)  # Decode the detections
-            
-            # Display the original image
+
+            preds = list(model(img_tensor))
+            detections = decode_detections(
+                preds,
+                conf_thresh=Config.VIS_CONF_THRESH,
+                nms_thresh=Config.VIS_NMS_THRESH,
+                max_det=Config.VIS_MAX_DET,
+            )
+
             axes[i, 0].imshow(img_np)
             axes[i, 0].set_title(f"Original Image {i+1}")
             axes[i, 0].axis("off")
-            
-            # Display the teacher feature
+
             axes[i, 1].imshow(teacher_output, cmap="hot")
             axes[i, 1].set_title(f"Teacher Feature {i+1}")
             axes[i, 1].axis("off")
-            
-            # Display the ground truth
+
             axes[i, 2].imshow(img_np)
             axes[i, 2].set_title(f"Ground Truth {i+1}")
             axes[i, 2].axis("off")
-            
-            # Display the model predictions
+
+            target_indices_for_anchor_overlay = []
+            if len(targets) > 0 and Config.VIS_SHOW_BEST_MATCHED_ANCHORS:
+                target_areas = []
+                for target_idx in range(len(targets)):
+                    width = float(targets[target_idx][3].item() * Config.IMG_SIZE)
+                    height = float(targets[target_idx][4].item() * Config.IMG_SIZE)
+                    target_areas.append(width * height)
+                anchor_overlay_count = min(Config.VIS_MAX_GT_ANCHOR_OVERLAYS, len(targets))
+                target_indices_for_anchor_overlay = sorted(
+                    range(len(targets)),
+                    key=lambda target_idx: target_areas[target_idx],
+                    reverse=True,
+                )[:anchor_overlay_count]
+
             for target_idx in range(len(targets)):
                 cls_id, x_center, y_center, width, height = targets[target_idx]
                 cls_id = int(cls_id.item())
-                
-                # Calculate the coordinates of the bounding box
-                x1 = int((x_center - width / 2) * Config.IMG_SIZE)
-                y1 = int((y_center - height / 2) * Config.IMG_SIZE)
-                w = int(width * Config.IMG_SIZE)
-                h = int(height * Config.IMG_SIZE)
-                
-                # Draw the bounding box
-                rect = patches.Rectangle((x1, y1), w, h, linewidth=2, 
-                                        edgecolor='green', facecolor='none')
+                x_center_px = float(x_center.item() * Config.IMG_SIZE)
+                y_center_px = float(y_center.item() * Config.IMG_SIZE)
+                width_px = float(width.item() * Config.IMG_SIZE)
+                height_px = float(height.item() * Config.IMG_SIZE)
+
+                x1 = int(x_center_px - width_px / 2)
+                y1 = int(y_center_px - height_px / 2)
+                rect = patches.Rectangle(
+                    (x1, y1),
+                    width_px,
+                    height_px,
+                    linewidth=2,
+                    edgecolor="green",
+                    facecolor="none",
+                )
                 axes[i, 2].add_patch(rect)
-                # Add the class name
-                axes[i, 2].text(x1, y1 - 5, Config.CLASS_NAMES[cls_id], 
-                              color='green', fontsize=10, fontweight='bold')
-            
-            # Display the model predictions
+                axes[i, 2].text(
+                    x1,
+                    y1 - 5,
+                    Config.CLASS_NAMES[cls_id],
+                    color="green",
+                    fontsize=10,
+                    fontweight="bold",
+                )
+
+                if target_idx in target_indices_for_anchor_overlay:
+                    draw_best_matching_anchor_boxes(
+                        axes[i, 2],
+                        x_center=x_center_px,
+                        y_center=y_center_px,
+                        width=width_px,
+                        height=height_px,
+                    )
+
             axes[i, 3].imshow(img_np)
             axes[i, 3].set_title(f"Predictions {i+1}")
             axes[i, 3].axis("off")
-            
-            # Display the model predictions
+
             if len(detections[0]) > 0:
                 for det in detections[0]:
-                    x_center, y_center, w, h, conf, cls_id = det
+                    x_center, y_center, width, height, conf, cls_id = det
                     cls_id = int(cls_id)
-                    
-                    # Calculate the coordinates of the bounding box
-                    x1 = int(x_center - w / 2)
-                    y1 = int(y_center - h / 2)
-                    w = int(w)
-                    h = int(h)
-                    
-                    # Draw the bounding box
+                    x1 = int(x_center - width / 2)
+                    y1 = int(y_center - height / 2)
+
                     color = plt.cm.tab20(cls_id / max(Config.NUM_CLASSES, 1))
-                    # Draw the bounding box
-                    rect = patches.Rectangle((x1, y1), w, h, linewidth=2, 
-                                            edgecolor=color, facecolor='none')
+                    rect = patches.Rectangle(
+                        (x1, y1),
+                        int(width),
+                        int(height),
+                        linewidth=2.1,
+                        edgecolor=color,
+                        facecolor="none",
+                    )
                     axes[i, 3].add_patch(rect)
-                    
-                    # Add the class name and confidence
+
                     label = f"{Config.CLASS_NAMES[cls_id]}: {conf:.2f}"
-                    axes[i, 3].text(x1, y1 - 5, label, 
-                                  color=color, fontsize=10, fontweight='bold',
-                                  bbox=dict(boxstyle='round,pad=0.3', 
-                                          facecolor=color, alpha=0.7))
-    
-    # Save the figure
+                    axes[i, 3].text(
+                        x1,
+                        y1 - 5,
+                        label,
+                        color=color,
+                        fontsize=9,
+                        fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=0.25", facecolor="black", alpha=0.35),
+                    )
+
     plt.tight_layout()
     save_path = os.path.join(save_dir, f"{prefix}_epoch_{epoch:03d}.png")
     plt.savefig(save_path, dpi=Config.VIS_DPI)
-    plt.close()  # Close the figure to release memory.
+    plt.close()
     if was_training:
         model.train()
 
