@@ -579,7 +579,11 @@ def build_teacher_target_map(targets, img_size, device, dtype, images=None):
                 texture_target = Config.FEATURE_TEXTURE_TARGET_BASE + (
                     Config.FEATURE_TEXTURE_TARGET_GAIN * small_object_gain * texture_region
                 )
-                texture_target = (texture_target * center_gate).clamp(0.0, 1.0)
+                texture_target = (
+                    texture_target * center_gate +
+                    0.35 * gaussian_target +
+                    0.45 * base_fill
+                ).clamp(0.0, 1.0)
                 region_target = torch.maximum(region_target, texture_target)
 
             core_w = max(1, int(round(box_w * core_ratio)))
@@ -1047,11 +1051,12 @@ class ConfigYOLO:
 
     IOU_THRESHOLD = 0.5  # 主要正样本匹配阈值；较大的值使正样本分配更严格，可能降低召回率
     POSITIVE_ANCHOR_IOU = 0.30  # 进一步过滤掉形状偏差太大的锚框
-    MAX_POSITIVE_ANCHORS = 3  # 每个尺度最多保留一个代表性锚框
+    MAX_POSITIVE_ANCHORS = 2  # 最多保留两个代表性尺度，避免大目标同时激活过多小尺度框
     NOOBJ_IGNORE_IOU = 0.72  # 让更多近邻伪框接受背景抑制
     ANCHOR_MATCH_RATIO_THRESH = 4.0
     ASSIGN_NEIGHBOR_CELLS = True
     NEIGHBOR_ASSIGN_MARGIN = 0.25
+    POSITIVE_SCALE_IOU_RATIO = 0.70
 
     SMALL_OBJ_AREA = 32 * 32  # 将对象分组为小目标的阈值
     LARGE_OBJ_AREA = 128 * 128  # 将对象分组为大目标的阈值
@@ -1099,24 +1104,24 @@ class ConfigYOLO:
     FEATURE_CONTRAST_WEIGHT_JOINT = 0.008
     FEATURE_SPARSITY_WEIGHT_JOINT = 0.002
     FEATURE_TV_WEIGHT_JOINT = 0.0005
-    FEATURE_FOREGROUND_TARGET = 0.72
-    FEATURE_BACKGROUND_TARGET = 0.03
-    FEATURE_HEATMAP_SIGMA = 0.18
-    FEATURE_HEATMAP_POWER = 1.35
-    FEATURE_BOX_FILL_VALUE = 0.01
-    FEATURE_CORE_FILL_VALUE = 0.18
-    FEATURE_CORE_RATIO = 0.28
+    FEATURE_FOREGROUND_TARGET = 0.70
+    FEATURE_BACKGROUND_TARGET = 0.04
+    FEATURE_HEATMAP_SIGMA = 0.24
+    FEATURE_HEATMAP_POWER = 1.10
+    FEATURE_BOX_FILL_VALUE = 0.04
+    FEATURE_CORE_FILL_VALUE = 0.12
+    FEATURE_CORE_RATIO = 0.38
     FEATURE_FOREGROUND_BCE_MAX_GAIN = 6.0
     FEATURE_EDGE_BCE_GAIN = 2.5
     FEATURE_EDGE_MARGIN_RATIO = 0.06
-    FEATURE_GAUSSIAN_TARGET_GAIN = 0.16
-    FEATURE_TEXTURE_TARGET_BASE = 0.01
-    FEATURE_TEXTURE_TARGET_GAIN = 0.92
+    FEATURE_GAUSSIAN_TARGET_GAIN = 0.22
+    FEATURE_TEXTURE_TARGET_BASE = 0.03
+    FEATURE_TEXTURE_TARGET_GAIN = 0.74
     FEATURE_TEXTURE_CONTRAST_WEIGHT = 0.55
     FEATURE_TEXTURE_EDGE_WEIGHT = 0.45
-    FEATURE_TEXTURE_KEEP_QUANTILE = 0.70
-    FEATURE_TEXTURE_POWER = 2.2
-    FEATURE_TEXTURE_CENTER_BIAS = 0.30
+    FEATURE_TEXTURE_KEEP_QUANTILE = 0.52
+    FEATURE_TEXTURE_POWER = 1.55
+    FEATURE_TEXTURE_CENTER_BIAS = 0.62
     FEATURE_SMALL_OBJECT_AREA_REF = 32 * 32
     FEATURE_SMALL_OBJECT_MAX_GAIN = 2.4
     FEATURE_ACTIVE_TARGET_THRESH = 0.12
@@ -1172,6 +1177,7 @@ class ConfigYOLO:
     VIS_EDGE_MARGIN_RATIO = 0.04
     VIS_MATCHED_ONLY = True
     VIS_MATCHED_IOU_THRESH = 0.30
+    VIS_DRAW_GT_ANCHORS = True
 
     # Logging table
     EPOCH_TABLE_EPOCH_WIDTH = 8
@@ -1473,6 +1479,7 @@ def log_all_parameters():
     log_to_file(f"  Anchor match ratio threshold: {Config.ANCHOR_MATCH_RATIO_THRESH}")
     log_to_file(f"  Assign neighbor cells: {Config.ASSIGN_NEIGHBOR_CELLS}")
     log_to_file(f"  Neighbor assign margin: {Config.NEIGHBOR_ASSIGN_MARGIN}")
+    log_to_file(f"  Positive scale IoU ratio: {Config.POSITIVE_SCALE_IOU_RATIO}")
     
     log_to_file("\n[Optimizer]")
     log_to_file(f"  Optimizer: {Config.OPTIMIZER}")
@@ -1553,6 +1560,7 @@ def log_all_parameters():
     log_to_file(f"  Visualization seed: {Config.VIS_SEED}")
     log_to_file(f"  Detector visualization conf / edge conf: {Config.VIS_DETECTOR_CONF_THRESH} / {Config.VIS_EDGE_CONF_THRESH}")
     log_to_file(f"  Detector visualization matched only / IoU: {Config.VIS_MATCHED_ONLY} / {Config.VIS_MATCHED_IOU_THRESH}")
+    log_to_file(f"  Draw GT best anchors in visualization: {Config.VIS_DRAW_GT_ANCHORS}")
     
     log_to_file("\n[Paths]")
     log_to_file(f"  Teacher output path: {Config.TEACHER_OUTPUT_DIR}")
@@ -2130,6 +2138,11 @@ class EnhancedYOLOLoss(nn.Module):
                 if len(ratio_matches) == 0:
                     ratio_matches = [max(candidate_matches, key=lambda item: (item[0], -item[1]))]
 
+                best_scale_iou = ratio_matches[0][0]
+                ratio_matches = [
+                    item for item in ratio_matches
+                    if item[0] >= best_scale_iou * Config.POSITIVE_SCALE_IOU_RATIO
+                ]
                 max_positive = Config.MAX_POSITIVE_ANCHORS if Config.MAX_POSITIVE_ANCHORS > 0 else len(prepared_scales)
                 ratio_matches = ratio_matches[:max_positive]
 
@@ -2624,6 +2637,53 @@ def filter_visual_detections(detections, img_size):
     return det
 
 
+def _wh_iou_np(w1, h1, w2, h2, eps=1e-6):
+    inter = min(w1, w2) * min(h1, h2)
+    union = (w1 * h1) + (w2 * h2) - inter + eps
+    return float(inter / union)
+
+
+def draw_best_matching_anchor_boxes(ax, x_center, y_center, width, height, img_size):
+    anchor_colors = ["yellow", "cyan", "magenta"]
+    center_x = float(x_center) * img_size
+    center_y = float(y_center) * img_size
+    target_w = float(width) * img_size
+    target_h = float(height) * img_size
+
+    for scale_idx, scale_anchors in enumerate(Config.ANCHORS):
+        best_anchor = scale_anchors[0]
+        best_iou = -1.0
+        for aw, ah in scale_anchors:
+            iou = _wh_iou_np(target_w, target_h, float(aw), float(ah))
+            if iou > best_iou:
+                best_iou = iou
+                best_anchor = (aw, ah)
+
+        aw, ah = float(best_anchor[0]), float(best_anchor[1])
+        x1 = center_x - aw / 2.0
+        y1 = center_y - ah / 2.0
+        rect = patches.Rectangle(
+            (x1, y1),
+            aw,
+            ah,
+            linewidth=1.0,
+            edgecolor=anchor_colors[scale_idx % len(anchor_colors)],
+            facecolor="none",
+            linestyle="--",
+            alpha=0.9,
+        )
+        ax.add_patch(rect)
+        ax.text(
+            x1,
+            max(2.0, y1 - 4.0),
+            f"A@{Config.STRIDES[scale_idx]}",
+            color=anchor_colors[scale_idx % len(anchor_colors)],
+            fontsize=8,
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="black", alpha=0.35),
+        )
+
+
 def _xywh_iou_np(box1, box2, eps=1e-6):
     x1_1 = box1[0] - box1[2] / 2.0
     y1_1 = box1[1] - box1[3] / 2.0
@@ -2822,6 +2882,18 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
                 # Add the class name
                 axes[i, 2].text(x1, y1 - 5, Config.CLASS_NAMES[cls_id], 
                               color='green', fontsize=10, fontweight='bold')
+                if Config.VIS_DRAW_GT_ANCHORS:
+                    draw_best_matching_anchor_boxes(
+                        axes[i, 2],
+                        float(x_center.item()),
+                        float(y_center.item()),
+                        float(width.item()),
+                        float(height.item()),
+                        Config.IMG_SIZE,
+                    )
+
+            if Config.VIS_DRAW_GT_ANCHORS:
+                axes[i, 2].set_title(f"Ground Truth + Best Anchors {i+1}")
             
             # Display the model predictions
             if stage_name == "teacher":
