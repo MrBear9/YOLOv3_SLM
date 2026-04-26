@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from datetime import datetime
 from PIL import Image
+import copy
 
 def extract_state_dict(checkpoint):
     if not isinstance(checkpoint, dict):
@@ -151,7 +152,7 @@ class Config:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     IMG_SIZE = 640
     BATCH_SIZE = 8  # 批次大小，用于训练时的内存占用
-    EPOCHS = 200
+    EPOCHS = 100
     
     # 损失权重
     BOX_WEIGHT = 0.05  # 目标框损失权重，用于计算总损失
@@ -193,8 +194,17 @@ class Config:
     YOLO_HEAD_BASE_CHANNELS = 32
     
     # 训练控制参数
-    NORM_ENABLE_EPOCH = 50  # 启用归一化的轮数
+    NORM_STRATEGY = "disabled"  # disabled / always / after_epoch
+    NORM_ENABLE_EPOCH = 60  # 仅在 NORM_STRATEGY=after_epoch 时生效
     VIS_INTERVAL = 2  # 可视化间隔，单位：轮数
+    GRAD_CLIP_NORM = 1.0
+    USE_LR_SCHEDULER = True
+    LR_SCHEDULER_FACTOR = 0.5
+    LR_SCHEDULER_PATIENCE = 12
+    MIN_LEARNING_RATE = 5e-5
+    DIVERGENCE_RATIO = 1.8
+    DIVERGENCE_PATIENCE = 3
+    FINAL_MODEL_SOURCE = "best_feature"  # best_feature / last
     
     # 损失函数权重
     LOSS_FULL_WEIGHT = 0.2
@@ -204,8 +214,10 @@ class Config:
     LOSS_GRAD_WEIGHT = 0.25
     LOSS_FREQ_WEIGHT = 0.15
     LOSS_PHASE_SMOOTH_WEIGHT = 0.02
-    RESPONSE_MAP_WEIGHT = 0.3
+    RESPONSE_MAP_WEIGHT = 0.15
     USE_DETECTION_RESPONSE_LOSS = True
+    RESPONSE_WARMUP_EPOCHS = 12
+    RESPONSE_WARMUP_START_FACTOR = 0.25
     
     # 检测参数
     CONF_THRESH = 0.5  # 置信度阈值，用于筛选检测框
@@ -253,8 +265,40 @@ class Config:
         return os.path.join(cls.TEACHER_OUTPUT_DIR, "optical_student_final.pth")
 
     @classmethod
+    def get_last_model_path(cls):
+        return os.path.join(cls.TEACHER_OUTPUT_DIR, "optical_student_last.pth")
+
+    @classmethod
     def get_loss_curve_path(cls):
         return os.path.join(cls.TEACHER_OUTPUT_DIR, "loss_curve.png")
+
+    @classmethod
+    def should_enable_student_norm(cls, epoch):
+        strategy = str(cls.NORM_STRATEGY).strip().lower()
+        if strategy == "disabled":
+            return False
+        if strategy == "always":
+            return True
+        if strategy == "after_epoch":
+            return epoch >= cls.NORM_ENABLE_EPOCH
+        raise ValueError(f"Unsupported NORM_STRATEGY: {cls.NORM_STRATEGY}")
+
+    @classmethod
+    def get_response_loss_weight(cls, epoch):
+        if not cls.USE_DETECTION_RESPONSE_LOSS:
+            return 0.0
+
+        base_weight = float(cls.RESPONSE_MAP_WEIGHT)
+        warmup_epochs = max(int(cls.RESPONSE_WARMUP_EPOCHS), 0)
+        start_factor = float(cls.RESPONSE_WARMUP_START_FACTOR)
+        start_factor = min(max(start_factor, 0.0), 1.0)
+
+        if warmup_epochs <= 0:
+            return base_weight
+
+        progress = min(max(epoch / max(warmup_epochs - 1, 1), 0.0), 1.0)
+        factor = start_factor + (1.0 - start_factor) * progress
+        return base_weight * factor
     
     @classmethod
     def print_config(cls):
@@ -719,10 +763,13 @@ def normalize_response_map(response):
     return response / (peak + Config.OPTICAL_NORM_EPS)
 
 
-def compute_detection_response_loss(detector, student_feature, teacher_feature):
+def compute_detection_response_loss(detector, student_feature, teacher_feature, response_weight=None):
     if detector is None:
         zero = torch.zeros((), device=student_feature.device, dtype=student_feature.dtype)
-        return zero, {"response": 0.0}
+        return zero, {"response": 0.0, "weight": 0.0}
+
+    if response_weight is None:
+        response_weight = Config.RESPONSE_MAP_WEIGHT
 
     student_preds = detector(student_feature)
     student_response = normalize_response_map(prediction_response_tensor(student_preds))
@@ -732,8 +779,11 @@ def compute_detection_response_loss(detector, student_feature, teacher_feature):
         teacher_response = normalize_response_map(prediction_response_tensor(teacher_preds))
 
     response_loss = F.mse_loss(student_response, teacher_response)
-    weighted_loss = response_loss * Config.RESPONSE_MAP_WEIGHT
-    return weighted_loss, {"response": float(response_loss.detach().item())}
+    weighted_loss = response_loss * response_weight
+    return weighted_loss, {
+        "response": float(response_loss.detach().item()),
+        "weight": float(response_weight),
+    }
 
 def enhance_feature_for_display(feature_map):
     feature_map = np.asarray(feature_map, dtype=np.float32)
@@ -1080,6 +1130,15 @@ def log_all_parameters():
     log_to_file(f"  SSIM / Grad / Freq / Phase: {Config.LOSS_SSIM_WEIGHT} / {Config.LOSS_GRAD_WEIGHT} / {Config.LOSS_FREQ_WEIGHT} / {Config.LOSS_PHASE_SMOOTH_WEIGHT}")
     log_to_file(f"  Use detection response loss: {Config.USE_DETECTION_RESPONSE_LOSS}")
     log_to_file(f"  Response map weight: {Config.RESPONSE_MAP_WEIGHT}")
+    log_to_file(f"  Response warmup epochs / start factor: {Config.RESPONSE_WARMUP_EPOCHS} / {Config.RESPONSE_WARMUP_START_FACTOR}")
+    log_to_file("\n【稳定性控制】")
+    log_to_file(f"  Norm strategy: {Config.NORM_STRATEGY}")
+    log_to_file(f"  Norm enable epoch: {Config.NORM_ENABLE_EPOCH}")
+    log_to_file(f"  Gradient clip norm: {Config.GRAD_CLIP_NORM}")
+    log_to_file(f"  Use LR scheduler: {Config.USE_LR_SCHEDULER}")
+    log_to_file(f"  Scheduler factor / patience / min lr: {Config.LR_SCHEDULER_FACTOR} / {Config.LR_SCHEDULER_PATIENCE} / {Config.MIN_LEARNING_RATE}")
+    log_to_file(f"  Divergence ratio / patience: {Config.DIVERGENCE_RATIO} / {Config.DIVERGENCE_PATIENCE}")
+    log_to_file(f"  Final model source: {Config.FINAL_MODEL_SOURCE}")
     
     log_to_file("\n" + "="*80)
     log_to_file("参数设置输出完成")
@@ -1126,6 +1185,7 @@ def train():
 
     log_to_file("初始化学生网络（OpticalStudent）...")
     student = OpticalStudent().to(device)
+    student.enable_norm = Config.should_enable_student_norm(epoch=0)
     
     log_to_file("加载数据集...")
     dataset = MilitaryFeatureDataset(teacher=teacher, device=device)
@@ -1133,51 +1193,98 @@ def train():
     log_to_file(f"数据集大小: {len(dataset)}")
     
     optimizer = torch.optim.Adam(student.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
+    scheduler = None
+    if Config.USE_LR_SCHEDULER:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=Config.LR_SCHEDULER_FACTOR,
+            patience=Config.LR_SCHEDULER_PATIENCE,
+            min_lr=Config.MIN_LEARNING_RATE,
+        )
     criterion = CompositeOpticalFeatureLoss()
     
     vis_dir = Config.VISUALIZATION_DIR
     
     loss_curve = []
-    best_loss = float('inf')
+    best_total_loss = float('inf')
+    best_feature_loss = float('inf')
+    best_feature_epoch = -1
+    best_feature_state = None
+    divergence_counter = 0
     
     log_to_file("="*60)
     log_to_file("开始训练光学相位层...")
     log_to_file("="*60)
     
     for epoch in range(Config.EPOCHS):
+        desired_norm = Config.should_enable_student_norm(epoch)
+        if student.enable_norm != desired_norm:
+            student.enable_norm = desired_norm
+            log_to_file(f"Epoch {epoch}: 学生输出归一化切换为 {student.enable_norm}")
+
+        current_response_weight = Config.get_response_loss_weight(epoch)
         student.train()
         loss_sum = 0
         feature_loss_sum = 0
         response_loss_sum = 0
+        response_raw_sum = 0
         
         for x, t in tqdm(loader, desc=f"Epoch {epoch}/{Config.EPOCHS}", leave=True):
             x = x.to(device)
             t = t.to(device)
             y = student(x)
             feature_loss, _ = criterion(y, t, student)
-            response_loss, _ = compute_detection_response_loss(detector, y, t)
+            response_loss, response_stats = compute_detection_response_loss(
+                detector,
+                y,
+                t,
+                response_weight=current_response_weight,
+            )
             loss = feature_loss + response_loss
             optimizer.zero_grad()
             loss.backward()
+            if Config.GRAD_CLIP_NORM and Config.GRAD_CLIP_NORM > 0:
+                torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=Config.GRAD_CLIP_NORM)
             optimizer.step()
             loss_sum += loss.item()
             feature_loss_sum += feature_loss.item()
             response_loss_sum += response_loss.item()
+            response_raw_sum += response_stats["response"]
 
         avg_loss = loss_sum / len(loader)
         avg_feature_loss = feature_loss_sum / len(loader)
         avg_response_loss = response_loss_sum / len(loader)
+        avg_response_raw = response_raw_sum / len(loader)
         loss_curve.append(avg_loss)
+
+        if scheduler is not None:
+            scheduler.step(avg_feature_loss)
         
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        if avg_loss < best_total_loss:
+            best_total_loss = avg_loss
+
+        if avg_feature_loss < best_feature_loss:
+            best_feature_loss = avg_feature_loss
+            best_feature_epoch = epoch
+            best_feature_state = copy.deepcopy(student.state_dict())
             best_model_path = Config.get_best_model_path()
-            torch.save(student.state_dict(), best_model_path)
-            log_to_file(f"Epoch {epoch}: 保存最佳模型 (Loss: {best_loss:.6f})", also_print=False)
-        
-        if epoch == Config.NORM_ENABLE_EPOCH:
-            student.enable_norm = True
-            log_to_file(f"Epoch {epoch}: 启用归一化")
+            torch.save(best_feature_state, best_model_path)
+            log_to_file(
+                f"Epoch {epoch}: 保存最佳特征模型 "
+                f"(Feature: {best_feature_loss:.6f}, Total: {avg_loss:.6f})",
+                also_print=False,
+            )
+            divergence_counter = 0
+        elif avg_feature_loss > best_feature_loss * Config.DIVERGENCE_RATIO:
+            divergence_counter += 1
+            log_to_file(
+                f"Epoch {epoch}: 检测到特征损失异常抬升 "
+                f"(current={avg_feature_loss:.6f}, best={best_feature_loss:.6f}, "
+                f"counter={divergence_counter}/{Config.DIVERGENCE_PATIENCE})"
+            )
+        else:
+            divergence_counter = 0
         
         if epoch % Config.VIS_INTERVAL == 0:
             student.eval()
@@ -1192,8 +1299,18 @@ def train():
 
         log_to_file(
             f"Epoch {epoch:3d} | Loss: {avg_loss:.6f} | "
-            f"Feature: {avg_feature_loss:.6f} | Response: {avg_response_loss:.6f}"
+            f"Feature: {avg_feature_loss:.6f} | "
+            f"ResponseRaw: {avg_response_raw:.6f} | "
+            f"ResponseWeighted: {avg_response_loss:.6f} | "
+            f"RespW: {current_response_weight:.6f} | "
+            f"LR: {optimizer.param_groups[0]['lr']:.6g}"
         )
+
+        if divergence_counter >= Config.DIVERGENCE_PATIENCE:
+            log_to_file(
+                f"Epoch {epoch}: 连续 {Config.DIVERGENCE_PATIENCE} 轮出现特征损失异常抬升，提前停止训练并回退到最佳特征模型。"
+            )
+            break
 
     plt.figure(figsize=(10, 6))
     plt.plot(loss_curve, label="Train Loss")
@@ -1205,13 +1322,25 @@ def train():
     plt.savefig(Config.get_loss_curve_path(), dpi=Config.VIS_DPI)
     plt.close()
 
+    last_model_path = Config.get_last_model_path()
+    torch.save(student.state_dict(), last_model_path)
+
+    if Config.FINAL_MODEL_SOURCE == "best_feature" and best_feature_state is not None:
+        model_save_state = best_feature_state
+    else:
+        model_save_state = student.state_dict()
+
     model_save_path = Config.get_final_model_path()
-    torch.save(student.state_dict(), model_save_path)
+    torch.save(model_save_state, model_save_path)
     
     log_to_file("="*60)
     log_to_file("训练完成！")
     log_to_file(f"最佳模型已保存到: {Config.get_best_model_path()}")
+    log_to_file(f"最后一轮模型已保存到: {last_model_path}")
     log_to_file(f"最终模型已保存到: {model_save_path}")
+    log_to_file(f"最佳特征轮数: {best_feature_epoch}")
+    log_to_file(f"最佳特征损失: {best_feature_loss:.6f}")
+    log_to_file(f"最佳总损失: {best_total_loss:.6f}")
     log_to_file(f"所有结果已保存到: {Config.TEACHER_OUTPUT_DIR}")
     log_to_file("="*60)
 
