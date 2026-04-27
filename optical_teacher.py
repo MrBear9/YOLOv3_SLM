@@ -139,9 +139,9 @@ class Config:
     NUM_CLASSES = None
     
     # 输出路径配置
-    TEACHER_OUTPUT_DIR = r"output\OpticalTeacher_deep_teacher"
-    TEACHER_CHECKPOINT = r"output\OpticalTeacherYOLO_deep_teacher\teacher_best.pth" # path to teacher checkpoint
-    DETECTOR_CHECKPOINT = r"output\OpticalTeacherYOLO_deep_teacher\detector_best.pth"
+    TEACHER_OUTPUT_DIR = r"output\OpticalTeacher_StrengTea_teacher"
+    TEACHER_CHECKPOINT = r"output\OpticalTeacherYOLO_StrengTea_teacher\teacher_best.pth" # path to teacher checkpoint
+    DETECTOR_CHECKPOINT = r"output\OpticalTeacherYOLO_StrengTea_teacher\detector_best.pth"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -152,7 +152,10 @@ class Config:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     IMG_SIZE = 640
     BATCH_SIZE = 8  # 批次大小，用于训练时的内存占用
-    EPOCHS = 100
+    PHASE1_STUDENT_EPOCHS = 70
+    PHASE2_DETECTOR_EPOCHS = 70
+    PHASE3_JOINT_EPOCHS = 30
+    EPOCHS = PHASE1_STUDENT_EPOCHS + PHASE2_DETECTOR_EPOCHS + PHASE3_JOINT_EPOCHS
     
     # 损失权重
     BOX_WEIGHT = 0.05  # 目标框损失权重，用于计算总损失
@@ -178,6 +181,10 @@ class Config:
     LEARNING_RATE = 3e-4  # 学习率，用于优化模型参数
     WEIGHT_DECAY = 3e-5  # 权重衰减，用于防止过拟合
     OPTIMIZER = "Adam"
+    STUDENT_ONLY_LR = 3e-4
+    DETECTOR_ONLY_LR = 2e-4
+    JOINT_STUDENT_LR = 5e-5
+    JOINT_DETECTOR_LR = 1.5e-4
     
     # 光学传播参数
     WAVELENGTH = 532e-9  # 波长，单位：米
@@ -204,7 +211,9 @@ class Config:
     MIN_LEARNING_RATE = 5e-5
     DIVERGENCE_RATIO = 1.8
     DIVERGENCE_PATIENCE = 3
-    FINAL_MODEL_SOURCE = "best_feature"  # best_feature / last
+    FINAL_MODEL_SOURCE = "best_joint"  # best_joint / last
+    RESTORE_PHASE1_BEST_FOR_PHASE2 = True
+    RESTORE_PHASE2_BEST_FOR_PHASE3 = True
     
     # 损失函数权重
     LOSS_FULL_WEIGHT = 0.2
@@ -218,6 +227,15 @@ class Config:
     USE_DETECTION_RESPONSE_LOSS = True
     RESPONSE_WARMUP_EPOCHS = 12
     RESPONSE_WARMUP_START_FACTOR = 0.25
+    DETECTION_LOSS_WEIGHT_PHASE2 = 1.0
+    DETECTION_LOSS_WEIGHT_PHASE3 = 0.8
+    FEATURE_LOSS_WEIGHT_PHASE1 = 1.0
+    FEATURE_LOSS_WEIGHT_PHASE3 = 0.6
+    RESPONSE_LOSS_WEIGHT_PHASE1 = 1.0
+    RESPONSE_LOSS_WEIGHT_PHASE3 = 0.5
+
+    POSITIVE_ANCHOR_IOU = 0.25
+    NOOBJ_IGNORE_IOU = 0.5
     
     # 检测参数
     CONF_THRESH = 0.5  # 置信度阈值，用于筛选检测框
@@ -269,6 +287,30 @@ class Config:
         return os.path.join(cls.TEACHER_OUTPUT_DIR, "optical_student_last.pth")
 
     @classmethod
+    def get_detector_best_model_path(cls):
+        return os.path.join(cls.TEACHER_OUTPUT_DIR, "detector_best.pth")
+
+    @classmethod
+    def get_detector_final_model_path(cls):
+        return os.path.join(cls.TEACHER_OUTPUT_DIR, "detector_final.pth")
+
+    @classmethod
+    def get_detector_last_model_path(cls):
+        return os.path.join(cls.TEACHER_OUTPUT_DIR, "detector_last.pth")
+
+    @classmethod
+    def get_phase1_student_best_model_path(cls):
+        return os.path.join(cls.TEACHER_OUTPUT_DIR, "optical_student_phase1_best.pth")
+
+    @classmethod
+    def get_phase2_student_best_model_path(cls):
+        return os.path.join(cls.TEACHER_OUTPUT_DIR, "optical_student_phase2_best.pth")
+
+    @classmethod
+    def get_phase2_detector_best_model_path(cls):
+        return os.path.join(cls.TEACHER_OUTPUT_DIR, "detector_phase2_best.pth")
+
+    @classmethod
     def get_loss_curve_path(cls):
         return os.path.join(cls.TEACHER_OUTPUT_DIR, "loss_curve.png")
 
@@ -299,6 +341,14 @@ class Config:
         progress = min(max(epoch / max(warmup_epochs - 1, 1), 0.0), 1.0)
         factor = start_factor + (1.0 - start_factor) * progress
         return base_weight * factor
+
+    @classmethod
+    def get_training_phase(cls, epoch):
+        if epoch < cls.PHASE1_STUDENT_EPOCHS:
+            return "student_only"
+        if epoch < cls.PHASE1_STUDENT_EPOCHS + cls.PHASE2_DETECTOR_EPOCHS:
+            return "detector_only"
+        return "joint_balance"
     
     @classmethod
     def print_config(cls):
@@ -626,11 +676,13 @@ class MilitaryFeatureDataset(Dataset):
         with open(yaml_path, 'r', encoding='utf-8') as f:
             cfg = yaml.safe_load(f)
         img_dir = os.path.join(cfg["path"], cfg["train"])
+        labels_dir = os.path.join(os.path.dirname(img_dir), "labels")
         self.files = sorted([
             os.path.join(img_dir, f)
             for f in os.listdir(img_dir)
-            if f.endswith(".jpg")
+            if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
         ])
+        self.labels_dir = labels_dir
         self.teacher = teacher.to(device).eval()
         self.device = device
         self.gray = transforms.Compose([
@@ -646,14 +698,37 @@ class MilitaryFeatureDataset(Dataset):
     def __len__(self):
         return len(self.files)
 
+    def _load_targets(self, img_path):
+        label_path = os.path.join(self.labels_dir, f"{os.path.splitext(os.path.basename(img_path))[0]}.txt")
+        targets = []
+        if os.path.exists(label_path):
+            with open(label_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) < 5:
+                        continue
+                    cls_id, x_center, y_center, width, height = map(float, parts[:5])
+                    targets.append([cls_id, x_center, y_center, width, height])
+        if targets:
+            return torch.tensor(targets, dtype=torch.float32)
+        return torch.zeros((0, 5), dtype=torch.float32)
+
     def __getitem__(self, idx):
-        img = Image.open(self.files[idx]).convert("RGB")
+        img_path = self.files[idx]
+        img = Image.open(img_path).convert("RGB")
         x = self.gray(img)
+        targets = self._load_targets(img_path)
         with torch.no_grad():
             t = self.teacher(self.rgb(img).unsqueeze(0).to(self.device))
             t = F.interpolate(t, size=(Config.IMG_SIZE, Config.IMG_SIZE), mode="bilinear", align_corners=False)
             t = t.squeeze(0).cpu()
-        return x, t
+        return x, t, targets
+
+def feature_dataset_collate_fn(batch):
+    images = torch.stack([item[0] for item in batch], dim=0)
+    teacher_features = torch.stack([item[1] for item in batch], dim=0)
+    targets = [item[2] for item in batch]
+    return images, teacher_features, targets
 
 # =========================================================
 # 损失函数
@@ -785,6 +860,197 @@ def compute_detection_response_loss(detector, student_feature, teacher_feature, 
         "weight": float(response_weight),
     }
 
+class SigmoidFocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, reduction="mean"):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits, targets):
+        loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        prob = torch.sigmoid(logits)
+        p_t = prob * targets + (1.0 - prob) * (1.0 - targets)
+        alpha_t = self.alpha * targets + (1.0 - self.alpha) * (1.0 - targets)
+        focal_weight = alpha_t * ((1.0 - p_t).clamp(min=0.0) ** self.gamma)
+        loss = loss * focal_weight
+        if self.reduction == "sum":
+            return loss.sum()
+        if self.reduction == "none":
+            return loss
+        return loss.mean()
+
+def decode_boxes_to_absolute(pred_boxes, anchors, stride):
+    device = pred_boxes.device
+    grid_h, grid_w = pred_boxes.shape[1], pred_boxes.shape[2]
+    dtype = pred_boxes.dtype
+
+    grid_y, grid_x = torch.meshgrid(
+        torch.arange(grid_h, device=device, dtype=dtype),
+        torch.arange(grid_w, device=device, dtype=dtype),
+        indexing="ij",
+    )
+    grid_x = grid_x.view(1, grid_h, grid_w, 1)
+    grid_y = grid_y.view(1, grid_h, grid_w, 1)
+    anchor_tensor = anchors.view(1, 1, 1, 3, 2).to(device=device, dtype=dtype)
+
+    x = (torch.sigmoid(pred_boxes[..., 0]) + grid_x) * stride
+    y = (torch.sigmoid(pred_boxes[..., 1]) + grid_y) * stride
+    w = torch.exp(torch.clamp(pred_boxes[..., 2], min=-8.0, max=8.0)) * anchor_tensor[..., 0]
+    h = torch.exp(torch.clamp(pred_boxes[..., 3], min=-8.0, max=8.0)) * anchor_tensor[..., 1]
+    return torch.stack([x, y, w, h], dim=-1)
+
+class DetectionAdaptationLoss(nn.Module):
+    def __init__(self, anchors, num_classes, strides):
+        super().__init__()
+        self.anchors = torch.tensor(anchors, dtype=torch.float32)
+        self.num_classes = num_classes
+        self.strides = strides
+        self.focal_loss = SigmoidFocalLoss(alpha=Config.FOCAL_ALPHA, gamma=Config.FOCAL_GAMMA, reduction="mean")
+        self.last_components = {
+            "total": 0.0,
+            "box": 0.0,
+            "obj": 0.0,
+            "noobj": 0.0,
+            "cls": 0.0,
+        }
+
+    def forward(self, predictions, targets):
+        device = predictions[0].device
+        total_loss = torch.zeros((), device=device)
+        component_sums = {
+            "box": torch.zeros((), device=device),
+            "obj": torch.zeros((), device=device),
+            "noobj": torch.zeros((), device=device),
+            "cls": torch.zeros((), device=device),
+        }
+
+        batch_size = predictions[0].shape[0]
+        prepared_scales = []
+        for i, pred in enumerate(predictions):
+            _, _, grid_h, grid_w = pred.shape
+            pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
+            prepared_scales.append({
+                "pred_boxes": pred[..., :4],
+                "pred_obj": pred[..., 4],
+                "pred_cls": pred[..., 5:],
+                "target_boxes": torch.zeros_like(pred[..., :4]),
+                "target_boxes_abs": torch.zeros_like(pred[..., :4]),
+                "target_obj": torch.zeros_like(pred[..., 4]),
+                "target_cls": torch.zeros_like(pred[..., 5:]),
+                "target_match_iou": torch.full_like(pred[..., 4], -1.0),
+                "grid_h": grid_h,
+                "grid_w": grid_w,
+                "stride": self.strides[i],
+                "anchors": self.anchors[i].to(device),
+            })
+
+        gt_boxes_abs_by_batch = [[] for _ in range(batch_size)]
+        for b in range(batch_size):
+            if len(targets[b]) == 0:
+                continue
+            current_targets = targets[b].to(device)
+            for target in current_targets:
+                cls_id = int(target[0].item())
+                tx = target[1]
+                ty = target[2]
+                tw = target[3] * Config.IMG_SIZE
+                th = target[4] * Config.IMG_SIZE
+                gt_boxes_abs_by_batch[b].append(torch.stack([tx * Config.IMG_SIZE, ty * Config.IMG_SIZE, tw, th]))
+
+                best_match = None
+                for scale_idx, scale_data in enumerate(prepared_scales):
+                    for anchor_idx in range(3):
+                        anchor_w, anchor_h = scale_data["anchors"][anchor_idx]
+                        inter = torch.minimum(tw, anchor_w) * torch.minimum(th, anchor_h)
+                        union = tw * th + anchor_w * anchor_h - inter + 1e-6
+                        iou = (inter / union).item()
+                        if best_match is None or iou > best_match[0]:
+                            best_match = (iou, scale_idx, anchor_idx)
+
+                if best_match is None or best_match[0] < Config.POSITIVE_ANCHOR_IOU:
+                    continue
+
+                match_iou, scale_idx, anchor_idx = best_match
+                scale_data = prepared_scales[scale_idx]
+                gx = tx * scale_data["grid_w"]
+                gy = ty * scale_data["grid_h"]
+                grid_x = max(0, min(int(gx.item()), scale_data["grid_w"] - 1))
+                grid_y = max(0, min(int(gy.item()), scale_data["grid_h"] - 1))
+
+                anchor_w, anchor_h = scale_data["anchors"][anchor_idx]
+                scale_data["target_boxes"][b, grid_y, grid_x, anchor_idx, 0] = gx - grid_x
+                scale_data["target_boxes"][b, grid_y, grid_x, anchor_idx, 1] = gy - grid_y
+                scale_data["target_boxes"][b, grid_y, grid_x, anchor_idx, 2] = torch.log(tw / anchor_w + 1e-6)
+                scale_data["target_boxes"][b, grid_y, grid_x, anchor_idx, 3] = torch.log(th / anchor_h + 1e-6)
+                scale_data["target_boxes_abs"][b, grid_y, grid_x, anchor_idx] = torch.stack([tx * Config.IMG_SIZE, ty * Config.IMG_SIZE, tw, th])
+                scale_data["target_obj"][b, grid_y, grid_x, anchor_idx] = 1.0
+                scale_data["target_cls"][b, grid_y, grid_x, anchor_idx, cls_id] = 1.0
+                scale_data["target_match_iou"][b, grid_y, grid_x, anchor_idx] = match_iou
+
+        gt_boxes_abs_by_batch = [
+            torch.stack(sample_boxes).to(device=device, dtype=predictions[0].dtype)
+            if sample_boxes else torch.zeros((0, 4), device=device, dtype=predictions[0].dtype)
+            for sample_boxes in gt_boxes_abs_by_batch
+        ]
+
+        for scale_data in prepared_scales:
+            pred_boxes = scale_data["pred_boxes"]
+            pred_obj = scale_data["pred_obj"]
+            pred_cls = scale_data["pred_cls"]
+            target_obj = scale_data["target_obj"]
+            target_cls = scale_data["target_cls"]
+            target_boxes_abs = scale_data["target_boxes_abs"]
+            pred_boxes_abs = decode_boxes_to_absolute(pred_boxes, scale_data["anchors"], scale_data["stride"])
+
+            obj_mask = target_obj > 0.5
+            ignore_mask = torch.zeros_like(target_obj, dtype=torch.bool)
+            for b in range(batch_size):
+                gt_boxes_abs = gt_boxes_abs_by_batch[b]
+                if gt_boxes_abs.numel() == 0:
+                    continue
+                flat_pred_boxes = pred_boxes_abs[b].reshape(-1, 4)
+                max_iou = bbox_iou_matrix_xywh(flat_pred_boxes, gt_boxes_abs).max(dim=1).values
+                ignore_mask[b] = max_iou.view(scale_data["grid_h"], scale_data["grid_w"], 3) >= Config.NOOBJ_IGNORE_IOU
+
+            noobj_mask = (target_obj <= 0.5) & (~ignore_mask)
+
+            if obj_mask.any():
+                ciou = bbox_iou_xywh(pred_boxes_abs[obj_mask], target_boxes_abs[obj_mask], ciou=True)
+                box_loss = (1.0 - ciou).mean()
+                obj_loss = self.focal_loss(pred_obj[obj_mask], target_obj[obj_mask])
+                cls_loss = self.focal_loss(pred_cls[obj_mask], target_cls[obj_mask])
+            else:
+                box_loss = torch.zeros((), device=device)
+                obj_loss = torch.zeros((), device=device)
+                cls_loss = torch.zeros((), device=device)
+
+            if noobj_mask.any():
+                noobj_loss = self.focal_loss(pred_obj[noobj_mask], target_obj[noobj_mask])
+            else:
+                noobj_loss = torch.zeros((), device=device)
+
+            scale_loss = (
+                Config.BOX_WEIGHT * box_loss +
+                Config.OBJ_WEIGHT * obj_loss +
+                Config.NOOBJ_WEIGHT * noobj_loss +
+                Config.CLS_WEIGHT * cls_loss
+            )
+            total_loss = total_loss + scale_loss
+            component_sums["box"] = component_sums["box"] + box_loss.detach()
+            component_sums["obj"] = component_sums["obj"] + obj_loss.detach()
+            component_sums["noobj"] = component_sums["noobj"] + noobj_loss.detach()
+            component_sums["cls"] = component_sums["cls"] + cls_loss.detach()
+
+        self.last_components = {
+            "total": float(total_loss.detach().item()),
+            "box": float(component_sums["box"].item()),
+            "obj": float(component_sums["obj"].item()),
+            "noobj": float(component_sums["noobj"].item()),
+            "cls": float(component_sums["cls"].item()),
+        }
+        return total_loss, self.last_components
+
 def enhance_feature_for_display(feature_map):
     feature_map = np.asarray(feature_map, dtype=np.float32)
     low = np.percentile(feature_map, 2)
@@ -804,6 +1070,40 @@ def xywh_to_xyxy(boxes):
         boxes[:, 0] + half_w,
         boxes[:, 1] + half_h,
     ], dim=1)
+
+def bbox_iou_matrix_xywh(boxes1, boxes2, eps=1e-7):
+    boxes1 = boxes1.reshape(-1, 4)
+    boxes2 = boxes2.reshape(-1, 4)
+
+    if boxes1.numel() == 0 or boxes2.numel() == 0:
+        return torch.zeros(
+            (boxes1.shape[0], boxes2.shape[0]),
+            device=boxes1.device,
+            dtype=boxes1.dtype,
+        )
+
+    boxes1_xyxy = xywh_to_xyxy(boxes1)
+    boxes2_xyxy = xywh_to_xyxy(boxes2)
+
+    inter_x1 = torch.maximum(boxes1_xyxy[:, None, 0], boxes2_xyxy[None, :, 0])
+    inter_y1 = torch.maximum(boxes1_xyxy[:, None, 1], boxes2_xyxy[None, :, 1])
+    inter_x2 = torch.minimum(boxes1_xyxy[:, None, 2], boxes2_xyxy[None, :, 2])
+    inter_y2 = torch.minimum(boxes1_xyxy[:, None, 3], boxes2_xyxy[None, :, 3])
+
+    inter_w = (inter_x2 - inter_x1).clamp(min=0)
+    inter_h = (inter_y2 - inter_y1).clamp(min=0)
+    inter_area = inter_w * inter_h
+
+    area1 = (
+        (boxes1_xyxy[:, 2] - boxes1_xyxy[:, 0]).clamp(min=0) *
+        (boxes1_xyxy[:, 3] - boxes1_xyxy[:, 1]).clamp(min=0)
+    )
+    area2 = (
+        (boxes2_xyxy[:, 2] - boxes2_xyxy[:, 0]).clamp(min=0) *
+        (boxes2_xyxy[:, 3] - boxes2_xyxy[:, 1]).clamp(min=0)
+    )
+    union = area1[:, None] + area2[None, :] - inter_area + eps
+    return inter_area / union
 
 def bbox_iou_xywh(box1, box2, ciou=False, eps=1e-7):
     box1 = box1.reshape(-1, 4)
@@ -1073,6 +1373,7 @@ def log_all_parameters():
     log_to_file(f"  图像尺寸: {Config.IMG_SIZE}")
     log_to_file(f"  批次大小: {Config.BATCH_SIZE}")
     log_to_file(f"  训练轮数: {Config.EPOCHS}")
+    log_to_file(f"  Phase1/Phase2/Phase3: {Config.PHASE1_STUDENT_EPOCHS} / {Config.PHASE2_DETECTOR_EPOCHS} / {Config.PHASE3_JOINT_EPOCHS}")
     
     log_to_file("\n【损失权重】")
     log_to_file(f"  边界框损失权重: {Config.BOX_WEIGHT}")
@@ -1110,6 +1411,9 @@ def log_all_parameters():
     log_to_file(f"  优化器: {Config.OPTIMIZER}")
     log_to_file(f"  学习率: {Config.LEARNING_RATE}")
     log_to_file(f"  权重衰减: {Config.WEIGHT_DECAY}")
+    log_to_file(f"  Student-only LR: {Config.STUDENT_ONLY_LR}")
+    log_to_file(f"  Detector-only LR: {Config.DETECTOR_ONLY_LR}")
+    log_to_file(f"  Joint student/detector LR: {Config.JOINT_STUDENT_LR} / {Config.JOINT_DETECTOR_LR}")
     
     log_to_file("\n【光学参数】")
     log_to_file(f"  波长: {Config.WAVELENGTH}")
@@ -1122,6 +1426,8 @@ def log_all_parameters():
     log_to_file(f"  日志文件: {Config.LOG_FILE}")
     log_to_file(f"  可视化结果: {Config.VISUALIZATION_DIR}")
     log_to_file(f"  模型保存: {Config.get_final_model_path()}")
+    log_to_file(f"  检测头最佳/最终保存: {Config.get_detector_best_model_path()} / {Config.get_detector_final_model_path()}")
+    log_to_file(f"  Phase2 学生/检测头最佳保存: {Config.get_phase2_student_best_model_path()} / {Config.get_phase2_detector_best_model_path()}")
     log_to_file(f"  教师权重: {Config.TEACHER_CHECKPOINT}")
     log_to_file(f"  检测头权重: {Config.DETECTOR_CHECKPOINT}")
 
@@ -1131,6 +1437,9 @@ def log_all_parameters():
     log_to_file(f"  Use detection response loss: {Config.USE_DETECTION_RESPONSE_LOSS}")
     log_to_file(f"  Response map weight: {Config.RESPONSE_MAP_WEIGHT}")
     log_to_file(f"  Response warmup epochs / start factor: {Config.RESPONSE_WARMUP_EPOCHS} / {Config.RESPONSE_WARMUP_START_FACTOR}")
+    log_to_file(f"  Detection loss weight phase2/phase3: {Config.DETECTION_LOSS_WEIGHT_PHASE2} / {Config.DETECTION_LOSS_WEIGHT_PHASE3}")
+    log_to_file(f"  Feature loss weight phase1/phase3: {Config.FEATURE_LOSS_WEIGHT_PHASE1} / {Config.FEATURE_LOSS_WEIGHT_PHASE3}")
+    log_to_file(f"  Response loss weight phase1/phase3: {Config.RESPONSE_LOSS_WEIGHT_PHASE1} / {Config.RESPONSE_LOSS_WEIGHT_PHASE3}")
     log_to_file("\n【稳定性控制】")
     log_to_file(f"  Norm strategy: {Config.NORM_STRATEGY}")
     log_to_file(f"  Norm enable epoch: {Config.NORM_ENABLE_EPOCH}")
@@ -1139,6 +1448,8 @@ def log_all_parameters():
     log_to_file(f"  Scheduler factor / patience / min lr: {Config.LR_SCHEDULER_FACTOR} / {Config.LR_SCHEDULER_PATIENCE} / {Config.MIN_LEARNING_RATE}")
     log_to_file(f"  Divergence ratio / patience: {Config.DIVERGENCE_RATIO} / {Config.DIVERGENCE_PATIENCE}")
     log_to_file(f"  Final model source: {Config.FINAL_MODEL_SOURCE}")
+    log_to_file(f"  Restore phase1 best for phase2: {Config.RESTORE_PHASE1_BEST_FOR_PHASE2}")
+    log_to_file(f"  Restore phase2 best for phase3: {Config.RESTORE_PHASE2_BEST_FOR_PHASE3}")
     
     log_to_file("\n" + "="*80)
     log_to_file("参数设置输出完成")
@@ -1165,152 +1476,300 @@ def train():
         p.requires_grad = False
     log_to_file("教师网络参数已冻结")
 
-    detector = None
+    response_detector = None
     if Config.USE_DETECTION_RESPONSE_LOSS:
         log_to_file("初始化冻结检测头（YOLOLightHead）用于 response map 约束...")
-        detector = YOLOLightHead(
+        response_detector = YOLOLightHead(
             in_channels=Config.YOLO_HEAD_IN_CHANNELS,
             out_channels=Config.get_detector_output_channels(),
         ).to(device)
-        detector_loaded, detector_message = load_detector_checkpoint(detector, Config.DETECTOR_CHECKPOINT, device)
+        detector_loaded, detector_message = load_detector_checkpoint(response_detector, Config.DETECTOR_CHECKPOINT, device)
         log_to_file(detector_message)
         if detector_loaded:
-            detector.eval()
-            for p in detector.parameters():
+            response_detector.eval()
+            for p in response_detector.parameters():
                 p.requires_grad = False
             log_to_file("已启用检测响应图约束")
         else:
-            detector = None
+            response_detector = None
             log_to_file("检测头权重不可用，跳过 response map 约束")
 
     log_to_file("初始化学生网络（OpticalStudent）...")
     student = OpticalStudent().to(device)
     student.enable_norm = Config.should_enable_student_norm(epoch=0)
+
+    log_to_file("初始化可训练检测头（YOLOLightHead）...")
+    detector = YOLOLightHead(
+        in_channels=Config.YOLO_HEAD_IN_CHANNELS,
+        out_channels=Config.get_detector_output_channels(),
+    ).to(device)
+    trainable_detector_loaded, trainable_detector_message = load_detector_checkpoint(detector, Config.DETECTOR_CHECKPOINT, device)
+    log_to_file(trainable_detector_message if trainable_detector_loaded else f"Trainable detector init fallback: {trainable_detector_message}")
     
     log_to_file("加载数据集...")
     dataset = MilitaryFeatureDataset(teacher=teacher, device=device)
-    loader = DataLoader(dataset, batch_size=Config.BATCH_SIZE, shuffle=True)
+    loader = DataLoader(
+        dataset,
+        batch_size=Config.BATCH_SIZE,
+        shuffle=True,
+        collate_fn=feature_dataset_collate_fn,
+    )
     log_to_file(f"数据集大小: {len(dataset)}")
-    
-    optimizer = torch.optim.Adam(student.parameters(), lr=Config.LEARNING_RATE, weight_decay=Config.WEIGHT_DECAY)
-    scheduler = None
-    if Config.USE_LR_SCHEDULER:
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode="min",
-            factor=Config.LR_SCHEDULER_FACTOR,
-            patience=Config.LR_SCHEDULER_PATIENCE,
-            min_lr=Config.MIN_LEARNING_RATE,
-        )
-    criterion = CompositeOpticalFeatureLoss()
+
+    feature_criterion = CompositeOpticalFeatureLoss()
+    detection_criterion = DetectionAdaptationLoss(
+        anchors=Config.ANCHORS,
+        num_classes=Config.NUM_CLASSES,
+        strides=Config.STRIDES,
+    )
     
     vis_dir = Config.VISUALIZATION_DIR
     
     loss_curve = []
-    best_total_loss = float('inf')
-    best_feature_loss = float('inf')
-    best_feature_epoch = -1
-    best_feature_state = None
-    divergence_counter = 0
+    best_phase1_feature_loss = float('inf')
+    best_phase1_epoch = -1
+    best_phase1_student_state = None
+    best_phase2_detection_loss = float('inf')
+    best_phase2_epoch = -1
+    best_phase2_student_state = None
+    best_phase2_detector_state = None
+    best_joint_loss = float('inf')
+    best_joint_epoch = -1
+    best_student_state = None
+    best_detector_state = None
+    current_phase = None
+    optimizer = None
+    scheduler = None
     
     log_to_file("="*60)
-    log_to_file("开始训练光学相位层...")
+    log_to_file("开始三阶段训练：学生 -> 检测头 -> 联合平衡 ...")
     log_to_file("="*60)
-    
+
+    def set_requires_grad(module, flag):
+        for param in module.parameters():
+            param.requires_grad = flag
+
+    def configure_phase(phase_name):
+        nonlocal optimizer, scheduler
+        if phase_name == "student_only":
+            set_requires_grad(student, True)
+            set_requires_grad(detector, False)
+            optimizer = torch.optim.Adam(student.parameters(), lr=Config.STUDENT_ONLY_LR, weight_decay=Config.WEIGHT_DECAY)
+        elif phase_name == "detector_only":
+            if Config.RESTORE_PHASE1_BEST_FOR_PHASE2 and best_phase1_student_state is not None:
+                student.load_state_dict(best_phase1_student_state, strict=False)
+                log_to_file(
+                    f"Phase switch -> detector_only: restored phase1 best student "
+                    f"(epoch={best_phase1_epoch}, feature={best_phase1_feature_loss:.6f})"
+                )
+            set_requires_grad(student, False)
+            set_requires_grad(detector, True)
+            optimizer = torch.optim.Adam(detector.parameters(), lr=Config.DETECTOR_ONLY_LR, weight_decay=Config.WEIGHT_DECAY)
+        else:
+            if Config.RESTORE_PHASE2_BEST_FOR_PHASE3 and best_phase2_student_state is not None and best_phase2_detector_state is not None:
+                student.load_state_dict(best_phase2_student_state, strict=False)
+                detector.load_state_dict(best_phase2_detector_state, strict=False)
+                log_to_file(
+                    f"Phase switch -> joint_balance: restored phase2 best pair "
+                    f"(epoch={best_phase2_epoch}, detection={best_phase2_detection_loss:.6f})"
+                )
+            set_requires_grad(student, True)
+            set_requires_grad(detector, True)
+            optimizer = torch.optim.Adam([
+                {"params": student.parameters(), "lr": Config.JOINT_STUDENT_LR},
+                {"params": detector.parameters(), "lr": Config.JOINT_DETECTOR_LR},
+            ], weight_decay=Config.WEIGHT_DECAY)
+
+        scheduler = None
+        if Config.USE_LR_SCHEDULER:
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                factor=Config.LR_SCHEDULER_FACTOR,
+                patience=Config.LR_SCHEDULER_PATIENCE,
+                min_lr=Config.MIN_LEARNING_RATE,
+            )
+        log_to_file(f"切换训练阶段: {phase_name}")
+
     for epoch in range(Config.EPOCHS):
+        phase_name = Config.get_training_phase(epoch)
+        if phase_name != current_phase:
+            current_phase = phase_name
+            configure_phase(current_phase)
+
         desired_norm = Config.should_enable_student_norm(epoch)
         if student.enable_norm != desired_norm:
             student.enable_norm = desired_norm
             log_to_file(f"Epoch {epoch}: 学生输出归一化切换为 {student.enable_norm}")
 
         current_response_weight = Config.get_response_loss_weight(epoch)
-        student.train()
+        student.train(mode=current_phase != "detector_only")
+        detector.train(mode=current_phase != "student_only")
         loss_sum = 0
         feature_loss_sum = 0
         response_loss_sum = 0
         response_raw_sum = 0
-        
-        for x, t in tqdm(loader, desc=f"Epoch {epoch}/{Config.EPOCHS}", leave=True):
+        detection_loss_sum = 0
+        detection_box_sum = 0
+        detection_obj_sum = 0
+        detection_noobj_sum = 0
+        detection_cls_sum = 0
+
+        for x, t, targets in tqdm(loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{current_phase}]", leave=True):
             x = x.to(device)
             t = t.to(device)
-            y = student(x)
-            feature_loss, _ = criterion(y, t, student)
-            response_loss, response_stats = compute_detection_response_loss(
-                detector,
-                y,
-                t,
-                response_weight=current_response_weight,
-            )
-            loss = feature_loss + response_loss
+            targets = [target.to(device) for target in targets]
+
+            if current_phase == "student_only":
+                y = student(x)
+                feature_loss, _ = feature_criterion(y, t, student)
+                response_loss, response_stats = compute_detection_response_loss(
+                    response_detector,
+                    y,
+                    t,
+                    response_weight=current_response_weight,
+                )
+                detection_loss = torch.zeros((), device=device)
+                detection_stats = {"box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
+                loss = (
+                    Config.FEATURE_LOSS_WEIGHT_PHASE1 * feature_loss +
+                    Config.RESPONSE_LOSS_WEIGHT_PHASE1 * response_loss
+                )
+            elif current_phase == "detector_only":
+                with torch.no_grad():
+                    y = student(x)
+                    feature_loss, _ = feature_criterion(y, t, student)
+                    response_loss, response_stats = compute_detection_response_loss(
+                        response_detector,
+                        y,
+                        t,
+                        response_weight=current_response_weight,
+                    )
+                predictions = detector(y.detach())
+                detection_loss, detection_stats = detection_criterion(predictions, targets)
+                loss = Config.DETECTION_LOSS_WEIGHT_PHASE2 * detection_loss
+            else:
+                y = student(x)
+                feature_loss, _ = feature_criterion(y, t, student)
+                response_loss, response_stats = compute_detection_response_loss(
+                    response_detector,
+                    y,
+                    t,
+                    response_weight=current_response_weight,
+                )
+                predictions = detector(y)
+                detection_loss, detection_stats = detection_criterion(predictions, targets)
+                loss = (
+                    Config.FEATURE_LOSS_WEIGHT_PHASE3 * feature_loss +
+                    Config.RESPONSE_LOSS_WEIGHT_PHASE3 * response_loss +
+                    Config.DETECTION_LOSS_WEIGHT_PHASE3 * detection_loss
+                )
+
             optimizer.zero_grad()
             loss.backward()
             if Config.GRAD_CLIP_NORM and Config.GRAD_CLIP_NORM > 0:
-                torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=Config.GRAD_CLIP_NORM)
+                torch.nn.utils.clip_grad_norm_(
+                    [param for param in list(student.parameters()) + list(detector.parameters()) if param.requires_grad],
+                    max_norm=Config.GRAD_CLIP_NORM,
+                )
             optimizer.step()
             loss_sum += loss.item()
             feature_loss_sum += feature_loss.item()
             response_loss_sum += response_loss.item()
             response_raw_sum += response_stats["response"]
+            detection_loss_sum += detection_loss.item()
+            detection_box_sum += detection_stats["box"]
+            detection_obj_sum += detection_stats["obj"]
+            detection_noobj_sum += detection_stats["noobj"]
+            detection_cls_sum += detection_stats["cls"]
 
         avg_loss = loss_sum / len(loader)
         avg_feature_loss = feature_loss_sum / len(loader)
         avg_response_loss = response_loss_sum / len(loader)
         avg_response_raw = response_raw_sum / len(loader)
+        avg_detection_loss = detection_loss_sum / len(loader)
+        avg_detection_box = detection_box_sum / len(loader)
+        avg_detection_obj = detection_obj_sum / len(loader)
+        avg_detection_noobj = detection_noobj_sum / len(loader)
+        avg_detection_cls = detection_cls_sum / len(loader)
         loss_curve.append(avg_loss)
 
-        if scheduler is not None:
-            scheduler.step(avg_feature_loss)
-        
-        if avg_loss < best_total_loss:
-            best_total_loss = avg_loss
+        if current_phase == "student_only":
+            monitor_value = avg_feature_loss
+        elif current_phase == "detector_only":
+            monitor_value = avg_detection_loss
+        else:
+            monitor_value = avg_loss
 
-        if avg_feature_loss < best_feature_loss:
-            best_feature_loss = avg_feature_loss
-            best_feature_epoch = epoch
-            best_feature_state = copy.deepcopy(student.state_dict())
-            best_model_path = Config.get_best_model_path()
-            torch.save(best_feature_state, best_model_path)
+        if scheduler is not None:
+            scheduler.step(monitor_value)
+
+        if current_phase == "student_only" and avg_feature_loss < best_phase1_feature_loss:
+            best_phase1_feature_loss = avg_feature_loss
+            best_phase1_epoch = epoch
+            best_phase1_student_state = copy.deepcopy(student.state_dict())
+            torch.save(best_phase1_student_state, Config.get_phase1_student_best_model_path())
             log_to_file(
-                f"Epoch {epoch}: 保存最佳特征模型 "
-                f"(Feature: {best_feature_loss:.6f}, Total: {avg_loss:.6f})",
+                f"Epoch {epoch}: 保存 phase1 最佳学生模型 "
+                f"(Feature: {best_phase1_feature_loss:.6f})",
                 also_print=False,
             )
-            divergence_counter = 0
-        elif avg_feature_loss > best_feature_loss * Config.DIVERGENCE_RATIO:
-            divergence_counter += 1
+
+        if current_phase == "detector_only" and avg_detection_loss < best_phase2_detection_loss:
+            best_phase2_detection_loss = avg_detection_loss
+            best_phase2_epoch = epoch
+            best_phase2_student_state = copy.deepcopy(student.state_dict())
+            best_phase2_detector_state = copy.deepcopy(detector.state_dict())
+            torch.save(best_phase2_student_state, Config.get_phase2_student_best_model_path())
+            torch.save(best_phase2_detector_state, Config.get_phase2_detector_best_model_path())
             log_to_file(
-                f"Epoch {epoch}: 检测到特征损失异常抬升 "
-                f"(current={avg_feature_loss:.6f}, best={best_feature_loss:.6f}, "
-                f"counter={divergence_counter}/{Config.DIVERGENCE_PATIENCE})"
+                f"Epoch {epoch}: 保存 phase2 最佳学生+检测头配对模型 "
+                f"(Detection: {best_phase2_detection_loss:.6f})",
+                also_print=False,
             )
-        else:
-            divergence_counter = 0
-        
+
+        if current_phase in {"detector_only", "joint_balance"} and monitor_value < best_joint_loss:
+            best_joint_loss = monitor_value
+            best_joint_epoch = epoch
+            best_student_state = copy.deepcopy(student.state_dict())
+            best_detector_state = copy.deepcopy(detector.state_dict())
+            torch.save(best_student_state, Config.get_best_model_path())
+            torch.save(best_detector_state, Config.get_detector_best_model_path())
+            log_to_file(
+                f"Epoch {epoch}: 保存最佳学生+检测头配对模型 "
+                f"(phase={current_phase}, monitor={best_joint_loss:.6f})",
+                also_print=False,
+            )
+
         if epoch % Config.VIS_INTERVAL == 0:
             student.eval()
+            detector.eval()
             with torch.no_grad():
-                vis_loader = torch.utils.data.DataLoader(dataset, batch_size=Config.VIS_BATCH_SIZE, shuffle=True)
+                vis_loader = torch.utils.data.DataLoader(
+                    dataset,
+                    batch_size=Config.VIS_BATCH_SIZE,
+                    shuffle=True,
+                    collate_fn=feature_dataset_collate_fn,
+                )
                 vis_batch = next(iter(vis_loader))
-                x_vis, t_vis = vis_batch
+                x_vis, t_vis, _ = vis_batch
                 x_vis = x_vis.to(device)
-                t_vis = t_vis
+                t_vis = t_vis.to(device)
                 y_vis = student(x_vis).cpu()
+                detections_vis = decode_detections(detector(student(x_vis)))
             save_feature_comparison(epoch, t_vis, y_vis, vis_dir, input_images=x_vis.cpu())
+            save_detection_visualization(x_vis.cpu(), detections_vis, vis_dir, epoch, Config.CLASS_NAMES)
 
         log_to_file(
-            f"Epoch {epoch:3d} | Loss: {avg_loss:.6f} | "
+            f"Epoch {epoch:3d} [{current_phase}] | Loss: {avg_loss:.6f} | "
             f"Feature: {avg_feature_loss:.6f} | "
             f"ResponseRaw: {avg_response_raw:.6f} | "
             f"ResponseWeighted: {avg_response_loss:.6f} | "
+            f"Detection: {avg_detection_loss:.6f} | "
+            f"DetBox/Obj/NoObj/Cls: {avg_detection_box:.4f}/{avg_detection_obj:.4f}/{avg_detection_noobj:.4f}/{avg_detection_cls:.4f} | "
             f"RespW: {current_response_weight:.6f} | "
-            f"LR: {optimizer.param_groups[0]['lr']:.6g}"
+            f"LR: {','.join(f'{group['lr']:.6g}' for group in optimizer.param_groups)}"
         )
-
-        if divergence_counter >= Config.DIVERGENCE_PATIENCE:
-            log_to_file(
-                f"Epoch {epoch}: 连续 {Config.DIVERGENCE_PATIENCE} 轮出现特征损失异常抬升，提前停止训练并回退到最佳特征模型。"
-            )
-            break
 
     plt.figure(figsize=(10, 6))
     plt.plot(loss_curve, label="Train Loss")
@@ -1322,25 +1781,37 @@ def train():
     plt.savefig(Config.get_loss_curve_path(), dpi=Config.VIS_DPI)
     plt.close()
 
-    last_model_path = Config.get_last_model_path()
-    torch.save(student.state_dict(), last_model_path)
+    last_student_path = Config.get_last_model_path()
+    last_detector_path = Config.get_detector_last_model_path()
+    torch.save(student.state_dict(), last_student_path)
+    torch.save(detector.state_dict(), last_detector_path)
 
-    if Config.FINAL_MODEL_SOURCE == "best_feature" and best_feature_state is not None:
-        model_save_state = best_feature_state
+    if Config.FINAL_MODEL_SOURCE == "best_joint" and best_student_state is not None and best_detector_state is not None:
+        final_student_state = best_student_state
+        final_detector_state = best_detector_state
     else:
-        model_save_state = student.state_dict()
+        final_student_state = student.state_dict()
+        final_detector_state = detector.state_dict()
 
-    model_save_path = Config.get_final_model_path()
-    torch.save(model_save_state, model_save_path)
+    final_student_path = Config.get_final_model_path()
+    final_detector_path = Config.get_detector_final_model_path()
+    torch.save(final_student_state, final_student_path)
+    torch.save(final_detector_state, final_detector_path)
     
     log_to_file("="*60)
     log_to_file("训练完成！")
     log_to_file(f"最佳模型已保存到: {Config.get_best_model_path()}")
-    log_to_file(f"最后一轮模型已保存到: {last_model_path}")
-    log_to_file(f"最终模型已保存到: {model_save_path}")
-    log_to_file(f"最佳特征轮数: {best_feature_epoch}")
-    log_to_file(f"最佳特征损失: {best_feature_loss:.6f}")
-    log_to_file(f"最佳总损失: {best_total_loss:.6f}")
+    log_to_file(f"最佳检测头已保存到: {Config.get_detector_best_model_path()}")
+    log_to_file(f"Phase1 最佳学生模型: {Config.get_phase1_student_best_model_path()} (epoch={best_phase1_epoch})")
+    log_to_file(
+        f"Phase2 最佳学生/检测头模型: "
+        f"{Config.get_phase2_student_best_model_path()} / {Config.get_phase2_detector_best_model_path()} "
+        f"(epoch={best_phase2_epoch})"
+    )
+    log_to_file(f"最后一轮学生/检测头模型: {last_student_path} / {last_detector_path}")
+    log_to_file(f"最终学生/检测头模型: {final_student_path} / {final_detector_path}")
+    log_to_file(f"最佳联合轮数: {best_joint_epoch}")
+    log_to_file(f"最佳联合监控损失: {best_joint_loss:.6f}")
     log_to_file(f"所有结果已保存到: {Config.TEACHER_OUTPUT_DIR}")
     log_to_file("="*60)
 
