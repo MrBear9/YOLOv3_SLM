@@ -1268,6 +1268,13 @@ def decode_detections(preds, conf_thresh=None, nms_thresh=None, max_det=None, im
 # =========================================================
 def save_feature_comparison(epoch, teacher, student, save_dir, prefix="train", idx=None, input_images=None):
     os.makedirs(save_dir, exist_ok=True)
+
+    if torch.is_tensor(teacher):
+        teacher = teacher.detach().cpu()
+    if torch.is_tensor(student):
+        student = student.detach().cpu()
+    if input_images is not None and torch.is_tensor(input_images):
+        input_images = input_images.detach().cpu()
     
     if idx is None:
         batch_size = min(Config.VIS_BATCH_SIZE, teacher.shape[0])
@@ -1755,9 +1762,10 @@ def train():
                 x_vis, t_vis, _ = vis_batch
                 x_vis = x_vis.to(device)
                 t_vis = t_vis.to(device)
-                y_vis = student(x_vis).cpu()
-                detections_vis = decode_detections(detector(student(x_vis)))
-            save_feature_comparison(epoch, t_vis, y_vis, vis_dir, input_images=x_vis.cpu())
+                y_vis_gpu = student(x_vis)
+                y_vis = y_vis_gpu.cpu()
+                detections_vis = decode_detections(detector(y_vis_gpu))
+            save_feature_comparison(epoch, t_vis, y_vis, vis_dir, input_images=x_vis)
             save_detection_visualization(x_vis.cpu(), detections_vis, vis_dir, epoch, Config.CLASS_NAMES)
 
         log_to_file(
