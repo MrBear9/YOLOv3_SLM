@@ -9,11 +9,42 @@ from torchvision.ops import nms
 import os
 import cv2
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from datetime import datetime
 from PIL import Image
 import copy
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def resolve_project_path(path):
+    if not path:
+        return path
+    if os.path.isabs(path):
+        return path
+    return os.path.join(PROJECT_ROOT, path)
+
+
+def should_use_channels_last():
+    return torch.cuda.is_available() and getattr(Config, "ENABLE_CHANNELS_LAST", False)
+
+
+def prepare_tensor_for_device(tensor, device, *, channels_last=False):
+    tensor = tensor.to(device, non_blocking=Config.PIN_MEMORY)
+    if not tensor.is_floating_point():
+        return tensor
+    if channels_last and tensor.dim() == 4 and should_use_channels_last():
+        return tensor.contiguous(memory_format=torch.channels_last)
+    return tensor.contiguous()
+
+
+def prepare_conv_tensor(tensor):
+    if tensor.is_floating_point() and tensor.dim() == 4 and should_use_channels_last():
+        return tensor.contiguous(memory_format=torch.channels_last)
+    return tensor.contiguous() if tensor.is_floating_point() else tensor
 
 def extract_state_dict(checkpoint):
     if not isinstance(checkpoint, dict):
@@ -27,6 +58,7 @@ def extract_state_dict(checkpoint):
 def load_teacher_checkpoint(teacher, checkpoint_path, device):
     if not checkpoint_path:
         return False, "Teacher checkpoint: not configured"
+    checkpoint_path = resolve_project_path(checkpoint_path)
     if not os.path.exists(checkpoint_path):
         return False, f"Teacher checkpoint not found: {checkpoint_path}"
 
@@ -53,6 +85,7 @@ def load_teacher_checkpoint(teacher, checkpoint_path, device):
 def load_detector_checkpoint(detector, checkpoint_path, device):
     if not checkpoint_path:
         return False, "Detector checkpoint: not configured"
+    checkpoint_path = resolve_project_path(checkpoint_path)
     if not os.path.exists(checkpoint_path):
         return False, f"Detector checkpoint not found: {checkpoint_path}"
 
@@ -253,17 +286,24 @@ class Config:
     NUM_WORKERS = min(8, os.cpu_count() or 0)
     PIN_MEMORY = torch.cuda.is_available()
     PERSISTENT_WORKERS = True
+    ENABLE_CUDNN_BENCHMARK = True  # 是否启用 cudnn_benchmark，提高推理效率
+    ENABLE_CHANNELS_LAST = False  # 是否使用 channels_last 格式，提高内存效率
     
     @classmethod
     def initialize(cls):
         """初始化配置，加载类别信息和创建输出目录"""
+        cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
+        cls.TEACHER_OUTPUT_DIR = resolve_project_path(cls.TEACHER_OUTPUT_DIR)
+        cls.TEACHER_CHECKPOINT = resolve_project_path(cls.TEACHER_CHECKPOINT)
+        cls.DETECTOR_CHECKPOINT = resolve_project_path(cls.DETECTOR_CHECKPOINT)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
         cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
         cls.ANCHOR_SOURCE = "default"
         if cls.USE_EXTERNAL_ANCHORS:
             try:
-                cls.ANCHORS = load_anchor_groups(cls.ANCHOR_CONFIG_PATH)
-                cls.ANCHOR_SOURCE = cls.ANCHOR_CONFIG_PATH
+                anchor_config_path = resolve_project_path(cls.ANCHOR_CONFIG_PATH)
+                cls.ANCHORS = load_anchor_groups(anchor_config_path)
+                cls.ANCHOR_SOURCE = anchor_config_path
             except Exception as exc:
                 cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
                 cls.ANCHOR_SOURCE = f"default (external load failed: {exc})"
@@ -400,9 +440,11 @@ def get_runtime_device():
     return torch.device(f"cuda:{Config.GPU_IDS[0]}") if Config.GPU_IDS else torch.device("cpu")
 
 
-def wrap_data_parallel(module, module_name="module"):
+def wrap_data_parallel(module, module_name="module", use_channels_last=False):
     device = get_runtime_device()
     module = module.to(device)
+    if use_channels_last and should_use_channels_last():
+        module = module.to(memory_format=torch.channels_last)
     if len(Config.GPU_IDS) > 1:
         module = nn.DataParallel(module, device_ids=Config.GPU_IDS, output_device=Config.GPU_IDS[0])
         log_to_file(f"{module_name} wrapped with DataParallel on GPUs: {Config.GPU_IDS}")
@@ -920,11 +962,11 @@ def compute_detection_response_loss(detector, student_feature, teacher_feature, 
     if response_weight is None:
         response_weight = Config.RESPONSE_MAP_WEIGHT
 
-    student_preds = detector(student_feature)
+    student_preds = detector(prepare_conv_tensor(student_feature))
     student_response = normalize_response_map(prediction_response_tensor(student_preds))
 
     with torch.no_grad():
-        teacher_preds = detector(teacher_feature.detach())
+        teacher_preds = detector(prepare_conv_tensor(teacher_feature.detach()))
         teacher_response = normalize_response_map(prediction_response_tensor(teacher_preds))
 
     response_loss = F.mse_loss(student_response, teacher_response)
@@ -1457,6 +1499,8 @@ def log_all_parameters():
     log_to_file(f"  训练轮数: {Config.EPOCHS}")
     log_to_file(f"  Phase1/Phase2/Phase3: {Config.PHASE1_STUDENT_EPOCHS} / {Config.PHASE2_DETECTOR_EPOCHS} / {Config.PHASE3_JOINT_EPOCHS}")
     log_to_file(f"  Num workers / pin memory: {Config.NUM_WORKERS} / {Config.PIN_MEMORY}")
+    log_to_file(f"  CuDNN benchmark / channels last: {Config.ENABLE_CUDNN_BENCHMARK} / {Config.ENABLE_CHANNELS_LAST and torch.cuda.is_available()}")
+    log_to_file("  Winograd: 由 cuDNN 在 benchmark 开启时自动选择可用卷积算法")
     
     log_to_file("\n【损失权重】")
     log_to_file(f"  边界框损失权重: {Config.BOX_WEIGHT}")
@@ -1551,11 +1595,15 @@ def train():
     log_all_parameters()
     device = get_runtime_device()
     if device.type == "cuda":
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = Config.ENABLE_CUDNN_BENCHMARK
     log_to_file(f"使用设备: {device}")
     log_to_file(f"检测到 GPU 数量: {torch.cuda.device_count()}")
     
     log_to_file("初始化教师网络（ConvTeacher）...")
+    log_to_file(
+        f"Acceleration active: cudnn_benchmark={device.type == 'cuda' and Config.ENABLE_CUDNN_BENCHMARK}, "
+        f"channels_last={device.type == 'cuda' and Config.ENABLE_CHANNELS_LAST}"
+    )
     teacher = ConvTeacher().to(device)
     teacher_loaded, teacher_message = load_teacher_checkpoint(teacher, Config.TEACHER_CHECKPOINT, device)
     log_to_file(teacher_message)
@@ -1567,7 +1615,7 @@ def train():
     for p in teacher.parameters():
         p.requires_grad = False
     teacher.eval()
-    teacher = wrap_data_parallel(teacher, module_name="ConvTeacher")
+    teacher = wrap_data_parallel(teacher, module_name="ConvTeacher", use_channels_last=True)
     log_to_file("教师网络参数已冻结")
 
     response_detector = None
@@ -1583,7 +1631,7 @@ def train():
             response_detector.eval()
             for p in response_detector.parameters():
                 p.requires_grad = False
-            response_detector = wrap_data_parallel(response_detector, module_name="ResponseDetector")
+            response_detector = wrap_data_parallel(response_detector, module_name="ResponseDetector", use_channels_last=True)
             log_to_file("已启用检测响应图约束")
         else:
             response_detector = None
@@ -1592,7 +1640,7 @@ def train():
     log_to_file("初始化学生网络（OpticalStudent）...")
     student = OpticalStudent().to(device)
     unwrap_module(student).enable_norm = Config.should_enable_student_norm(epoch=0)
-    student = wrap_data_parallel(student, module_name="OpticalStudent")
+    student = wrap_data_parallel(student, module_name="OpticalStudent", use_channels_last=False)
 
     log_to_file("初始化可训练检测头（YOLOLightHead）...")
     detector = YOLOLightHead(
@@ -1601,7 +1649,7 @@ def train():
     ).to(device)
     trainable_detector_loaded, trainable_detector_message = load_detector_checkpoint(detector, Config.DETECTOR_CHECKPOINT, device)
     log_to_file(trainable_detector_message if trainable_detector_loaded else f"Trainable detector init fallback: {trainable_detector_message}")
-    detector = wrap_data_parallel(detector, module_name="TrainableDetector")
+    detector = wrap_data_parallel(detector, module_name="TrainableDetector", use_channels_last=True)
     
     log_to_file("加载数据集...")
     dataset = MilitaryFeatureDataset()
@@ -1715,8 +1763,8 @@ def train():
         detection_cls_sum = 0
 
         for x, rgb, targets in tqdm(loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{current_phase}]", leave=True):
-            x = x.to(device, non_blocking=Config.PIN_MEMORY)
-            rgb = rgb.to(device, non_blocking=Config.PIN_MEMORY)
+            x = prepare_tensor_for_device(x, device, channels_last=False)
+            rgb = prepare_tensor_for_device(rgb, device, channels_last=True)
             targets = [target.to(device, non_blocking=Config.PIN_MEMORY) for target in targets]
             with torch.no_grad():
                 t = teacher(rgb)
@@ -1747,7 +1795,7 @@ def train():
                         t,
                         response_weight=current_response_weight,
                     )
-                predictions = detector(y.detach())
+                predictions = detector(prepare_conv_tensor(y.detach()))
                 detection_loss, detection_stats = detection_criterion(predictions, targets)
                 loss = Config.DETECTION_LOSS_WEIGHT_PHASE2 * detection_loss
             else:
@@ -1759,7 +1807,7 @@ def train():
                     t,
                     response_weight=current_response_weight,
                 )
-                predictions = detector(y)
+                predictions = detector(prepare_conv_tensor(y))
                 detection_loss, detection_stats = detection_criterion(predictions, targets)
                 loss = (
                     Config.FEATURE_LOSS_WEIGHT_PHASE3 * feature_loss +
@@ -1855,19 +1903,20 @@ def train():
                 )
                 vis_batch = next(iter(vis_loader))
                 x_vis, rgb_vis, _ = vis_batch
-                x_vis = x_vis.to(device, non_blocking=Config.PIN_MEMORY)
-                rgb_vis = rgb_vis.to(device, non_blocking=Config.PIN_MEMORY)
+                x_vis = prepare_tensor_for_device(x_vis, device, channels_last=False)
+                rgb_vis = prepare_tensor_for_device(rgb_vis, device, channels_last=True)
                 t_vis = teacher(rgb_vis)
                 t_vis = F.interpolate(t_vis, size=(Config.IMG_SIZE, Config.IMG_SIZE), mode="bilinear", align_corners=False)
                 y_vis_gpu = student(x_vis)
                 y_vis = y_vis_gpu.cpu()
-                detections_vis = decode_detections(detector(y_vis_gpu))
+                detections_vis = decode_detections(detector(prepare_conv_tensor(y_vis_gpu)))
             save_feature_comparison(epoch, t_vis, y_vis, vis_dir, input_images=x_vis)
             save_detection_visualization(x_vis.cpu(), detections_vis, vis_dir, epoch, Config.CLASS_NAMES)
             save_phase_visualization(student, vis_dir, epoch)
 
         phase_stats = get_phase_statistics(student)
 
+        lr_str = ','.join(f"{group['lr']:.6g}" for group in optimizer.param_groups)
         log_to_file(
             f"Epoch {epoch:3d} [{current_phase}] | Loss: {avg_loss:.6f} | "
             f"Feature: {avg_feature_loss:.6f} | "
@@ -1878,7 +1927,7 @@ def train():
             f"PhaseSpan(slm1/slm2): {phase_stats['slm1_raw_span']:.4f}/{phase_stats['slm2_raw_span']:.4f} | "
             f"PhaseStd(slm1/slm2): {phase_stats['slm1_eff_std']:.4f}/{phase_stats['slm2_eff_std']:.4f} | "
             f"RespW: {current_response_weight:.6f} | "
-            f"LR: {','.join(f'{group['lr']:.6g}' for group in optimizer.param_groups)}"
+            f"LR: {lr_str}"
         )
 
     plt.figure(figsize=(10, 6))

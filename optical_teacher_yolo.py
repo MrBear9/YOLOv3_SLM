@@ -9,6 +9,8 @@ from torchvision.ops import nms
 import os
 import cv2
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from datetime import datetime
@@ -18,6 +20,14 @@ from collections import Counter
 
 # 本地实现所有需要的函数，避免依赖optical_teacher.py的配置
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def resolve_project_path(path):
+    if not path:
+        return path
+    if os.path.isabs(path):
+        return path
+    return os.path.join(PROJECT_ROOT, path)
 
 def load_class_names(yaml_path):
     """从YAML文件加载类别名称"""
@@ -101,9 +111,30 @@ def get_runtime_device():
     return torch.device(f"cuda:{ConfigYOLO.GPU_IDS[0]}") if ConfigYOLO.GPU_IDS else torch.device("cpu")
 
 
+def should_use_channels_last():
+    return torch.cuda.is_available() and getattr(ConfigYOLO, "ENABLE_CHANNELS_LAST", False)
+
+
+def prepare_tensor_for_device(tensor, device, *, channels_last=False):
+    tensor = tensor.to(device, non_blocking=ConfigYOLO.PIN_MEMORY)
+    if not tensor.is_floating_point():
+        return tensor
+    if channels_last and tensor.dim() == 4 and should_use_channels_last():
+        return tensor.contiguous(memory_format=torch.channels_last)
+    return tensor.contiguous()
+
+
+def prepare_conv_tensor(tensor):
+    if tensor.is_floating_point() and tensor.dim() == 4 and should_use_channels_last():
+        return tensor.contiguous(memory_format=torch.channels_last)
+    return tensor.contiguous() if tensor.is_floating_point() else tensor
+
+
 def wrap_data_parallel(module, module_name="module"):
     device = get_runtime_device()
     module = module.to(device)
+    if should_use_channels_last():
+        module = module.to(memory_format=torch.channels_last)
     if len(ConfigYOLO.GPU_IDS) > 1:
         module = nn.DataParallel(module, device_ids=ConfigYOLO.GPU_IDS, output_device=ConfigYOLO.GPU_IDS[0])
         log_to_file(f"{module_name} wrapped with DataParallel on GPUs: {ConfigYOLO.GPU_IDS}")
@@ -1088,7 +1119,9 @@ class ConfigYOLO:
     VIS_MAX_GT_ANCHOR_OVERLAYS = 2
     NUM_WORKERS = min(8, os.cpu_count() or 0)
     PIN_MEMORY = torch.cuda.is_available()
-    PERSISTENT_WORKERS = True
+    PERSISTENT_WORKERS = True  # 是否使用持久化工作进程，提高数据加载效率
+    ENABLE_CUDNN_BENCHMARK = True  # 是否启用 cudnn_benchmark，提高推理效率
+    ENABLE_CHANNELS_LAST = False # 是否使用 channels_last 格式，提高内存效率
 
     # Logging table
     EPOCH_TABLE_EPOCH_WIDTH = 8
@@ -1208,17 +1241,25 @@ class ConfigYOLO:
         if class_balance_power:
             cls.CLASS_BALANCE_POWER = float(class_balance_power)
 
+        enable_cudnn_benchmark = os.environ.get("OPTICAL_TEACHER_ENABLE_CUDNN_BENCHMARK")
+        if enable_cudnn_benchmark:
+            cls.ENABLE_CUDNN_BENCHMARK = enable_cudnn_benchmark.strip().lower() in {"1", "true", "yes", "on"}
+
+        enable_channels_last = os.environ.get("OPTICAL_TEACHER_ENABLE_CHANNELS_LAST")
+        if enable_channels_last:
+            cls.ENABLE_CHANNELS_LAST = enable_channels_last.strip().lower() in {"1", "true", "yes", "on"}
+
     @classmethod
     def initialize(cls):
         cls.apply_runtime_overrides()
+        cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
+        cls.TEACHER_OUTPUT_DIR = resolve_project_path(cls.TEACHER_OUTPUT_DIR)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
         cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
         cls.ANCHOR_SOURCE = "default"
         if cls.USE_EXTERNAL_ANCHORS:
             try:
-                anchor_config_path = cls.ANCHOR_CONFIG_PATH
-                if not os.path.isabs(anchor_config_path):
-                    anchor_config_path = os.path.join(PROJECT_ROOT, anchor_config_path)
+                anchor_config_path = resolve_project_path(cls.ANCHOR_CONFIG_PATH)
                 cls.ANCHORS = load_anchor_groups(anchor_config_path)
                 cls.ANCHOR_SOURCE = anchor_config_path
             except Exception as exc:
@@ -1321,6 +1362,11 @@ def log_all_parameters():
     log_to_file(f"  Image size: {Config.IMG_SIZE}")
     log_to_file(f"  Batch size: {Config.BATCH_SIZE}")
     log_to_file(f"  Epochs: {Config.EPOCHS}")
+
+    log_to_file("\n[Acceleration]")
+    log_to_file(f"  CuDNN benchmark: {Config.ENABLE_CUDNN_BENCHMARK}")
+    log_to_file(f"  Channels last: {Config.ENABLE_CHANNELS_LAST and torch.cuda.is_available()}")
+    log_to_file("  Winograd: cuDNN auto-selects eligible conv kernels when benchmark is enabled")
     
     log_to_file("\n[Loss Weights]")
     log_to_file(f"  Box weight: {Config.BOX_WEIGHT_BASE}")
@@ -1584,229 +1630,6 @@ def build_class_balanced_train_sampler(dataset):
     }
     return sampler, summary
 
-class YOLOLoss(nn.Module):
-    def __init__(self, anchors, num_classes, strides):
-        super().__init__()
-        self.anchors = torch.tensor(anchors, dtype=torch.float32)
-        self.num_classes = num_classes
-        self.strides = strides
-        
-        # Loss weights
-        self.box_weight = Config.BOX_WEIGHT_BASE
-        self.obj_weight = Config.OBJ_WEIGHT_BASE
-        self.noobj_weight = Config.NOOBJ_WEIGHT_BASE
-        self.cls_weight = Config.CLS_WEIGHT_BASE
-        
-        # Loss functions
-        self.mse_loss = nn.MSELoss(reduction="mean")
-        self.bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
-    
-    def set_epoch_weights(self, epoch):
-        # Update dynamic loss weights according to the current training epoch.
-        weights = Config.get_dynamic_weights(epoch)
-        self.box_weight = weights['box_weight']
-        self.obj_weight = weights['obj_weight']
-        self.noobj_weight = weights['noobj_weight']
-        self.cls_weight = weights['cls_weight']
-        return weights['phase']
-
-    def forward(self, predictions, targets):
-        total_loss = 0
-        
-        for i, pred in enumerate(predictions):
-            batch_size, _, grid_h, grid_w = pred.shape
-            stride = self.strides[i]
-            anchors = self.anchors[i] / stride
-            
-            pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
-            
-            pred_boxes = pred[..., :4]
-            pred_obj = pred[..., 4]
-            pred_cls = pred[..., 5:]
-            
-            target_boxes = torch.zeros_like(pred_boxes)
-            target_obj = torch.zeros_like(pred_obj)
-            target_cls = torch.zeros_like(pred_cls)
-            
-            for b in range(batch_size):
-                if len(targets[b]) == 0:
-                    continue
-                
-                for target_idx in range(len(targets[b])):
-                    cls_id, tx, ty, tw, th = targets[b][target_idx]
-                    cls_id = int(cls_id.item())
-                    
-                    gx = int(tx * grid_w)
-                    gy = int(ty * grid_h)
-                    
-                    gx = max(0, min(gx, grid_w - 1))
-                    gy = max(0, min(gy, grid_h - 1))
-                    
-                    best_iou = 0
-                    best_anchor = 0
-                    
-                    for a in range(3):
-                        anchor_w, anchor_h = anchors[a]
-                        iou = min(tw, anchor_w) * min(th, anchor_h) / (tw * th + anchor_w * anchor_h - min(tw, anchor_w) * min(th, anchor_h) + 1e-6)
-                        if iou > best_iou:
-                            best_iou = iou
-                            best_anchor = a
-                    
-                    if best_iou > Config.IOU_THRESHOLD:
-                        target_boxes[b, gy, gx, best_anchor, 0] = tx * grid_w - gx
-                        target_boxes[b, gy, gx, best_anchor, 1] = ty * grid_h - gy
-                        target_boxes[b, gy, gx, best_anchor, 2] = torch.log(tw / anchors[best_anchor, 0] + 1e-6)
-                        target_boxes[b, gy, gx, best_anchor, 3] = torch.log(th / anchors[best_anchor, 1] + 1e-6)
-                        target_obj[b, gy, gx, best_anchor] = 1.0
-                        target_cls[b, gy, gx, best_anchor, cls_id] = 1.0
-            
-            obj_mask = target_obj > 0.5
-            noobj_mask = target_obj <= 0.5
-            
-            # Compute loss for object boxes
-            if obj_mask.sum() > 0:
-                # Compute box loss
-                box_loss = self.mse_loss(pred_boxes[obj_mask], target_boxes[obj_mask])
-                
-                # Compute object loss
-                obj_loss = self.bce_loss(pred_obj[obj_mask], target_obj[obj_mask])
-                
-                # Compute class loss
-                cls_loss = self.bce_loss(pred_cls[obj_mask], target_cls[obj_mask])
-            else:
-                box_loss = torch.tensor(0.0, device=pred_boxes.device)
-                obj_loss = torch.tensor(0.0, device=pred_boxes.device)
-                cls_loss = torch.tensor(0.0, device=pred_boxes.device)
-            
-            # Compute loss for no-object boxes
-            if noobj_mask.sum() > 0:
-                noobj_loss = self.bce_loss(pred_obj[noobj_mask], target_obj[noobj_mask])
-            else:
-                noobj_loss = torch.tensor(0.0, device=pred_boxes.device)
-            
-            # Compute total loss
-            scale_loss = (self.box_weight * box_loss + 
-                         self.obj_weight * obj_loss + 
-                         self.noobj_weight * noobj_loss + 
-                         self.cls_weight * cls_loss)
-            
-            # Handle NaN and infinite values
-            if torch.isnan(scale_loss) or torch.isinf(scale_loss):
-                scale_loss = torch.tensor(0.0, device=pred_boxes.device)
-                print(f"警告: 检测到无效损失值，已重置为0")
-            
-            total_loss += scale_loss
-        
-        return total_loss
-
-def yolo_loss_forward_fixed(self, predictions, targets):
-    total_loss = 0
-    batch_size = predictions[0].shape[0]
-    prepared_scales = []
-
-    for i, pred in enumerate(predictions):
-        _, _, grid_h, grid_w = pred.shape
-        pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
-        prepared_scales.append({
-            "pred_boxes": pred[..., :4],
-            "pred_obj": pred[..., 4],
-            "pred_cls": pred[..., 5:],
-            "target_boxes": torch.zeros_like(pred[..., :4]),
-            "target_obj": torch.zeros_like(pred[..., 4]),
-            "target_cls": torch.zeros_like(pred[..., 5:]),
-            "grid_h": grid_h,
-            "grid_w": grid_w,
-            "anchors": self.anchors[i].to(pred.device)
-        })
-
-    for b in range(batch_size):
-        if len(targets[b]) == 0:
-            continue
-
-        current_targets = targets[b].to(predictions[0].device)
-        for target in current_targets:
-            cls_id = int(target[0].item())
-            tx = target[1]
-            ty = target[2]
-            tw = target[3] * Config.IMG_SIZE
-            th = target[4] * Config.IMG_SIZE
-
-            best_scale_idx = 0
-            best_anchor_idx = 0
-            best_iou = -1.0
-
-            for scale_idx, scale_data in enumerate(prepared_scales):
-                for anchor_idx in range(3):
-                    anchor_w, anchor_h = scale_data["anchors"][anchor_idx]
-                    inter = torch.minimum(tw, anchor_w) * torch.minimum(th, anchor_h)
-                    union = tw * th + anchor_w * anchor_h - inter + 1e-6
-                    iou = (inter / union).item()
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_scale_idx = scale_idx
-                        best_anchor_idx = anchor_idx
-
-            scale_data = prepared_scales[best_scale_idx]
-            gx = tx * scale_data["grid_w"]
-            gy = ty * scale_data["grid_h"]
-            grid_x = max(0, min(int(gx.item()), scale_data["grid_w"] - 1))
-            grid_y = max(0, min(int(gy.item()), scale_data["grid_h"] - 1))
-            anchor_w, anchor_h = scale_data["anchors"][best_anchor_idx]
-
-            scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 0] = gx - grid_x
-            scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 1] = gy - grid_y
-            scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 2] = torch.log(tw / anchor_w + 1e-6)
-            scale_data["target_boxes"][b, grid_y, grid_x, best_anchor_idx, 3] = torch.log(th / anchor_h + 1e-6)
-            scale_data["target_obj"][b, grid_y, grid_x, best_anchor_idx] = 1.0
-            scale_data["target_cls"][b, grid_y, grid_x, best_anchor_idx, cls_id] = 1.0
-
-    for scale_data in prepared_scales:
-        pred_boxes = scale_data["pred_boxes"]
-        pred_obj = scale_data["pred_obj"]
-        pred_cls = scale_data["pred_cls"]
-        target_boxes = scale_data["target_boxes"]
-        target_obj = scale_data["target_obj"]
-        target_cls = scale_data["target_cls"]
-
-        obj_mask = target_obj > 0.5
-        noobj_mask = target_obj <= 0.5
-
-        if obj_mask.sum() > 0:
-            pred_xy = torch.sigmoid(pred_boxes[..., :2])
-            pred_wh = pred_boxes[..., 2:4]
-            target_xy = target_boxes[..., :2]
-            target_wh = target_boxes[..., 2:4]
-
-            xy_loss = self.mse_loss(pred_xy[obj_mask], target_xy[obj_mask])
-            wh_loss = self.mse_loss(pred_wh[obj_mask], target_wh[obj_mask])
-            box_loss = xy_loss + wh_loss
-            obj_loss = self.bce_loss(pred_obj[obj_mask], target_obj[obj_mask])
-            cls_loss = self.bce_loss(pred_cls[obj_mask], target_cls[obj_mask])
-        else:
-            box_loss = torch.tensor(0.0, device=pred_boxes.device)
-            obj_loss = torch.tensor(0.0, device=pred_boxes.device)
-            cls_loss = torch.tensor(0.0, device=pred_boxes.device)
-
-        if noobj_mask.sum() > 0:
-            noobj_loss = self.bce_loss(pred_obj[noobj_mask], target_obj[noobj_mask])
-        else:
-            noobj_loss = torch.tensor(0.0, device=pred_boxes.device)
-
-        scale_loss = (self.box_weight * box_loss +
-                     self.obj_weight * obj_loss +
-                     self.noobj_weight * noobj_loss +
-                     self.cls_weight * cls_loss)
-
-        if torch.isnan(scale_loss) or torch.isinf(scale_loss):
-            scale_loss = torch.tensor(0.0, device=pred_boxes.device)
-            print("Warning: Infinite or NaN loss value. Setting to 0.")
-
-        total_loss += scale_loss
-
-    return total_loss
-
-YOLOLoss.forward = yolo_loss_forward_fixed
-
 class SigmoidFocalLoss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2.0, reduction="mean"):
         super().__init__()
@@ -1858,7 +1681,7 @@ def decode_boxes_to_absolute(pred_boxes, anchors, stride):
     h = torch.exp(torch.clamp(pred_boxes[..., 3], min=-8.0, max=8.0)) * anchor_tensor[..., 1]
     return torch.stack([x, y, w, h], dim=-1)
 
-class EnhancedYOLOLoss(nn.Module):
+class YOLOLoss(nn.Module):
     def __init__(self, anchors, num_classes, strides):
         super().__init__()
         self.anchors = torch.tensor(anchors, dtype=torch.float32)
@@ -2056,7 +1879,7 @@ def prepare_batch(batch, device):
     for img_tensor, targets in batch:
         batch_images.append(img_tensor)
         batch_targets.append(targets)
-    batch_images = torch.stack(batch_images).to(device)
+    batch_images = prepare_tensor_for_device(torch.stack(batch_images), device, channels_last=True)
     return batch_images, batch_targets
 
 def compute_average_precision(detections, total_gt):
@@ -2239,8 +2062,6 @@ def save_training_curves(history, output_dir):
     plt.savefig(os.path.join(output_dir, "loss_curve.png"), dpi=Config.VIS_DPI)
     plt.close()
 
-YOLOLoss = EnhancedYOLOLoss
-
 def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train", device=None):
     if dataset is None or len(dataset) == 0:
         return
@@ -2265,7 +2086,7 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
     with torch.no_grad():
         for i, idx in enumerate(indices):
             img_tensor, targets = dataset[idx]
-            img_tensor = img_tensor.unsqueeze(0).to(device)
+            img_tensor = prepare_tensor_for_device(img_tensor.unsqueeze(0), device, channels_last=True)
 
             img_np = img_tensor.squeeze(0).cpu().numpy().transpose(1, 2, 0)
             img_np = (img_np * 255).astype(np.uint8)
@@ -2404,14 +2225,13 @@ class TeacherWithDetector(nn.Module):
             self.detector = detector
 
     def forward(self, x, return_feature=False):
+        x = prepare_conv_tensor(x)
         features = self.teacher(x)
+        features = prepare_conv_tensor(features)
         detections = self.detector(features)
         if return_feature:
             return features, detections
         return detections
-
-    def forward_with_feature(self, x):
-        return self.forward(x, return_feature=True)
 
 def extract_state_dict(checkpoint):
     if not isinstance(checkpoint, dict):
@@ -2425,32 +2245,14 @@ def extract_state_dict(checkpoint):
 def load_teacher_checkpoint(teacher, checkpoint_path, device):
     if not checkpoint_path:
         return False, "Teacher checkpoint: not configured"
+    checkpoint_path = resolve_project_path(checkpoint_path)
     if not os.path.exists(checkpoint_path):
         return False, f"Teacher checkpoint not found: {checkpoint_path}"
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = extract_state_dict(checkpoint)
-    teacher_state = teacher.state_dict()
-    compatible_state = {}
-
-    for key, value in state_dict.items():
-        normalized_key = key[8:] if key.startswith("teacher.") else key
-        if normalized_key in teacher_state and teacher_state[normalized_key].shape == value.shape:
-            compatible_state[normalized_key] = value
-
-    if len(compatible_state) == 0:
-        return False, f"No compatible ConvTeacher weights found in: {checkpoint_path}"
-
-    teacher.load_state_dict({**teacher_state, **compatible_state}, strict=False)
-    return True, f"Loaded {len(compatible_state)} teacher tensors from: {checkpoint_path}"
-
-def load_teacher_checkpoint_safe(teacher, checkpoint_path, device):
-    if not checkpoint_path:
-        return False, "Teacher checkpoint: not configured"
-    if not os.path.exists(checkpoint_path):
-        return False, f"Teacher checkpoint not found: {checkpoint_path}"
-
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = extract_state_dict(checkpoint)
     teacher_state = teacher.state_dict()
     compatible_state = {}
@@ -2472,7 +2274,7 @@ def initialize_teacher_weights(teacher, device):
         return False, "Teacher init mode: scratch (training from random initialization)"
 
     checkpoint_path = Config.get_teacher_init_checkpoint()
-    loaded_teacher, teacher_message = load_teacher_checkpoint_safe(teacher, checkpoint_path, device)
+    loaded_teacher, teacher_message = load_teacher_checkpoint(teacher, checkpoint_path, device)
     if loaded_teacher:
         return True, f"Teacher init mode: checkpoint ({teacher_message})"
 
@@ -2504,18 +2306,18 @@ def set_detector_trainable(model, trainable):
     for p in unwrap_module(model).detector.parameters():
         p.requires_grad = trainable
 
-
-def is_detector_frozen(model):
-    return not any(p.requires_grad for p in unwrap_module(model).detector.parameters())
-
 def train():
     bootstrap_runtime()
     log_all_parameters()
     device = get_runtime_device()
     if device.type == "cuda":
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = Config.ENABLE_CUDNN_BENCHMARK
     log_to_file(f"Using device: {device}")
     log_to_file(f"Detected GPU count: {torch.cuda.device_count()}")
+    log_to_file(
+        f"Acceleration active: cudnn_benchmark={device.type == 'cuda' and Config.ENABLE_CUDNN_BENCHMARK}, "
+        f"channels_last={device.type == 'cuda' and Config.ENABLE_CHANNELS_LAST}"
+    )
     
     log_to_file("Loading ConvTeacher...")
     teacher = ConvTeacher()
