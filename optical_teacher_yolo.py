@@ -92,6 +92,35 @@ def append_plain_log(message=""):
     with open(ConfigYOLO.LOG_FILE, 'a', encoding='utf-8') as f:
         f.write(message + "\n")
 
+
+def unwrap_module(module):
+    return module.module if isinstance(module, nn.DataParallel) else module
+
+
+def get_runtime_device():
+    return torch.device(f"cuda:{ConfigYOLO.GPU_IDS[0]}") if ConfigYOLO.GPU_IDS else torch.device("cpu")
+
+
+def wrap_data_parallel(module, module_name="module"):
+    device = get_runtime_device()
+    module = module.to(device)
+    if len(ConfigYOLO.GPU_IDS) > 1:
+        module = nn.DataParallel(module, device_ids=ConfigYOLO.GPU_IDS, output_device=ConfigYOLO.GPU_IDS[0])
+        log_to_file(f"{module_name} wrapped with DataParallel on GPUs: {ConfigYOLO.GPU_IDS}")
+    return module
+
+
+def get_dataloader_kwargs(shuffle=False, sampler=None):
+    kwargs = {
+        "shuffle": shuffle if sampler is None else False,
+        "sampler": sampler,
+        "num_workers": ConfigYOLO.NUM_WORKERS,
+        "pin_memory": ConfigYOLO.PIN_MEMORY,
+    }
+    if ConfigYOLO.NUM_WORKERS > 0:
+        kwargs["persistent_workers"] = ConfigYOLO.PERSISTENT_WORKERS
+    return kwargs
+
 def init_epoch_log_table():
     separator = ConfigYOLO.get_epoch_table_separator()
     append_plain_log("")
@@ -519,7 +548,7 @@ def build_teacher_target_map(targets, img_size, device, dtype):
     return target_map, foreground_mask
 
 
-def compute_teacher_guidance_loss(teacher_feature, targets, detector_frozen=False):
+def compute_teacher_guidance_loss(teacher_feature, targets, stage_settings=None):
     target_map, foreground_mask = build_teacher_target_map(
         targets=targets,
         img_size=teacher_feature.shape[-1],
@@ -550,7 +579,7 @@ def compute_teacher_guidance_loss(teacher_feature, targets, detector_frozen=Fals
         torch.abs(teacher_feature[:, :, :, 1:] - teacher_feature[:, :, :, :-1]).mean()
     )
 
-    weights = Config.get_teacher_guidance_weights(detector_frozen=detector_frozen)
+    weights = Config.get_teacher_guidance_weights(stage_settings=stage_settings)
     total = (
         weights["heatmap"] * heatmap_loss +
         weights["contrast"] * contrast_loss +
@@ -943,7 +972,7 @@ class ConfigYOLO:
     YAML_PATH = r"data\military\data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output\OpticalTeacherYOLO_deep_teacher"
+    TEACHER_OUTPUT_DIR = r"output\OpticalTeacherYOLO_StrengTea_teacher"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -951,18 +980,20 @@ class ConfigYOLO:
 
     # Runtime
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
     IMG_SIZE = 640
-    BATCH_SIZE = 8
-    EPOCHS = 120
+    BATCH_SIZE = 64
+
+    STAGE1_LOCATE_EPOCHS = 60
+    STAGE2_TEXTURE_EPOCHS = 50
+    STAGE3_BALANCE_EPOCHS = 80
+    EPOCHS = STAGE1_LOCATE_EPOCHS + STAGE2_TEXTURE_EPOCHS + STAGE3_BALANCE_EPOCHS
 
     # 经常调整的训练参数
     BOX_WEIGHT_BASE = 1.32  # 保留大目标回归力度，但略收一点，减少框体过大
     OBJ_WEIGHT_BASE = 0.56  # 从上一版回调，给真实目标更多正样本驱动
     NOOBJ_WEIGHT_BASE = 0.26  # 背景抑制保留，但不再过强
     CLS_WEIGHT_BASE = 0.32  # 保留分类监督，同时回到更接近旧稳态
-
-    POSITION_PHASE_EPOCHS = 12  # 继续让前期定位学稳
-    BALANCE_PHASE_EPOCHS = 8  # 缩短过渡段，减少中期被塑形权重拖慢
 
     IOU_THRESHOLD = 0.5  # 主要正样本匹配阈值；较大的值使正样本分配更严格，可能降低召回率
     POSITIVE_ANCHOR_IOU = 0.25  # 回退到旧版更稳的正样本匹配阈值
@@ -991,16 +1022,19 @@ class ConfigYOLO:
     METRIC_IOU_THRESHOLD = 0.5  # 较大的值在评估期间使TP匹配更严格，可能降低召回率，但可能增加假阳性
 
     # Teacher feature shaping and staged training
-    DETECTOR_FREEZE_EPOCH = 85
-    DETECTOR_FINETUNE_LR = 2e-4
-    FEATURE_HEATMAP_WEIGHT_JOINT = 0.06
-    FEATURE_HEATMAP_WEIGHT_FROZEN = 0.14
-    FEATURE_CONTRAST_WEIGHT_JOINT = 0.024
-    FEATURE_CONTRAST_WEIGHT_FROZEN = 0.055
-    FEATURE_SPARSITY_WEIGHT_JOINT = 0.012
-    FEATURE_SPARSITY_WEIGHT_FROZEN = 0.028
-    FEATURE_TV_WEIGHT_JOINT = 0.004
-    FEATURE_TV_WEIGHT_FROZEN = 0.008
+    PHASE1_TEACHER_LR = 4e-4
+    PHASE1_DETECTOR_LR = 4e-4
+    PHASE2_TEACHER_LR = 6e-4
+    PHASE2_DETECTOR_LR = 3e-4
+    PHASE3_TEACHER_LR = 1.5e-4
+    PHASE3_DETECTOR_LR = 1.2e-4
+    FEATURE_HEATMAP_WEIGHT_BASE = 0.06
+    FEATURE_CONTRAST_WEIGHT_BASE = 0.024
+    FEATURE_SPARSITY_WEIGHT_BASE = 0.012
+    FEATURE_TV_WEIGHT_BASE = 0.004
+    PHASE1_TEACHER_GUIDANCE_SCALE = 1.0
+    PHASE2_TEACHER_GUIDANCE_SCALE = 10.0
+    PHASE3_TEACHER_GUIDANCE_SCALE = 2.5
     FEATURE_FOREGROUND_TARGET = 0.74
     FEATURE_BACKGROUND_TARGET = 0.05
     FEATURE_HEATMAP_SIGMA = 0.35
@@ -1027,7 +1061,7 @@ class ConfigYOLO:
         [[103, 169], [203, 107], [351, 177]],  # P4: 中等目标
         [[241, 354], [534, 299], [568, 528]],  # P5: 大目标
     ]
-    ANCHOR_CONFIG_PATH = r"output\anchor_clustering\yolo_anchors.yaml"
+    ANCHOR_CONFIG_PATH = r"output/anchor_clustering/yolo_anchors.yaml"
     USE_EXTERNAL_ANCHORS = True
     ANCHORS = None
     ANCHOR_SOURCE = "default"
@@ -1036,8 +1070,8 @@ class ConfigYOLO:
     LEARNING_RATE = 4e-4
     WEIGHT_DECAY = 3e-5
     OPTIMIZER = "Adam"
-    TEACHER_INIT_MODE = "checkpoint"  # "scratch" 或 "checkpoint"
-    TEACHER_INIT_CHECKPOINT = r"output\OpticalTeacherYOLO\teacher_final.pth"
+    TEACHER_INIT_MODE = "scratch"  # "scratch" 或 "checkpoint"
+    TEACHER_INIT_CHECKPOINT = r"output/OpticalTeacherYOLO/teacher_final.pth"
     FREEZE_TEACHER = False
     SAVE_TEACHER_WEIGHTS = True
 
@@ -1046,12 +1080,15 @@ class ConfigYOLO:
     VIS_BATCH_SIZE = 4
     VIS_DPI = 130
     VIS_DATASET_SPLIT = "val"  # 可视化时使用的数据集分割
-    VIS_SEED = 20260421  # 保持与本次 ft 实验一致，便于前后对比
+    VIS_SEED = 20260429  # 保持与本次 ft 实验一致，便于前后对比
     VIS_CONF_THRESH = 0.70  # 可视化单独用更干净的显示阈值
     VIS_NMS_THRESH = 0.16
     VIS_MAX_DET = 3
     VIS_SHOW_BEST_MATCHED_ANCHORS = True
     VIS_MAX_GT_ANCHOR_OVERLAYS = 2
+    NUM_WORKERS = min(8, os.cpu_count() or 0)
+    PIN_MEMORY = torch.cuda.is_available()
+    PERSISTENT_WORKERS = True
 
     # Logging table
     EPOCH_TABLE_EPOCH_WIDTH = 8
@@ -1068,59 +1105,77 @@ class ConfigYOLO:
         "best model saved",
     )
     @classmethod
-    def get_dynamic_weights(cls, epoch):
-        if epoch < cls.POSITION_PHASE_EPOCHS:
-            box_weight = cls.BOX_WEIGHT_BASE * 1.3
-            cls_weight = cls.CLS_WEIGHT_BASE * 0.8
-            phase = "position_focus"
-            size_weights = {
-                "small": cls.SMALL_OBJ_WEIGHT,
-                "medium": cls.MEDIUM_OBJ_WEIGHT,
-                "large": cls.LARGE_OBJ_WEIGHT,
+    def get_stage_settings(cls, epoch):
+        total_stage_epochs = cls.STAGE1_LOCATE_EPOCHS + cls.STAGE2_TEXTURE_EPOCHS + cls.STAGE3_BALANCE_EPOCHS
+        if total_stage_epochs != cls.EPOCHS:
+            raise ValueError(
+                f"Stage epochs ({total_stage_epochs}) must equal total epochs ({cls.EPOCHS})"
+            )
+
+        if epoch < cls.STAGE1_LOCATE_EPOCHS:
+            return {
+                "phase": "locate_gt",
+                "box_weight": cls.BOX_WEIGHT_BASE * 1.35,
+                "obj_weight": cls.OBJ_WEIGHT_BASE * 1.15,
+                "noobj_weight": cls.NOOBJ_WEIGHT_BASE * 1.00,
+                "cls_weight": cls.CLS_WEIGHT_BASE * 0.72,
+                "size_weights": {
+                    "small": cls.SMALL_OBJ_WEIGHT,
+                    "medium": cls.MEDIUM_OBJ_WEIGHT,
+                    "large": cls.LARGE_OBJ_WEIGHT,
+                },
+                "teacher_lr": cls.PHASE1_TEACHER_LR,
+                "detector_lr": cls.PHASE1_DETECTOR_LR,
+                "teacher_guidance_scale": cls.PHASE1_TEACHER_GUIDANCE_SCALE,
             }
-        elif epoch < cls.POSITION_PHASE_EPOCHS + cls.BALANCE_PHASE_EPOCHS:
-            progress = (epoch - cls.POSITION_PHASE_EPOCHS) / max(cls.BALANCE_PHASE_EPOCHS, 1)
-            box_weight = cls.BOX_WEIGHT_BASE * (1.3 - 0.3 * progress)
-            cls_weight = cls.CLS_WEIGHT_BASE * (0.8 + 0.2 * progress)
-            phase = "balance_transition"
-            size_weights = {
-                "small": cls.SMALL_OBJ_WEIGHT + (1.0 - cls.SMALL_OBJ_WEIGHT) * progress,
-                "medium": 1.0,
-                "large": cls.LARGE_OBJ_WEIGHT - (cls.LARGE_OBJ_WEIGHT - 1.0) * progress,
+
+        if epoch < cls.STAGE1_LOCATE_EPOCHS + cls.STAGE2_TEXTURE_EPOCHS:
+            return {
+                "phase": "texture_detail",
+                "box_weight": cls.BOX_WEIGHT_BASE * 1.02,
+                "obj_weight": cls.OBJ_WEIGHT_BASE * 1.00,
+                "noobj_weight": cls.NOOBJ_WEIGHT_BASE * 0.92,
+                "cls_weight": cls.CLS_WEIGHT_BASE * 1.35,
+                "size_weights": {
+                    "small": 1.05,
+                    "medium": 1.0,
+                    "large": 1.10,
+                },
+                "teacher_lr": cls.PHASE2_TEACHER_LR,
+                "detector_lr": cls.PHASE2_DETECTOR_LR,
+                "teacher_guidance_scale": cls.PHASE2_TEACHER_GUIDANCE_SCALE,
             }
-        else:
-            box_weight = cls.BOX_WEIGHT_BASE
-            cls_weight = cls.CLS_WEIGHT_BASE
-            phase = "balanced"
-            size_weights = {
+
+        return {
+            "phase": "balance_refine",
+            "box_weight": cls.BOX_WEIGHT_BASE,
+            "obj_weight": cls.OBJ_WEIGHT_BASE,
+            "noobj_weight": cls.NOOBJ_WEIGHT_BASE * 1.08,
+            "cls_weight": cls.CLS_WEIGHT_BASE * 1.12,
+            "size_weights": {
                 "small": 1.0,
                 "medium": 1.0,
                 "large": 1.0,
-            }
-
-        return {
-            "box_weight": box_weight,
-            "obj_weight": cls.OBJ_WEIGHT_BASE,
-            "noobj_weight": cls.NOOBJ_WEIGHT_BASE,
-            "cls_weight": cls_weight,
-            "size_weights": size_weights,
-            "phase": phase,
+            },
+            "teacher_lr": cls.PHASE3_TEACHER_LR,
+            "detector_lr": cls.PHASE3_DETECTOR_LR,
+            "teacher_guidance_scale": cls.PHASE3_TEACHER_GUIDANCE_SCALE,
         }
 
     @classmethod
-    def get_teacher_guidance_weights(cls, detector_frozen=False):
-        if detector_frozen:
-            return {
-                "heatmap": cls.FEATURE_HEATMAP_WEIGHT_FROZEN,
-                "contrast": cls.FEATURE_CONTRAST_WEIGHT_FROZEN,
-                "sparsity": cls.FEATURE_SPARSITY_WEIGHT_FROZEN,
-                "tv": cls.FEATURE_TV_WEIGHT_FROZEN,
-            }
+    def get_dynamic_weights(cls, epoch):
+        return cls.get_stage_settings(epoch)
+
+    @classmethod
+    def get_teacher_guidance_weights(cls, stage_settings=None):
+        if stage_settings is None:
+            stage_settings = cls.get_stage_settings(0)
+        scale = float(stage_settings["teacher_guidance_scale"])
         return {
-            "heatmap": cls.FEATURE_HEATMAP_WEIGHT_JOINT,
-            "contrast": cls.FEATURE_CONTRAST_WEIGHT_JOINT,
-            "sparsity": cls.FEATURE_SPARSITY_WEIGHT_JOINT,
-            "tv": cls.FEATURE_TV_WEIGHT_JOINT,
+            "heatmap": cls.FEATURE_HEATMAP_WEIGHT_BASE * scale,
+            "contrast": cls.FEATURE_CONTRAST_WEIGHT_BASE * scale,
+            "sparsity": cls.FEATURE_SPARSITY_WEIGHT_BASE * scale,
+            "tv": cls.FEATURE_TV_WEIGHT_BASE * scale,
         }
 
     @classmethod
@@ -1235,13 +1290,18 @@ class ConfigYOLO:
 
 Config = ConfigYOLO
 
-Config.initialize()
-Config.print_config()
 
-init_log_file()
-log_to_file(f"Log file path: {Config.LOG_FILE}")
-log_to_file(f"Visualization save path: {Config.TEACHER_OUTPUT_DIR}")
-log_to_file(f"Class info: {Config.CLASS_NAMES}, Num classes: {Config.NUM_CLASSES}")
+def identity_collate(batch):
+    return batch
+
+
+def bootstrap_runtime():
+    Config.initialize()
+    Config.print_config()
+    init_log_file()
+    log_to_file(f"Log file path: {Config.LOG_FILE}")
+    log_to_file(f"Visualization save path: {Config.TEACHER_OUTPUT_DIR}")
+    log_to_file(f"Class info: {Config.CLASS_NAMES}, Num classes: {Config.NUM_CLASSES}")
 
 # 打印所有配置参数
 def log_all_parameters():
@@ -1257,6 +1317,7 @@ def log_all_parameters():
     
     log_to_file("\n[Training]")
     log_to_file(f"  Device: {Config.DEVICE}")
+    log_to_file(f"  GPU IDs: {Config.GPU_IDS if Config.GPU_IDS else 'CPU only'}")
     log_to_file(f"  Image size: {Config.IMG_SIZE}")
     log_to_file(f"  Batch size: {Config.BATCH_SIZE}")
     log_to_file(f"  Epochs: {Config.EPOCHS}")
@@ -1266,8 +1327,10 @@ def log_all_parameters():
     log_to_file(f"  Obj weight: {Config.OBJ_WEIGHT_BASE}")
     log_to_file(f"  Noobj weight: {Config.NOOBJ_WEIGHT_BASE}")
     log_to_file(f"  Class weight: {Config.CLS_WEIGHT_BASE}")
-    log_to_file(f"  Position phase epochs: {Config.POSITION_PHASE_EPOCHS}")
-    log_to_file(f"  Balance phase epochs: {Config.BALANCE_PHASE_EPOCHS}")
+    log_to_file(
+        f"  Stage epochs (locate / texture / balance): "
+        f"{Config.STAGE1_LOCATE_EPOCHS} / {Config.STAGE2_TEXTURE_EPOCHS} / {Config.STAGE3_BALANCE_EPOCHS}"
+    )
     
     log_to_file("\n[Anchors]")
     log_to_file(f"  Strides: {Config.STRIDES}")
@@ -1286,6 +1349,12 @@ def log_all_parameters():
     log_to_file(f"  Optimizer: {Config.OPTIMIZER}")
     log_to_file(f"  Learning rate: {Config.LEARNING_RATE}")
     log_to_file(f"  Weight decay: {Config.WEIGHT_DECAY}")
+    log_to_file(
+        f"  Stage LR teacher/detector: "
+        f"{Config.PHASE1_TEACHER_LR}/{Config.PHASE1_DETECTOR_LR} -> "
+        f"{Config.PHASE2_TEACHER_LR}/{Config.PHASE2_DETECTOR_LR} -> "
+        f"{Config.PHASE3_TEACHER_LR}/{Config.PHASE3_DETECTOR_LR}"
+    )
     log_to_file(f"  Teacher init mode: {Config.get_teacher_init_mode()}")
     log_to_file(f"  Teacher init checkpoint: {Config.get_teacher_init_checkpoint() or 'None'}")
     log_to_file(f"  Freeze teacher: {Config.FREEZE_TEACHER}")
@@ -1298,12 +1367,15 @@ def log_all_parameters():
     log_to_file(f"  Containment ratio / area limit: {Config.CONTAINMENT_SUPPRESS_RATIO} / {Config.CONTAINMENT_AREA_RATIO_LIMIT}")
 
     log_to_file("\n[Teacher Feature Shaping]")
-    log_to_file(f"  Detector freeze epoch: {Config.DETECTOR_FREEZE_EPOCH}")
-    log_to_file(f"  Detector-frozen LR: {Config.DETECTOR_FINETUNE_LR}")
-    log_to_file(f"  Heatmap weight (joint/frozen): {Config.FEATURE_HEATMAP_WEIGHT_JOINT} / {Config.FEATURE_HEATMAP_WEIGHT_FROZEN}")
-    log_to_file(f"  Contrast weight (joint/frozen): {Config.FEATURE_CONTRAST_WEIGHT_JOINT} / {Config.FEATURE_CONTRAST_WEIGHT_FROZEN}")
-    log_to_file(f"  Sparsity weight (joint/frozen): {Config.FEATURE_SPARSITY_WEIGHT_JOINT} / {Config.FEATURE_SPARSITY_WEIGHT_FROZEN}")
-    log_to_file(f"  TV weight (joint/frozen): {Config.FEATURE_TV_WEIGHT_JOINT} / {Config.FEATURE_TV_WEIGHT_FROZEN}")
+    log_to_file(
+        f"  Guidance scale (locate / texture / balance): "
+        f"{Config.PHASE1_TEACHER_GUIDANCE_SCALE} / {Config.PHASE2_TEACHER_GUIDANCE_SCALE} / "
+        f"{Config.PHASE3_TEACHER_GUIDANCE_SCALE}"
+    )
+    log_to_file(f"  Base heatmap weight: {Config.FEATURE_HEATMAP_WEIGHT_BASE}")
+    log_to_file(f"  Base contrast weight: {Config.FEATURE_CONTRAST_WEIGHT_BASE}")
+    log_to_file(f"  Base sparsity weight: {Config.FEATURE_SPARSITY_WEIGHT_BASE}")
+    log_to_file(f"  Base TV weight: {Config.FEATURE_TV_WEIGHT_BASE}")
     log_to_file(f"  Foreground target: {Config.FEATURE_FOREGROUND_TARGET}")
     log_to_file(f"  Background target: {Config.FEATURE_BACKGROUND_TARGET}")
     log_to_file(f"  Heatmap sigma: {Config.FEATURE_HEATMAP_SIGMA}")
@@ -1322,6 +1394,7 @@ def log_all_parameters():
     log_to_file(f"  Majority-only image weight: {Config.MAJORITY_ONLY_IMAGE_WEIGHT}")
     log_to_file(f"  Empty-image sample weight: {Config.EMPTY_IMAGE_SAMPLE_WEIGHT}")
     log_to_file(f"  Min image sample weight: {Config.MIN_IMAGE_SAMPLE_WEIGHT}")
+    log_to_file(f"  Num workers / pin memory: {Config.NUM_WORKERS} / {Config.PIN_MEMORY}")
     
     log_to_file("\n[Visualization]")
     log_to_file(f"  Visualization interval: {Config.VIS_INTERVAL} epochs")
@@ -1355,9 +1428,6 @@ def log_all_parameters():
     log_to_file("\n" + "="*80)
     log_to_file("Parameter logging complete")
     log_to_file("="*80 + "\n")
-
-# Log all parameters
-log_all_parameters()
 
 class YOLODataset(Dataset):
     def __init__(self, yaml_path=None, split="train"):
@@ -2012,7 +2082,7 @@ def compute_average_precision(detections, total_gt):
     idx = np.where(mrec[1:] != mrec[:-1])[0]
     return float(np.sum((mrec[idx + 1] - mrec[idx]) * mpre[idx + 1]))
 
-def evaluate_model(model, dataloader, criterion, device):
+def evaluate_model(model, dataloader, criterion, device, stage_settings=None):
     model.eval()
     metric_storage = {cls_id: [] for cls_id in range(Config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(Config.NUM_CLASSES)}
@@ -2031,17 +2101,15 @@ def evaluate_model(model, dataloader, criterion, device):
     total_tp = 0
     total_fp = 0
     total_fn = 0
-    detector_frozen = is_detector_frozen(model)
-
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validation", leave=False):
             batch_images, batch_targets = prepare_batch(batch, device)
-            teacher_features, predictions = model.forward_with_feature(batch_images)
+            teacher_features, predictions = model(batch_images, return_feature=True)
             loss, loss_stats = criterion(predictions, batch_targets)
             feature_loss, feature_stats = compute_teacher_guidance_loss(
                 teacher_features,
                 batch_targets,
-                detector_frozen=detector_frozen,
+                stage_settings=stage_settings,
             )
             loss = loss + feature_loss
 
@@ -2180,6 +2248,7 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
     if device is None:
         device = Config.DEVICE
 
+    model_core = unwrap_module(model)
     os.makedirs(save_dir, exist_ok=True)
     was_training = model.training
     model.eval()
@@ -2202,13 +2271,13 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
             img_np = (img_np * 255).astype(np.uint8)
             img_np = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
 
-            teacher_output = model.teacher(img_tensor)
+            teacher_output, preds = model_core(img_tensor, return_feature=True)
             teacher_output = teacher_output.squeeze(0).cpu().numpy()
             teacher_output = enhance_feature_for_display(teacher_output)
             if teacher_output.ndim == 3:
                 teacher_output = teacher_output.squeeze(0)
 
-            preds = list(model(img_tensor))
+            preds = list(preds)
             detections = decode_detections(
                 preds,
                 conf_thresh=Config.VIS_CONF_THRESH,
@@ -2318,6 +2387,7 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
     plt.close()
     if was_training:
         model.train()
+        model_core.train()
 
 class TeacherWithDetector(nn.Module):
     def __init__(self, teacher=None, detector=None):
@@ -2333,15 +2403,15 @@ class TeacherWithDetector(nn.Module):
         else:
             self.detector = detector
 
-    def forward(self, x):
+    def forward(self, x, return_feature=False):
         features = self.teacher(x)
         detections = self.detector(features)
+        if return_feature:
+            return features, detections
         return detections
 
     def forward_with_feature(self, x):
-        features = self.teacher(x)
-        detections = self.detector(features)
-        return features, detections
+        return self.forward(x, return_feature=True)
 
 def extract_state_dict(checkpoint):
     if not isinstance(checkpoint, dict):
@@ -2409,24 +2479,43 @@ def initialize_teacher_weights(teacher, device):
     return False, f"Teacher init mode: checkpoint requested but unavailable, fallback to scratch ({teacher_message})"
 
 
-def build_optimizer_from_model(model, lr=None):
-    if lr is None:
-        lr = Config.LEARNING_RATE
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    return torch.optim.Adam(trainable_params, lr=lr, weight_decay=Config.WEIGHT_DECAY)
+def build_optimizer_from_model(model, lr=None, teacher_lr=None, detector_lr=None):
+    if teacher_lr is None:
+        teacher_lr = lr if lr is not None else Config.LEARNING_RATE
+    if detector_lr is None:
+        detector_lr = lr if lr is not None else Config.LEARNING_RATE
+
+    model_core = unwrap_module(model)
+    param_groups = []
+    teacher_params = [p for p in model_core.teacher.parameters() if p.requires_grad]
+    detector_params = [p for p in model_core.detector.parameters() if p.requires_grad]
+
+    if teacher_params:
+        param_groups.append({"params": teacher_params, "lr": teacher_lr})
+    if detector_params:
+        param_groups.append({"params": detector_params, "lr": detector_lr})
+    if not param_groups:
+        raise ValueError("No trainable parameters found when building optimizer.")
+
+    return torch.optim.Adam(param_groups, weight_decay=Config.WEIGHT_DECAY)
 
 
 def set_detector_trainable(model, trainable):
-    for p in model.detector.parameters():
+    for p in unwrap_module(model).detector.parameters():
         p.requires_grad = trainable
 
 
 def is_detector_frozen(model):
-    return not any(p.requires_grad for p in model.detector.parameters())
+    return not any(p.requires_grad for p in unwrap_module(model).detector.parameters())
 
 def train():
-    device = Config.DEVICE
+    bootstrap_runtime()
+    log_all_parameters()
+    device = get_runtime_device()
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
     log_to_file(f"Using device: {device}")
+    log_to_file(f"Detected GPU count: {torch.cuda.device_count()}")
     
     log_to_file("Loading ConvTeacher...")
     teacher = ConvTeacher()
@@ -2447,10 +2536,11 @@ def train():
                            out_channels=Config.get_detector_output_channels())
     
     log_to_file("Loading model components...")
-    model = TeacherWithDetector(teacher=teacher, detector=detector).to(device)
+    model = TeacherWithDetector(teacher=teacher, detector=detector)
     
     for p in model.teacher.parameters():
         p.requires_grad = not freeze_teacher
+    model = wrap_data_parallel(model, module_name="TeacherWithDetector")
     set_detector_trainable(model, True)
     
     log_to_file("Loading training dataset...")
@@ -2473,13 +2563,10 @@ def train():
     train_loader = DataLoader(
         train_dataset,
         batch_size=Config.BATCH_SIZE,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        collate_fn=lambda x: x,
+        collate_fn=identity_collate,
+        **get_dataloader_kwargs(shuffle=True, sampler=train_sampler),
     )
     log_to_file(f"Training dataset size: {len(train_dataset)}")
-    
-    optimizer = build_optimizer_from_model(model, lr=Config.LEARNING_RATE)
     
     criterion = YOLOLoss(anchors=Config.ANCHORS, 
                         num_classes=Config.NUM_CLASSES, 
@@ -2490,7 +2577,7 @@ def train():
         val_dataset = YOLODataset(split="val")
         if len(val_dataset) > 0:
             val_loader = DataLoader(val_dataset, batch_size=Config.BATCH_SIZE,
-                                   shuffle=False, collate_fn=lambda x: x)
+                                   collate_fn=identity_collate, **get_dataloader_kwargs(shuffle=False))
             log_to_file(f"Validation dataset size: {len(val_dataset)}")
         else:
             log_to_file("Validation dataset is empty; validation will be skipped.")
@@ -2522,7 +2609,9 @@ def train():
     }
     best_loss = float('inf')
     best_map50 = -1.0
-    detector_stage_frozen = False
+    current_phase = None
+    current_stage_settings = None
+    optimizer = None
     
     log_to_file("="*60)
     log_to_file("Training model...")
@@ -2539,31 +2628,33 @@ def train():
             "cls": 0.0,
         }
         
-        # Set phase weights
+        current_stage_settings = Config.get_stage_settings(epoch)
         phase = criterion.set_epoch_weights(epoch)
-
-        if (not detector_stage_frozen) and epoch >= Config.DETECTOR_FREEZE_EPOCH:
-            detector_stage_frozen = True
-            set_detector_trainable(model, False)
-            optimizer = build_optimizer_from_model(model, lr=Config.DETECTOR_FINETUNE_LR)
-            log_to_file(
-                f"Epoch {epoch}: detector frozen; continue shaping teacher features only "
-                f"(lr={Config.DETECTOR_FINETUNE_LR})"
+        if phase != current_phase:
+            current_phase = phase
+            optimizer = build_optimizer_from_model(
+                model,
+                teacher_lr=current_stage_settings["teacher_lr"],
+                detector_lr=current_stage_settings["detector_lr"],
             )
-        if detector_stage_frozen:
-            phase = f"{phase}+teacher_shape"
+            log_to_file(
+                f"Epoch {epoch}: switch to phase={current_phase} | "
+                f"teacher_lr={current_stage_settings['teacher_lr']:.6g} | "
+                f"detector_lr={current_stage_settings['detector_lr']:.6g} | "
+                f"teacher_guidance_scale={current_stage_settings['teacher_guidance_scale']:.3f}"
+            )
         
         for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True):
             batch_images, batch_targets = prepare_batch(batch, device)
             
             optimizer.zero_grad()
             
-            teacher_features, predictions = model.forward_with_feature(batch_images)
+            teacher_features, predictions = model(batch_images, return_feature=True)
             loss, loss_stats = criterion(predictions, batch_targets)
             feature_loss, feature_stats = compute_teacher_guidance_loss(
                 teacher_features,
                 batch_targets,
-                detector_frozen=detector_stage_frozen,
+                stage_settings=current_stage_settings,
             )
             loss = loss + feature_loss
             
@@ -2578,12 +2669,12 @@ def train():
 
         avg_train = {key: value / max(len(train_loader), 1) for key, value in train_component_sums.items()}
         history["train_total"].append(avg_train["total"])
-        current_lr = optimizer.param_groups[0]["lr"]
+        current_lr = max(group["lr"] for group in optimizer.param_groups)
         
         val_losses = None
         val_metrics = None
         if val_loader is not None and ((epoch + 1) % Config.VAL_INTERVAL == 0):
-            val_losses, val_metrics = evaluate_model(model, val_loader, criterion, device)
+            val_losses, val_metrics = evaluate_model(model, val_loader, criterion, device, stage_settings=current_stage_settings)
             history["val_total"].append(val_losses["total"])
             history["precision"].append(val_metrics["precision"])
             history["recall"].append(val_metrics["recall"])
@@ -2606,13 +2697,14 @@ def train():
 
         if is_best:
             best_loss = avg_train["total"]
+            model_core = unwrap_module(model)
             best_model_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_best.pth")
-            torch.save(model.detector.state_dict(), best_model_path)
+            torch.save(model_core.detector.state_dict(), best_model_path)
             if Config.SAVE_TEACHER_WEIGHTS:
-                torch.save(model.teacher.state_dict(), teacher_best_path)
+                torch.save(model_core.teacher.state_dict(), teacher_best_path)
                 torch.save({
-                    "teacher_state_dict": model.teacher.state_dict(),
-                    "detector_state_dict": model.detector.state_dict(),
+                    "teacher_state_dict": model_core.teacher.state_dict(),
+                    "detector_state_dict": model_core.detector.state_dict(),
                     "epoch": epoch,
                     "loss": avg_train["total"],
                     "val_map50": best_map50 if val_metrics is not None else None,
@@ -2643,12 +2735,13 @@ def train():
         save_training_curves(history, Config.TEACHER_OUTPUT_DIR)
 
     model_save_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_final.pth")
-    torch.save(model.detector.state_dict(), model_save_path)
+    model_core = unwrap_module(model)
+    torch.save(model_core.detector.state_dict(), model_save_path)
     if Config.SAVE_TEACHER_WEIGHTS:
-        torch.save(model.teacher.state_dict(), teacher_final_path)
+        torch.save(model_core.teacher.state_dict(), teacher_final_path)
         torch.save({
-            "teacher_state_dict": model.teacher.state_dict(),
-            "detector_state_dict": model.detector.state_dict(),
+            "teacher_state_dict": model_core.teacher.state_dict(),
+            "detector_state_dict": model_core.detector.state_dict(),
             "epoch": Config.EPOCHS - 1,
             "loss": history["train_total"][-1] if len(history["train_total"]) > 0 else None,
             "val_map50": best_map50 if best_map50 >= 0 else None,

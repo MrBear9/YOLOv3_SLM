@@ -150,6 +150,7 @@ class Config:
     
     # 训练参数
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
     IMG_SIZE = 640
     BATCH_SIZE = 8  # 批次大小，用于训练时的内存占用
     PHASE1_STUDENT_EPOCHS = 70
@@ -202,7 +203,7 @@ class Config:
     
     # 训练控制参数
     NORM_STRATEGY = "disabled"  # disabled / always / after_epoch
-    NORM_ENABLE_EPOCH = 60  # 仅在 NORM_STRATEGY=after_epoch 时生效
+    NORM_ENABLE_EPOCH = 155  # 仅在 NORM_STRATEGY=after_epoch 时生效
     VIS_INTERVAL = 2  # 可视化间隔，单位：轮数
     GRAD_CLIP_NORM = 1.0
     USE_LR_SCHEDULER = True
@@ -222,7 +223,9 @@ class Config:
     LOSS_SSIM_WEIGHT = 0.3
     LOSS_GRAD_WEIGHT = 0.25
     LOSS_FREQ_WEIGHT = 0.15
-    LOSS_PHASE_SMOOTH_WEIGHT = 0.02
+    LOSS_PHASE_SMOOTH_WEIGHT = 0.005
+    LOSS_PHASE_DIVERSITY_WEIGHT = 0.05
+    PHASE_STD_TARGET = 0.45
     RESPONSE_MAP_WEIGHT = 0.15
     USE_DETECTION_RESPONSE_LOSS = True
     RESPONSE_WARMUP_EPOCHS = 12
@@ -247,6 +250,9 @@ class Config:
     # 可视化参数
     VIS_BATCH_SIZE = 4  # 可视化批次大小，用于可视化检测结果
     VIS_DPI = 120  # 可视化DPI，用于调整可视化结果的清晰度
+    NUM_WORKERS = min(8, os.cpu_count() or 0)
+    PIN_MEMORY = torch.cuda.is_available()
+    PERSISTENT_WORKERS = True
     
     @classmethod
     def initialize(cls):
@@ -365,10 +371,6 @@ class Config:
         print(f"权重衰减: {cls.WEIGHT_DECAY}")
         print("="*80)
 
-# 初始化配置
-Config.initialize()
-Config.print_config()
-
 def log_to_file(message, log_file=None, also_print=True):
     if log_file is None:
         log_file = Config.LOG_FILE
@@ -389,10 +391,76 @@ def init_log_file(log_file=None):
         f.write(f"训练开始时间: {Config.TRAIN_START_TIME}\n")
         f.write("="*80 + "\n\n")
 
-init_log_file()
-log_to_file(f"日志文件路径: {Config.LOG_FILE}")
-log_to_file(f"可视化结果保存路径: {Config.TEACHER_OUTPUT_DIR}")
-log_to_file(f"加载类别信息: {Config.CLASS_NAMES}, 类别数: {Config.NUM_CLASSES}")
+
+def unwrap_module(module):
+    return module.module if isinstance(module, nn.DataParallel) else module
+
+
+def get_runtime_device():
+    return torch.device(f"cuda:{Config.GPU_IDS[0]}") if Config.GPU_IDS else torch.device("cpu")
+
+
+def wrap_data_parallel(module, module_name="module"):
+    device = get_runtime_device()
+    module = module.to(device)
+    if len(Config.GPU_IDS) > 1:
+        module = nn.DataParallel(module, device_ids=Config.GPU_IDS, output_device=Config.GPU_IDS[0])
+        log_to_file(f"{module_name} wrapped with DataParallel on GPUs: {Config.GPU_IDS}")
+    return module
+
+
+def get_dataloader_kwargs(shuffle=False):
+    kwargs = {
+        "shuffle": shuffle,
+        "num_workers": Config.NUM_WORKERS,
+        "pin_memory": Config.PIN_MEMORY,
+    }
+    if Config.NUM_WORKERS > 0:
+        kwargs["persistent_workers"] = Config.PERSISTENT_WORKERS
+    return kwargs
+
+
+def get_phase_statistics(student):
+    student_core = unwrap_module(student)
+    stats = {}
+    for slm_name in ("slm1", "slm2"):
+        slm_layer = getattr(student_core, slm_name)
+        phase_raw = slm_layer.phase_raw.detach()
+        phase_eff = torch.remainder(phase_raw, 2 * np.pi)
+        stats[f"{slm_name}_raw_min"] = float(phase_raw.min().item())
+        stats[f"{slm_name}_raw_max"] = float(phase_raw.max().item())
+        stats[f"{slm_name}_raw_span"] = float((phase_raw.max() - phase_raw.min()).item())
+        stats[f"{slm_name}_eff_std"] = float(phase_eff.std().item())
+    return stats
+
+
+def save_phase_visualization(student, save_dir, epoch):
+    student_core = unwrap_module(student)
+    os.makedirs(save_dir, exist_ok=True)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    panels = [
+        ("slm1", "Raw Phase", student_core.slm1.phase_raw.detach().cpu().squeeze().numpy()),
+        ("slm1", "Effective Phase", torch.remainder(student_core.slm1.phase_raw.detach(), 2 * np.pi).cpu().squeeze().numpy()),
+        ("slm2", "Raw Phase", student_core.slm2.phase_raw.detach().cpu().squeeze().numpy()),
+        ("slm2", "Effective Phase", torch.remainder(student_core.slm2.phase_raw.detach(), 2 * np.pi).cpu().squeeze().numpy()),
+    ]
+    for ax, (slm_name, title, phase_map) in zip(axes.flatten(), panels):
+        im = ax.imshow(phase_map, cmap="twilight")
+        ax.set_title(f"{slm_name} {title}")
+        ax.axis("off")
+        plt.colorbar(im, ax=ax, fraction=0.046)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, f"phase_epoch_{epoch:03d}.png"), dpi=Config.VIS_DPI)
+    plt.close()
+
+
+def bootstrap_runtime():
+    Config.initialize()
+    Config.print_config()
+    init_log_file()
+    log_to_file(f"日志文件路径: {Config.LOG_FILE}")
+    log_to_file(f"可视化结果保存路径: {Config.TEACHER_OUTPUT_DIR}")
+    log_to_file(f"加载类别信息: {Config.CLASS_NAMES}, 类别数: {Config.NUM_CLASSES}")
 
 # =========================================================
 # 光学层（相位 + 振幅调制）
@@ -668,11 +736,9 @@ class YOLOLightHead(nn.Module):
 # 数据集
 # =========================================================
 class MilitaryFeatureDataset(Dataset):
-    def __init__(self, yaml_path=None, teacher=None, device=None):
+    def __init__(self, yaml_path=None):
         if yaml_path is None:
             yaml_path = Config.YAML_PATH
-        if device is None:
-            device = Config.DEVICE
         with open(yaml_path, 'r', encoding='utf-8') as f:
             cfg = yaml.safe_load(f)
         img_dir = os.path.join(cfg["path"], cfg["train"])
@@ -683,8 +749,6 @@ class MilitaryFeatureDataset(Dataset):
             if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
         ])
         self.labels_dir = labels_dir
-        self.teacher = teacher.to(device).eval()
-        self.device = device
         self.gray = transforms.Compose([
             transforms.Resize((Config.IMG_SIZE, Config.IMG_SIZE)),
             transforms.Grayscale(1),
@@ -716,19 +780,16 @@ class MilitaryFeatureDataset(Dataset):
     def __getitem__(self, idx):
         img_path = self.files[idx]
         img = Image.open(img_path).convert("RGB")
-        x = self.gray(img)
+        gray_image = self.gray(img)
+        rgb_image = self.rgb(img)
         targets = self._load_targets(img_path)
-        with torch.no_grad():
-            t = self.teacher(self.rgb(img).unsqueeze(0).to(self.device))
-            t = F.interpolate(t, size=(Config.IMG_SIZE, Config.IMG_SIZE), mode="bilinear", align_corners=False)
-            t = t.squeeze(0).cpu()
-        return x, t, targets
+        return gray_image, rgb_image, targets
 
 def feature_dataset_collate_fn(batch):
-    images = torch.stack([item[0] for item in batch], dim=0)
-    teacher_features = torch.stack([item[1] for item in batch], dim=0)
+    gray_images = torch.stack([item[0] for item in batch], dim=0)
+    rgb_images = torch.stack([item[1] for item in batch], dim=0)
     targets = [item[2] for item in batch]
-    return images, teacher_features, targets
+    return gray_images, rgb_images, targets
 
 # =========================================================
 # 损失函数
@@ -769,7 +830,8 @@ class CompositeOpticalFeatureLoss(nn.Module):
 
     def phase_smoothness_loss(self, student):
         phase_terms = []
-        for slm_layer in (student.slm1, student.slm2):
+        student_core = unwrap_module(student)
+        for slm_layer in (student_core.slm1, student_core.slm2):
             phase = torch.remainder(slm_layer.phase_raw, 2 * np.pi)
             cos_phase = torch.cos(phase)
             sin_phase = torch.sin(phase)
@@ -779,6 +841,15 @@ class CompositeOpticalFeatureLoss(nn.Module):
             phase_terms.append(torch.abs(sin_phase[:, :, 1:, :] - sin_phase[:, :, :-1, :]).mean())
         return sum(phase_terms) / max(len(phase_terms), 1)
 
+    def phase_diversity_loss(self, student):
+        student_core = unwrap_module(student)
+        diversity_terms = []
+        for slm_layer in (student_core.slm1, student_core.slm2):
+            phase = torch.remainder(slm_layer.phase_raw, 2 * np.pi)
+            phase_std = phase.std()
+            diversity_terms.append(F.relu(Config.PHASE_STD_TARGET - phase_std))
+        return sum(diversity_terms) / max(len(diversity_terms), 1)
+
     def forward(self, s, t, student):
         loss_full = F.mse_loss(s, t)
         loss_low1 = F.mse_loss(self.pool1(s), self.pool1(t))
@@ -787,6 +858,7 @@ class CompositeOpticalFeatureLoss(nn.Module):
         loss_grad = self.gradient_loss(s, t)
         loss_freq = self.frequency_loss(s, t)
         loss_phase = self.phase_smoothness_loss(student)
+        loss_phase_diversity = self.phase_diversity_loss(student)
         total = (
             loss_full * Config.LOSS_FULL_WEIGHT +
             loss_low1 * Config.LOSS_LOW1_WEIGHT +
@@ -794,7 +866,8 @@ class CompositeOpticalFeatureLoss(nn.Module):
             loss_ssim * Config.LOSS_SSIM_WEIGHT +
             loss_grad * Config.LOSS_GRAD_WEIGHT +
             loss_freq * Config.LOSS_FREQ_WEIGHT +
-            loss_phase * Config.LOSS_PHASE_SMOOTH_WEIGHT
+            loss_phase * Config.LOSS_PHASE_SMOOTH_WEIGHT +
+            loss_phase_diversity * Config.LOSS_PHASE_DIVERSITY_WEIGHT
         )
         stats = {
             "full": float(loss_full.detach().item()),
@@ -804,6 +877,7 @@ class CompositeOpticalFeatureLoss(nn.Module):
             "grad": float(loss_grad.detach().item()),
             "freq": float(loss_freq.detach().item()),
             "phase": float(loss_phase.detach().item()),
+            "phase_diversity": float(loss_phase_diversity.detach().item()),
             "total": float(total.detach().item()),
         }
         return total, stats
@@ -1377,10 +1451,12 @@ def log_all_parameters():
     
     log_to_file("\n【训练参数】")
     log_to_file(f"  设备: {Config.DEVICE}")
+    log_to_file(f"  GPU IDs: {Config.GPU_IDS if Config.GPU_IDS else 'CPU only'}")
     log_to_file(f"  图像尺寸: {Config.IMG_SIZE}")
     log_to_file(f"  批次大小: {Config.BATCH_SIZE}")
     log_to_file(f"  训练轮数: {Config.EPOCHS}")
     log_to_file(f"  Phase1/Phase2/Phase3: {Config.PHASE1_STUDENT_EPOCHS} / {Config.PHASE2_DETECTOR_EPOCHS} / {Config.PHASE3_JOINT_EPOCHS}")
+    log_to_file(f"  Num workers / pin memory: {Config.NUM_WORKERS} / {Config.PIN_MEMORY}")
     
     log_to_file("\n【损失权重】")
     log_to_file(f"  边界框损失权重: {Config.BOX_WEIGHT}")
@@ -1440,7 +1516,12 @@ def log_all_parameters():
 
     log_to_file("\n【学生损失】")
     log_to_file(f"  Full / Low1 / Low2: {Config.LOSS_FULL_WEIGHT} / {Config.LOSS_LOW1_WEIGHT} / {Config.LOSS_LOW2_WEIGHT}")
-    log_to_file(f"  SSIM / Grad / Freq / Phase: {Config.LOSS_SSIM_WEIGHT} / {Config.LOSS_GRAD_WEIGHT} / {Config.LOSS_FREQ_WEIGHT} / {Config.LOSS_PHASE_SMOOTH_WEIGHT}")
+    log_to_file(
+        f"  SSIM / Grad / Freq / PhaseSmooth / PhaseDiversity: "
+        f"{Config.LOSS_SSIM_WEIGHT} / {Config.LOSS_GRAD_WEIGHT} / {Config.LOSS_FREQ_WEIGHT} / "
+        f"{Config.LOSS_PHASE_SMOOTH_WEIGHT} / {Config.LOSS_PHASE_DIVERSITY_WEIGHT}"
+    )
+    log_to_file(f"  Phase std target: {Config.PHASE_STD_TARGET}")
     log_to_file(f"  Use detection response loss: {Config.USE_DETECTION_RESPONSE_LOSS}")
     log_to_file(f"  Response map weight: {Config.RESPONSE_MAP_WEIGHT}")
     log_to_file(f"  Response warmup epochs / start factor: {Config.RESPONSE_WARMUP_EPOCHS} / {Config.RESPONSE_WARMUP_START_FACTOR}")
@@ -1466,9 +1547,13 @@ def log_all_parameters():
 # 训练函数
 # =========================================================
 def train():
+    bootstrap_runtime()
     log_all_parameters()
-    device = Config.DEVICE
+    device = get_runtime_device()
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
     log_to_file(f"使用设备: {device}")
+    log_to_file(f"检测到 GPU 数量: {torch.cuda.device_count()}")
     
     log_to_file("初始化教师网络（ConvTeacher）...")
     teacher = ConvTeacher().to(device)
@@ -1481,6 +1566,8 @@ def train():
 
     for p in teacher.parameters():
         p.requires_grad = False
+    teacher.eval()
+    teacher = wrap_data_parallel(teacher, module_name="ConvTeacher")
     log_to_file("教师网络参数已冻结")
 
     response_detector = None
@@ -1496,6 +1583,7 @@ def train():
             response_detector.eval()
             for p in response_detector.parameters():
                 p.requires_grad = False
+            response_detector = wrap_data_parallel(response_detector, module_name="ResponseDetector")
             log_to_file("已启用检测响应图约束")
         else:
             response_detector = None
@@ -1503,7 +1591,8 @@ def train():
 
     log_to_file("初始化学生网络（OpticalStudent）...")
     student = OpticalStudent().to(device)
-    student.enable_norm = Config.should_enable_student_norm(epoch=0)
+    unwrap_module(student).enable_norm = Config.should_enable_student_norm(epoch=0)
+    student = wrap_data_parallel(student, module_name="OpticalStudent")
 
     log_to_file("初始化可训练检测头（YOLOLightHead）...")
     detector = YOLOLightHead(
@@ -1512,14 +1601,15 @@ def train():
     ).to(device)
     trainable_detector_loaded, trainable_detector_message = load_detector_checkpoint(detector, Config.DETECTOR_CHECKPOINT, device)
     log_to_file(trainable_detector_message if trainable_detector_loaded else f"Trainable detector init fallback: {trainable_detector_message}")
+    detector = wrap_data_parallel(detector, module_name="TrainableDetector")
     
     log_to_file("加载数据集...")
-    dataset = MilitaryFeatureDataset(teacher=teacher, device=device)
+    dataset = MilitaryFeatureDataset()
     loader = DataLoader(
         dataset,
         batch_size=Config.BATCH_SIZE,
-        shuffle=True,
         collate_fn=feature_dataset_collate_fn,
+        **get_dataloader_kwargs(shuffle=True),
     )
     log_to_file(f"数据集大小: {len(dataset)}")
 
@@ -1564,7 +1654,7 @@ def train():
             optimizer = torch.optim.Adam(student.parameters(), lr=Config.STUDENT_ONLY_LR, weight_decay=Config.WEIGHT_DECAY)
         elif phase_name == "detector_only":
             if Config.RESTORE_PHASE1_BEST_FOR_PHASE2 and best_phase1_student_state is not None:
-                student.load_state_dict(best_phase1_student_state, strict=False)
+                unwrap_module(student).load_state_dict(best_phase1_student_state, strict=False)
                 log_to_file(
                     f"Phase switch -> detector_only: restored phase1 best student "
                     f"(epoch={best_phase1_epoch}, feature={best_phase1_feature_loss:.6f})"
@@ -1574,8 +1664,8 @@ def train():
             optimizer = torch.optim.Adam(detector.parameters(), lr=Config.DETECTOR_ONLY_LR, weight_decay=Config.WEIGHT_DECAY)
         else:
             if Config.RESTORE_PHASE2_BEST_FOR_PHASE3 and best_phase2_student_state is not None and best_phase2_detector_state is not None:
-                student.load_state_dict(best_phase2_student_state, strict=False)
-                detector.load_state_dict(best_phase2_detector_state, strict=False)
+                unwrap_module(student).load_state_dict(best_phase2_student_state, strict=False)
+                unwrap_module(detector).load_state_dict(best_phase2_detector_state, strict=False)
                 log_to_file(
                     f"Phase switch -> joint_balance: restored phase2 best pair "
                     f"(epoch={best_phase2_epoch}, detection={best_phase2_detection_loss:.6f})"
@@ -1605,9 +1695,11 @@ def train():
             configure_phase(current_phase)
 
         desired_norm = Config.should_enable_student_norm(epoch)
-        if student.enable_norm != desired_norm:
-            student.enable_norm = desired_norm
-            log_to_file(f"Epoch {epoch}: 学生输出归一化切换为 {student.enable_norm}")
+        student_core = unwrap_module(student)
+        detector_core = unwrap_module(detector)
+        if student_core.enable_norm != desired_norm:
+            student_core.enable_norm = desired_norm
+            log_to_file(f"Epoch {epoch}: 学生输出归一化切换为 {student_core.enable_norm}")
 
         current_response_weight = Config.get_response_loss_weight(epoch)
         student.train(mode=current_phase != "detector_only")
@@ -1622,10 +1714,13 @@ def train():
         detection_noobj_sum = 0
         detection_cls_sum = 0
 
-        for x, t, targets in tqdm(loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{current_phase}]", leave=True):
-            x = x.to(device)
-            t = t.to(device)
-            targets = [target.to(device) for target in targets]
+        for x, rgb, targets in tqdm(loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{current_phase}]", leave=True):
+            x = x.to(device, non_blocking=Config.PIN_MEMORY)
+            rgb = rgb.to(device, non_blocking=Config.PIN_MEMORY)
+            targets = [target.to(device, non_blocking=Config.PIN_MEMORY) for target in targets]
+            with torch.no_grad():
+                t = teacher(rgb)
+                t = F.interpolate(t, size=(Config.IMG_SIZE, Config.IMG_SIZE), mode="bilinear", align_corners=False)
 
             if current_phase == "student_only":
                 y = student(x)
@@ -1714,7 +1809,7 @@ def train():
         if current_phase == "student_only" and avg_feature_loss < best_phase1_feature_loss:
             best_phase1_feature_loss = avg_feature_loss
             best_phase1_epoch = epoch
-            best_phase1_student_state = copy.deepcopy(student.state_dict())
+            best_phase1_student_state = copy.deepcopy(student_core.state_dict())
             torch.save(best_phase1_student_state, Config.get_phase1_student_best_model_path())
             log_to_file(
                 f"Epoch {epoch}: 保存 phase1 最佳学生模型 "
@@ -1725,8 +1820,8 @@ def train():
         if current_phase == "detector_only" and avg_detection_loss < best_phase2_detection_loss:
             best_phase2_detection_loss = avg_detection_loss
             best_phase2_epoch = epoch
-            best_phase2_student_state = copy.deepcopy(student.state_dict())
-            best_phase2_detector_state = copy.deepcopy(detector.state_dict())
+            best_phase2_student_state = copy.deepcopy(student_core.state_dict())
+            best_phase2_detector_state = copy.deepcopy(detector_core.state_dict())
             torch.save(best_phase2_student_state, Config.get_phase2_student_best_model_path())
             torch.save(best_phase2_detector_state, Config.get_phase2_detector_best_model_path())
             log_to_file(
@@ -1738,8 +1833,8 @@ def train():
         if current_phase in {"detector_only", "joint_balance"} and monitor_value < best_joint_loss:
             best_joint_loss = monitor_value
             best_joint_epoch = epoch
-            best_student_state = copy.deepcopy(student.state_dict())
-            best_detector_state = copy.deepcopy(detector.state_dict())
+            best_student_state = copy.deepcopy(student_core.state_dict())
+            best_detector_state = copy.deepcopy(detector_core.state_dict())
             torch.save(best_student_state, Config.get_best_model_path())
             torch.save(best_detector_state, Config.get_detector_best_model_path())
             log_to_file(
@@ -1755,18 +1850,23 @@ def train():
                 vis_loader = torch.utils.data.DataLoader(
                     dataset,
                     batch_size=Config.VIS_BATCH_SIZE,
-                    shuffle=True,
                     collate_fn=feature_dataset_collate_fn,
+                    **get_dataloader_kwargs(shuffle=True),
                 )
                 vis_batch = next(iter(vis_loader))
-                x_vis, t_vis, _ = vis_batch
-                x_vis = x_vis.to(device)
-                t_vis = t_vis.to(device)
+                x_vis, rgb_vis, _ = vis_batch
+                x_vis = x_vis.to(device, non_blocking=Config.PIN_MEMORY)
+                rgb_vis = rgb_vis.to(device, non_blocking=Config.PIN_MEMORY)
+                t_vis = teacher(rgb_vis)
+                t_vis = F.interpolate(t_vis, size=(Config.IMG_SIZE, Config.IMG_SIZE), mode="bilinear", align_corners=False)
                 y_vis_gpu = student(x_vis)
                 y_vis = y_vis_gpu.cpu()
                 detections_vis = decode_detections(detector(y_vis_gpu))
             save_feature_comparison(epoch, t_vis, y_vis, vis_dir, input_images=x_vis)
             save_detection_visualization(x_vis.cpu(), detections_vis, vis_dir, epoch, Config.CLASS_NAMES)
+            save_phase_visualization(student, vis_dir, epoch)
+
+        phase_stats = get_phase_statistics(student)
 
         log_to_file(
             f"Epoch {epoch:3d} [{current_phase}] | Loss: {avg_loss:.6f} | "
@@ -1775,6 +1875,8 @@ def train():
             f"ResponseWeighted: {avg_response_loss:.6f} | "
             f"Detection: {avg_detection_loss:.6f} | "
             f"DetBox/Obj/NoObj/Cls: {avg_detection_box:.4f}/{avg_detection_obj:.4f}/{avg_detection_noobj:.4f}/{avg_detection_cls:.4f} | "
+            f"PhaseSpan(slm1/slm2): {phase_stats['slm1_raw_span']:.4f}/{phase_stats['slm2_raw_span']:.4f} | "
+            f"PhaseStd(slm1/slm2): {phase_stats['slm1_eff_std']:.4f}/{phase_stats['slm2_eff_std']:.4f} | "
             f"RespW: {current_response_weight:.6f} | "
             f"LR: {','.join(f'{group['lr']:.6g}' for group in optimizer.param_groups)}"
         )
@@ -1791,15 +1893,15 @@ def train():
 
     last_student_path = Config.get_last_model_path()
     last_detector_path = Config.get_detector_last_model_path()
-    torch.save(student.state_dict(), last_student_path)
-    torch.save(detector.state_dict(), last_detector_path)
+    torch.save(unwrap_module(student).state_dict(), last_student_path)
+    torch.save(unwrap_module(detector).state_dict(), last_detector_path)
 
     if Config.FINAL_MODEL_SOURCE == "best_joint" and best_student_state is not None and best_detector_state is not None:
         final_student_state = best_student_state
         final_detector_state = best_detector_state
     else:
-        final_student_state = student.state_dict()
-        final_detector_state = detector.state_dict()
+        final_student_state = unwrap_module(student).state_dict()
+        final_detector_state = unwrap_module(detector).state_dict()
 
     final_student_path = Config.get_final_model_path()
     final_detector_path = Config.get_detector_final_model_path()
