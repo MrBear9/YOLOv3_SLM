@@ -150,6 +150,7 @@ def get_dataloader_kwargs(shuffle=False, sampler=None):
     }
     if ConfigYOLO.NUM_WORKERS > 0:
         kwargs["persistent_workers"] = ConfigYOLO.PERSISTENT_WORKERS
+        kwargs["prefetch_factor"] = ConfigYOLO.PREFETCH_FACTOR
     return kwargs
 
 def init_epoch_log_table():
@@ -757,6 +758,78 @@ def suppress_contained_detections(det_tensor, containment_ratio, area_ratio_limi
 
     return det_tensor[keep_mask]
 
+
+def fuse_same_class_boxes(
+    det_tensor,
+    iou_thresh,
+    skip_conf_thresh,
+    score_power=1.0,
+    max_candidates=12,
+    center_dist_factor=0.22,
+    size_ratio_limit=1.8,
+):
+    if det_tensor.numel() == 0 or det_tensor.shape[0] <= 1:
+        return det_tensor
+
+    det_tensor = det_tensor[det_tensor[:, 4] >= skip_conf_thresh]
+    if det_tensor.numel() == 0 or det_tensor.shape[0] <= 1:
+        return det_tensor
+
+    boxes = det_tensor[:, :4]
+    scores = det_tensor[:, 4]
+    class_ids = det_tensor[:, 5]
+    keep_mask = torch.ones(det_tensor.shape[0], dtype=torch.bool, device=det_tensor.device)
+    fused = []
+
+    for base_idx in range(det_tensor.shape[0]):
+        if not keep_mask[base_idx]:
+            continue
+
+        same_class_mask = class_ids == class_ids[base_idx]
+        candidate_indices = torch.nonzero(same_class_mask & keep_mask, as_tuple=False).flatten()
+        if candidate_indices.numel() == 0:
+            continue
+
+        candidate_indices = candidate_indices[scores[candidate_indices].argsort(descending=True)]
+        candidate_indices = candidate_indices[:max_candidates]
+
+        base_box = boxes[base_idx:base_idx + 1]
+        candidate_boxes = boxes[candidate_indices]
+        ious = bbox_iou_matrix_xywh(base_box, candidate_boxes)[0]
+
+        center_delta = torch.abs(candidate_boxes[:, :2] - base_box[:, :2])
+        base_size = base_box[:, 2:4].clamp(min=1e-6)
+        center_ok = (
+            (center_delta[:, 0] <= base_size[0, 0] * center_dist_factor) &
+            (center_delta[:, 1] <= base_size[0, 1] * center_dist_factor)
+        )
+
+        candidate_sizes = candidate_boxes[:, 2:4].clamp(min=1e-6)
+        ratio_w = torch.maximum(candidate_sizes[:, 0] / base_size[0, 0], base_size[0, 0] / candidate_sizes[:, 0])
+        ratio_h = torch.maximum(candidate_sizes[:, 1] / base_size[0, 1], base_size[0, 1] / candidate_sizes[:, 1])
+        size_ok = (ratio_w <= size_ratio_limit) & (ratio_h <= size_ratio_limit)
+
+        cluster_mask = (ious >= iou_thresh) & center_ok & size_ok
+        cluster_indices = candidate_indices[cluster_mask]
+
+        if cluster_indices.numel() <= 1:
+            fused.append(det_tensor[base_idx])
+            keep_mask[base_idx] = False
+            continue
+
+        cluster_boxes = boxes[cluster_indices]
+        cluster_scores = scores[cluster_indices].clamp(min=1e-6)
+        weights = cluster_scores.pow(score_power)
+        weights_sum = weights.sum().clamp(min=1e-6)
+        fused_box = (cluster_boxes * weights.unsqueeze(1)).sum(dim=0) / weights_sum
+        fused_score = cluster_scores.max()
+        fused.append(torch.cat([fused_box, fused_score.unsqueeze(0), class_ids[base_idx:base_idx + 1]]))
+        keep_mask[cluster_indices] = False
+
+    if len(fused) == 0:
+        return det_tensor
+    return torch.stack(fused, dim=0)
+
 def weighted_mean(values, weights=None, eps=1e-6):
     if values.numel() == 0:
         return torch.zeros((), device=values.device, dtype=values.dtype)
@@ -802,6 +875,17 @@ def apply_nms(detections, nms_thresh, max_det, class_agnostic=None):
             containment_ratio=Config.CONTAINMENT_SUPPRESS_RATIO,
             area_ratio_limit=Config.CONTAINMENT_AREA_RATIO_LIMIT,
             class_agnostic=class_agnostic,
+        )
+
+    if Config.ENABLE_WBF:
+        det_tensor = fuse_same_class_boxes(
+            det_tensor,
+            iou_thresh=Config.WBF_IOU_THRESH,
+            skip_conf_thresh=Config.WBF_SKIP_CONF_THRESH,
+            score_power=Config.WBF_SCORE_POWER,
+            max_candidates=Config.WBF_MAX_CANDIDATES,
+            center_dist_factor=Config.WBF_CENTER_DIST_FACTOR,
+            size_ratio_limit=Config.WBF_SIZE_RATIO_LIMIT,
         )
 
     det_tensor = det_tensor[det_tensor[:, 4].argsort(descending=True)]
@@ -1015,9 +1099,9 @@ class ConfigYOLO:
     IMG_SIZE = 640
     BATCH_SIZE = 64
 
-    STAGE1_LOCATE_EPOCHS = 60
-    STAGE2_TEXTURE_EPOCHS = 50
-    STAGE3_BALANCE_EPOCHS = 80
+    STAGE1_LOCATE_EPOCHS = 240
+    STAGE2_TEXTURE_EPOCHS = 280
+    STAGE3_BALANCE_EPOCHS = 280
     EPOCHS = STAGE1_LOCATE_EPOCHS + STAGE2_TEXTURE_EPOCHS + STAGE3_BALANCE_EPOCHS
 
     # 经常调整的训练参数
@@ -1027,9 +1111,9 @@ class ConfigYOLO:
     CLS_WEIGHT_BASE = 0.32  # 保留分类监督，同时回到更接近旧稳态
 
     IOU_THRESHOLD = 0.5  # 主要正样本匹配阈值；较大的值使正样本分配更严格，可能降低召回率
-    POSITIVE_ANCHOR_IOU = 0.25  # 回退到旧版更稳的正样本匹配阈值
+    POSITIVE_ANCHOR_IOU = 0.35  # 收紧正样本，减少一个目标分到多个相近锚点
     MAX_POSITIVE_ANCHORS = 1  # 收回到单锚点分配，优先减少重复框
-    NOOBJ_IGNORE_IOU = 0.6  # 避免把近邻潜在正样本也过度压成背景
+    NOOBJ_IGNORE_IOU = 0.68  # 更积极忽略近邻候选，降低背景误压导致的碎框
 
     SMALL_OBJ_AREA = 32 * 32  # 将对象分组为小目标的阈值
     LARGE_OBJ_AREA = 128 * 128  # 将对象分组为大目标的阈值
@@ -1040,13 +1124,20 @@ class ConfigYOLO:
     FOCAL_ALPHA = 0.28  # 向旧稳态回调，避免过度偏向负样本
     FOCAL_GAMMA = 1.6  # 略降，减少后期被困难背景样本牵制
 
-    CONF_THRESH = 0.62  # 再收一点背景召回，优先抑制虚警和碎框
-    NMS_THRESH = 0.18  # 对同类近邻框更强抑制，减少一个大目标多个小框
+    CONF_THRESH = 0.66  # 再收紧一点背景输出
+    NMS_THRESH = 0.16  # 对同类近邻框继续加强抑制
     MAX_DET = 3  # 单图输出继续收紧，减少画面噪声
     AGNOSTIC_NMS = False  # 多类别任务使用按类 NMS，避免不同类别互相压制
     ENABLE_CONTAINMENT_SUPPRESSION = True
-    CONTAINMENT_SUPPRESS_RATIO = 0.88  # 小框大部分被同类大框包住时直接压掉
-    CONTAINMENT_AREA_RATIO_LIMIT = 0.55  # 只抑制明显更小的碎框，避免压掉相邻独立目标
+    CONTAINMENT_SUPPRESS_RATIO = 0.90  # 更严格压掉被同类大框包住的小碎框
+    CONTAINMENT_AREA_RATIO_LIMIT = 0.50  # 只处理明显更小的碎框
+    ENABLE_WBF = True
+    WBF_IOU_THRESH = 0.72
+    WBF_SKIP_CONF_THRESH = 0.08
+    WBF_SCORE_POWER = 1.5
+    WBF_MAX_CANDIDATES = 12
+    WBF_CENTER_DIST_FACTOR = 0.22
+    WBF_SIZE_RATIO_LIMIT = 1.8
 
     # 验证和指标
     VAL_INTERVAL = 5
@@ -1112,16 +1203,20 @@ class ConfigYOLO:
     VIS_DPI = 130
     VIS_DATASET_SPLIT = "val"  # 可视化时使用的数据集分割
     VIS_SEED = 20260429  # 保持与本次 ft 实验一致，便于前后对比
-    VIS_CONF_THRESH = 0.70  # 可视化单独用更干净的显示阈值
-    VIS_NMS_THRESH = 0.16
+    VIS_CONF_THRESH = 0.72  # 可视化继续比训练后处理更干净
+    VIS_NMS_THRESH = 0.14
     VIS_MAX_DET = 3
     VIS_SHOW_BEST_MATCHED_ANCHORS = True
     VIS_MAX_GT_ANCHOR_OVERLAYS = 2
-    NUM_WORKERS = min(8, os.cpu_count() or 0)
+    VIS_MATCHED_ONLY = True
+    VIS_MATCH_IOU_THRESH = 0.20
+    NUM_WORKERS = min(12, os.cpu_count() or 0)
     PIN_MEMORY = torch.cuda.is_available()
     PERSISTENT_WORKERS = True  # 是否使用持久化工作进程，提高数据加载效率
     ENABLE_CUDNN_BENCHMARK = True  # 是否启用 cudnn_benchmark，提高推理效率
-    ENABLE_CHANNELS_LAST = False # 是否使用 channels_last 格式，提高内存效率
+    ENABLE_CHANNELS_LAST = True  # 是否使用 channels_last 格式，提高内存效率
+    ENABLE_TF32 = True
+    PREFETCH_FACTOR = 4
 
     # Logging table
     EPOCH_TABLE_EPOCH_WIDTH = 8
@@ -1366,6 +1461,7 @@ def log_all_parameters():
     log_to_file("\n[Acceleration]")
     log_to_file(f"  CuDNN benchmark: {Config.ENABLE_CUDNN_BENCHMARK}")
     log_to_file(f"  Channels last: {Config.ENABLE_CHANNELS_LAST and torch.cuda.is_available()}")
+    log_to_file(f"  TF32: {Config.ENABLE_TF32 and torch.cuda.is_available()}")
     log_to_file("  Winograd: cuDNN auto-selects eligible conv kernels when benchmark is enabled")
     
     log_to_file("\n[Loss Weights]")
@@ -1411,6 +1507,7 @@ def log_all_parameters():
     log_to_file(f"  Max detections: {Config.MAX_DET}")
     log_to_file(f"  Containment suppression: {Config.ENABLE_CONTAINMENT_SUPPRESSION}")
     log_to_file(f"  Containment ratio / area limit: {Config.CONTAINMENT_SUPPRESS_RATIO} / {Config.CONTAINMENT_AREA_RATIO_LIMIT}")
+    log_to_file(f"  WBF enabled / IoU / skip conf: {Config.ENABLE_WBF} / {Config.WBF_IOU_THRESH} / {Config.WBF_SKIP_CONF_THRESH}")
 
     log_to_file("\n[Teacher Feature Shaping]")
     log_to_file(
@@ -1441,6 +1538,7 @@ def log_all_parameters():
     log_to_file(f"  Empty-image sample weight: {Config.EMPTY_IMAGE_SAMPLE_WEIGHT}")
     log_to_file(f"  Min image sample weight: {Config.MIN_IMAGE_SAMPLE_WEIGHT}")
     log_to_file(f"  Num workers / pin memory: {Config.NUM_WORKERS} / {Config.PIN_MEMORY}")
+    log_to_file(f"  Persistent workers / prefetch factor: {Config.PERSISTENT_WORKERS} / {Config.PREFETCH_FACTOR}")
     
     log_to_file("\n[Visualization]")
     log_to_file(f"  Visualization interval: {Config.VIS_INTERVAL} epochs")
@@ -1450,6 +1548,7 @@ def log_all_parameters():
     log_to_file(f"  Visualization seed: {Config.VIS_SEED}")
     log_to_file(f"  Visualization conf / nms / max det: {Config.VIS_CONF_THRESH} / {Config.VIS_NMS_THRESH} / {Config.VIS_MAX_DET}")
     log_to_file(f"  Visualization anchor overlays: {Config.VIS_SHOW_BEST_MATCHED_ANCHORS} (max GT: {Config.VIS_MAX_GT_ANCHOR_OVERLAYS})")
+    log_to_file(f"  Visualization matched-only / IoU: {Config.VIS_MATCHED_ONLY} / {Config.VIS_MATCH_IOU_THRESH}")
     
     log_to_file("\n[Paths]")
     log_to_file(f"  Teacher output path: {Config.TEACHER_OUTPUT_DIR}")
@@ -1905,6 +2004,51 @@ def compute_average_precision(detections, total_gt):
     idx = np.where(mrec[1:] != mrec[:-1])[0]
     return float(np.sum((mrec[idx + 1] - mrec[idx]) * mpre[idx + 1]))
 
+
+def filter_matched_detections_for_visualization(detections, targets, img_size, match_iou_thresh):
+    if len(detections) == 0 or len(targets) == 0:
+        return np.zeros((0, 6), dtype=np.float32)
+
+    gt_by_class = {}
+    for gt in targets:
+        if gt.shape[0] < 5 or gt[3] <= 0 or gt[4] <= 0:
+            continue
+        cls_id = int(gt[0].item())
+        gt_box = [
+            float(gt[1].item() * img_size),
+            float(gt[2].item() * img_size),
+            float(gt[3].item() * img_size),
+            float(gt[4].item() * img_size),
+        ]
+        gt_by_class.setdefault(cls_id, []).append(gt_box)
+
+    kept = []
+    matched = {cls_id: set() for cls_id in gt_by_class}
+    detections_sorted = sorted(detections, key=lambda det: det[4], reverse=True)
+
+    for det in detections_sorted:
+        cls_id = int(det[5])
+        gt_boxes = gt_by_class.get(cls_id, [])
+        best_iou = 0.0
+        best_gt_idx = -1
+        for gt_idx, gt_box in enumerate(gt_boxes):
+            if gt_idx in matched.get(cls_id, set()):
+                continue
+            det_tensor = torch.tensor(det[:4], dtype=torch.float32).unsqueeze(0)
+            gt_tensor = torch.tensor(gt_box, dtype=torch.float32).unsqueeze(0)
+            iou = float(bbox_iou_xywh(det_tensor, gt_tensor).item())
+            if iou > best_iou:
+                best_iou = iou
+                best_gt_idx = gt_idx
+
+        if best_iou >= match_iou_thresh and best_gt_idx >= 0:
+            kept.append(det)
+            matched.setdefault(cls_id, set()).add(best_gt_idx)
+
+    if len(kept) == 0:
+        return np.zeros((0, 6), dtype=np.float32)
+    return np.asarray(kept, dtype=np.float32)
+
 def evaluate_model(model, dataloader, criterion, device, stage_settings=None):
     model.eval()
     metric_storage = {cls_id: [] for cls_id in range(Config.NUM_CLASSES)}
@@ -2105,6 +2249,14 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
                 nms_thresh=Config.VIS_NMS_THRESH,
                 max_det=Config.VIS_MAX_DET,
             )
+            vis_detections = detections[0]
+            if Config.VIS_MATCHED_ONLY:
+                vis_detections = filter_matched_detections_for_visualization(
+                    vis_detections,
+                    targets,
+                    img_size=Config.IMG_SIZE,
+                    match_iou_thresh=Config.VIS_MATCH_IOU_THRESH,
+                )
 
             axes[i, 0].imshow(img_np)
             axes[i, 0].set_title(f"Original Image {i+1}")
@@ -2173,8 +2325,8 @@ def save_detection_visualization(epoch, model, dataset, save_dir, prefix="train"
             axes[i, 3].set_title(f"Predictions {i+1}")
             axes[i, 3].axis("off")
 
-            if len(detections[0]) > 0:
-                for det in detections[0]:
+            if len(vis_detections) > 0:
+                for det in vis_detections:
                     x_center, y_center, width, height, conf, cls_id = det
                     cls_id = int(cls_id)
                     x1 = int(x_center - width / 2)
@@ -2312,11 +2464,16 @@ def train():
     device = get_runtime_device()
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = Config.ENABLE_CUDNN_BENCHMARK
+        if hasattr(torch.backends.cudnn, "allow_tf32"):
+            torch.backends.cudnn.allow_tf32 = Config.ENABLE_TF32
+        if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
+            torch.backends.cuda.matmul.allow_tf32 = Config.ENABLE_TF32
     log_to_file(f"Using device: {device}")
     log_to_file(f"Detected GPU count: {torch.cuda.device_count()}")
     log_to_file(
         f"Acceleration active: cudnn_benchmark={device.type == 'cuda' and Config.ENABLE_CUDNN_BENCHMARK}, "
-        f"channels_last={device.type == 'cuda' and Config.ENABLE_CHANNELS_LAST}"
+        f"channels_last={device.type == 'cuda' and Config.ENABLE_CHANNELS_LAST}, "
+        f"tf32={device.type == 'cuda' and Config.ENABLE_TF32}"
     )
     
     log_to_file("Loading ConvTeacher...")

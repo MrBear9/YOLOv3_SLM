@@ -283,11 +283,13 @@ class Config:
     # 可视化参数
     VIS_BATCH_SIZE = 4  # 可视化批次大小，用于可视化检测结果
     VIS_DPI = 120  # 可视化DPI，用于调整可视化结果的清晰度
-    NUM_WORKERS = min(8, os.cpu_count() or 0)
+    NUM_WORKERS = min(12, os.cpu_count() or 0)
     PIN_MEMORY = torch.cuda.is_available()
     PERSISTENT_WORKERS = True
     ENABLE_CUDNN_BENCHMARK = True  # 是否启用 cudnn_benchmark，提高推理效率
-    ENABLE_CHANNELS_LAST = False  # 是否使用 channels_last 格式，提高内存效率
+    ENABLE_CHANNELS_LAST = True  # 是否使用 channels_last 格式，提高内存效率
+    ENABLE_TF32 = True
+    PREFETCH_FACTOR = 4
     
     @classmethod
     def initialize(cls):
@@ -459,6 +461,7 @@ def get_dataloader_kwargs(shuffle=False):
     }
     if Config.NUM_WORKERS > 0:
         kwargs["persistent_workers"] = Config.PERSISTENT_WORKERS
+        kwargs["prefetch_factor"] = Config.PREFETCH_FACTOR
     return kwargs
 
 
@@ -1499,8 +1502,9 @@ def log_all_parameters():
     log_to_file(f"  训练轮数: {Config.EPOCHS}")
     log_to_file(f"  Phase1/Phase2/Phase3: {Config.PHASE1_STUDENT_EPOCHS} / {Config.PHASE2_DETECTOR_EPOCHS} / {Config.PHASE3_JOINT_EPOCHS}")
     log_to_file(f"  Num workers / pin memory: {Config.NUM_WORKERS} / {Config.PIN_MEMORY}")
-    log_to_file(f"  CuDNN benchmark / channels last: {Config.ENABLE_CUDNN_BENCHMARK} / {Config.ENABLE_CHANNELS_LAST and torch.cuda.is_available()}")
+    log_to_file(f"  CuDNN benchmark / channels last / TF32: {Config.ENABLE_CUDNN_BENCHMARK} / {Config.ENABLE_CHANNELS_LAST and torch.cuda.is_available()} / {Config.ENABLE_TF32 and torch.cuda.is_available()}")
     log_to_file("  Winograd: 由 cuDNN 在 benchmark 开启时自动选择可用卷积算法")
+    log_to_file(f"  Persistent workers / prefetch factor: {Config.PERSISTENT_WORKERS} / {Config.PREFETCH_FACTOR}")
     
     log_to_file("\n【损失权重】")
     log_to_file(f"  边界框损失权重: {Config.BOX_WEIGHT}")
@@ -1596,13 +1600,18 @@ def train():
     device = get_runtime_device()
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = Config.ENABLE_CUDNN_BENCHMARK
+        if hasattr(torch.backends.cudnn, "allow_tf32"):
+            torch.backends.cudnn.allow_tf32 = Config.ENABLE_TF32
+        if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
+            torch.backends.cuda.matmul.allow_tf32 = Config.ENABLE_TF32
     log_to_file(f"使用设备: {device}")
     log_to_file(f"检测到 GPU 数量: {torch.cuda.device_count()}")
     
     log_to_file("初始化教师网络（ConvTeacher）...")
     log_to_file(
         f"Acceleration active: cudnn_benchmark={device.type == 'cuda' and Config.ENABLE_CUDNN_BENCHMARK}, "
-        f"channels_last={device.type == 'cuda' and Config.ENABLE_CHANNELS_LAST}"
+        f"channels_last={device.type == 'cuda' and Config.ENABLE_CHANNELS_LAST}, "
+        f"tf32={device.type == 'cuda' and Config.ENABLE_TF32}"
     )
     teacher = ConvTeacher().to(device)
     teacher_loaded, teacher_message = load_teacher_checkpoint(teacher, Config.TEACHER_CHECKPOINT, device)
