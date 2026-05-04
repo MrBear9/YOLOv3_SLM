@@ -76,5 +76,7 @@ models/__pycache__
 !models/*.py
 models/yolov8/*
 !models/yolov8/*.py
+models/SLM/*
+!models/SLM/*.py
 
 temple/*

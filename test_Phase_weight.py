@@ -31,7 +31,18 @@ def save_phase_layers(pth_file_path, output_dir="output/images"):
             print(f"顶层键: {list(checkpoint.keys())}")
             
             # 根据您的错误信息，模型参数在 model_state_dict 中
-            if 'model_state_dict' in checkpoint:
+            if 'student_state_dict' in checkpoint:
+                state_dict = checkpoint['student_state_dict']
+                print("使用 student_state_dict 作为状态字典")
+                print(f"student_state_dict 类型: {type(state_dict)}")
+                print(f"student_state_dict 键数量: {len(state_dict)}")
+                keys_list = list(state_dict.keys())
+                print(f"前5个键: {keys_list[:5]}")
+                phase_keys = [k for k in keys_list if 'phase' in k.lower()]
+                if phase_keys:
+                    print(f"找到相位相关键: {phase_keys}")
+
+            elif 'model_state_dict' in checkpoint:
                 state_dict = checkpoint['model_state_dict']
                 print("使用 model_state_dict 作为状态字典")
                 print(f"model_state_dict 类型: {type(state_dict)}")
@@ -64,6 +75,8 @@ def save_phase_layers(pth_file_path, output_dir="output/images"):
         
         print("搜索光学YOLOv3模型的相位层...")
         for key, tensor in state_dict.items():
+            if not isinstance(tensor, torch.Tensor):
+                continue
             # 查找包含相位相关关键词的层
             if any(keyword in key.lower() for keyword in phase_keywords):
                 phase_layers[key] = tensor
@@ -88,7 +101,7 @@ def save_phase_layers(pth_file_path, output_dir="output/images"):
 
         if not phase_layers:
             print("将尝试保存所有层进行进一步分析...")
-            phase_layers = state_dict
+            phase_layers = {k: v for k, v in state_dict.items() if isinstance(v, torch.Tensor)}
 
         # 保存每个相位层的原始图像
         print(f"\n开始保存相位层图像...")
