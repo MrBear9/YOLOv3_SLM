@@ -5,10 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from models.config_v8 import ConfigV8 as Config
 from models.dataset import YOLODataset, build_class_balanced_train_sampler, identity_collate
-from models.loss_v8 import YOLOv8AnchorFreeLoss
-from models.metrics_v8 import evaluate_model_v8
 from models.runtime import (
     append_plain_log,
     get_dataloader_kwargs,
@@ -29,8 +26,11 @@ from models.training_utils import (
     save_training_curves,
     set_detector_trainable,
 )
-from models.visualization_v8 import save_detection_visualization_v8
-from models.yolo_head_v8 import TeacherWithYOLOv8Detector, YOLOv8Head
+from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
+from models.yolov8.head_v8 import TeacherWithYOLOv8AnchorDetector, YOLOv8AnchorHead
+from models.yolov8.loss_anchor_v8 import YOLOv3AnchorLossForV8Head
+from models.yolov8.metrics_anchor_v8 import evaluate_model_anchor_v8
+from models.yolov8.visualization_anchor_v8 import save_detection_visualization_anchor_v8
 
 
 def bootstrap_runtime():
@@ -44,19 +44,21 @@ def bootstrap_runtime():
 
 def log_all_parameters():
     log_to_file(Config, "=" * 80)
-    log_to_file(Config, "Optical teacher YOLOv8-head training configuration")
+    log_to_file(Config, "Optical teacher YOLOv8-style head + YOLOv3 anchor loss configuration")
     log_to_file(Config, "=" * 80)
     log_to_file(Config, f"Dataset: {Config.YAML_PATH}")
     log_to_file(Config, f"Classes: {Config.CLASS_NAMES}")
     log_to_file(Config, f"Image size / batch / epochs: {Config.IMG_SIZE} / {Config.BATCH_SIZE} / {Config.EPOCHS}")
-    log_to_file(Config, f"Head: anchor-free YOLOv8 style, base_ch={Config.YOLOV8_BASE_CHANNELS}, c2f_blocks={Config.YOLOV8_C2F_BLOCKS}")
+    log_to_file(Config, f"Head: YOLOv8 style C2f/PAN, anchor-formatted output, base_ch={Config.YOLOV8_BASE_CHANNELS}, c2f_blocks={Config.YOLOV8_C2F_BLOCKS}")
     log_to_file(Config, f"Strides: {Config.STRIDES}")
-    log_to_file(Config, f"Loss weights box/obj/noobj/cls/center: {Config.BOX_WEIGHT_BASE}/{Config.OBJ_WEIGHT_BASE}/{Config.NOOBJ_WEIGHT_BASE}/{Config.CLS_WEIGHT_BASE}/{Config.CENTERNESS_WEIGHT_BASE}")
+    log_to_file(Config, f"Anchor source: {Config.ANCHOR_SOURCE}")
+    log_to_file(Config, f"Anchors: {Config.ANCHORS}")
+    log_to_file(Config, f"Loss weights box/obj/noobj/cls: {Config.BOX_WEIGHT_BASE}/{Config.OBJ_WEIGHT_BASE}/{Config.NOOBJ_WEIGHT_BASE}/{Config.CLS_WEIGHT_BASE}")
     log_to_file(Config, f"LR teacher/detector: {Config.PHASE1_TEACHER_LR}/{Config.PHASE1_DETECTOR_LR} -> {Config.PHASE2_TEACHER_LR}/{Config.PHASE2_DETECTOR_LR} -> {Config.PHASE3_TEACHER_LR}/{Config.PHASE3_DETECTOR_LR}")
     log_to_file(Config, f"Detection conf/nms/max_det: {Config.CONF_THRESH}/{Config.NMS_THRESH}/{Config.MAX_DET}")
     log_to_file(Config, f"Output: {Config.TEACHER_OUTPUT_DIR}")
     teacher = ConvTeacher()
-    detector = YOLOv8Head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
+    detector = YOLOv8AnchorHead(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
     log_to_file(Config, f"Teacher parameters: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
     log_to_file(Config, f"Detector parameters: {sum(p.numel() for p in detector.parameters() if p.requires_grad):,}")
     log_to_file(Config, "=" * 80)
@@ -82,8 +84,8 @@ def train():
         p.requires_grad = not freeze_teacher
     log_to_file(Config, f"Teacher status: {'frozen' if freeze_teacher else 'trainable'}")
 
-    detector = YOLOv8Head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
-    model = wrap_data_parallel(Config, TeacherWithYOLOv8Detector(Config, teacher=teacher, detector=detector), module_name="TeacherWithYOLOv8Detector")
+    detector = YOLOv8AnchorHead(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
+    model = wrap_data_parallel(Config, TeacherWithYOLOv8AnchorDetector(Config, teacher=teacher, detector=detector), module_name="TeacherWithYOLOv8AnchorDetector")
     set_detector_trainable(model, True)
 
     train_dataset = YOLODataset(Config, split="train")
@@ -112,7 +114,7 @@ def train():
     except Exception as exc:
         log_to_file(Config, f"Validation dataset unavailable: {exc}")
 
-    criterion = YOLOv8AnchorFreeLoss(Config)
+    criterion = YOLOv3AnchorLossForV8Head(Config)
     vis_dataset = val_dataset if Config.VIS_DATASET_SPLIT == "val" and val_dataset is not None and len(val_dataset) > 0 else train_dataset
     vis_prefix = "val" if vis_dataset is val_dataset else "train"
     vis_dir = os.path.join(Config.TEACHER_OUTPUT_DIR, "visualizations")
@@ -128,13 +130,13 @@ def train():
     optimizer = None
 
     log_to_file(Config, "=" * 60)
-    log_to_file(Config, "Training YOLOv8-style anchor-free detector")
+    log_to_file(Config, "Training YOLOv8-style head with legacy YOLOv3 anchor loss")
     log_to_file(Config, "=" * 60)
     init_epoch_log_table(Config)
 
     for epoch in range(Config.EPOCHS):
         model.train()
-        train_component_sums = {"total": 0.0, "box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0, "centerness": 0.0}
+        train_component_sums = {"total": 0.0, "box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
         stage_settings = Config.get_stage_settings(epoch)
         phase = criterion.set_epoch_weights(epoch)
         if phase != current_phase:
@@ -152,7 +154,7 @@ def train():
             loss.backward()
             optimizer.step()
             train_component_sums["total"] += float(loss.detach().item())
-            for key in ("box", "obj", "noobj", "cls", "centerness"):
+            for key in ("box", "obj", "noobj", "cls"):
                 train_component_sums[key] += loss_stats.get(key, 0.0)
 
         avg_train = {key: value / max(len(train_loader), 1) for key, value in train_component_sums.items()}
@@ -161,7 +163,7 @@ def train():
         val_losses = None
         val_metrics = None
         if val_loader is not None and ((epoch + 1) % Config.VAL_INTERVAL == 0):
-            val_losses, val_metrics = evaluate_model_v8(Config, model, val_loader, criterion, device, stage_settings=stage_settings)
+            val_losses, val_metrics = evaluate_model_anchor_v8(Config, model, val_loader, criterion, device, stage_settings=stage_settings)
             history["val_total"].append(val_losses["total"])
             history["precision"].append(val_metrics["precision"])
             history["recall"].append(val_metrics["recall"])
@@ -191,13 +193,13 @@ def train():
                         "epoch": epoch,
                         "loss": avg_train["total"],
                         "val_map50": best_map50 if val_metrics is not None else None,
-                        "head_type": "yolov8_anchor_free",
+                        "head_type": "yolov8_style_head_yolov3_anchor_loss",
                     },
                     joint_best_path,
                 )
 
         if epoch % Config.VIS_INTERVAL == 0:
-            save_detection_visualization_v8(Config, epoch, model, vis_dataset, vis_dir, prefix=vis_prefix, device=device)
+            save_detection_visualization_anchor_v8(Config, epoch, model, vis_dataset, vis_dir, prefix=vis_prefix, device=device)
 
         log_epoch_table_row(
             Config,
@@ -226,7 +228,7 @@ def train():
                 "epoch": Config.EPOCHS - 1,
                 "loss": history["train_total"][-1] if history["train_total"] else None,
                 "val_map50": best_map50 if best_map50 >= 0 else None,
-                "head_type": "yolov8_anchor_free",
+                "head_type": "yolov8_style_head_yolov3_anchor_loss",
             },
             joint_final_path,
         )

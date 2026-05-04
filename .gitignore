@@ -71,3 +71,10 @@ Optical_yolo_detect/*
 dataset/*
 !dataset/*.py
 
+# models
+models/__pycache__
+!models/*.py
+models/yolov8/*
+!models/yolov8/*.py
+
+temple/*
