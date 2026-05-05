@@ -40,6 +40,13 @@ It does not import or initialize `optical_teacher_yolo.py`, so running the YOLOv
 - `optical_student_best.pth`: best SLM/student weights.
 - `detector_best.pth`: best detector weights.
 
-The SLM checkpoint payload intentionally avoids a top-level `"phase"` key, so phase extraction scripts can search tensor parameter names such as `phase_raw` without accidentally matching a string metadata field.
+SLM phase training has a few hardware-facing safeguards:
+
+- SLM phase parameters use `PHASE_WEIGHT_DECAY = 0.0`; ordinary weight decay would pull `phase_raw` toward zero and can collapse the phase map.
+- `losses_slm.py` penalizes low circular phase spread and excessive concentration near the `0 / 2*pi` wrap boundary.
+- `optical_student_best.pth` is saved only when the SLM phase quality check passes, including centered std/span, circular std, and near-boundary ratio checks.
+- `detector_best.pth` can still carry the paired student weights used by that detector, but it does not overwrite the standalone SLM extraction checkpoint unless the phase quality check passes.
+
+The SLM checkpoint payload intentionally avoids a top-level `"phase"` key, so phase extraction scripts can search tensor parameter names such as `phase_raw` without accidentally matching a string metadata field. It also stores wrapped `*_wrapped_slm_0_2pi` tensors for SLM loading.
 
 `Optical_yolo_detect/Optical_SLM_yolov8_head_model.py` loads those two SLM outputs for visualization/evaluation, and its local README explains the expected input/output files.

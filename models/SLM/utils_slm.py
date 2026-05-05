@@ -1,5 +1,6 @@
 import os
 
+import numpy as np
 import torch
 
 
@@ -66,20 +67,20 @@ def build_stage_optimizer(config, student, detector, stage_name):
         slm_params, other_params = split_student_param_groups(student)
         groups = []
         if slm_params:
-            groups.append({"params": slm_params, "lr": config.PHASE_PARAM_LR})
+            groups.append({"params": slm_params, "lr": config.PHASE_PARAM_LR, "weight_decay": config.PHASE_WEIGHT_DECAY})
         if other_params:
-            groups.append({"params": other_params, "lr": config.STUDENT_LR})
-        return torch.optim.Adam(groups, weight_decay=config.WEIGHT_DECAY)
+            groups.append({"params": other_params, "lr": config.STUDENT_LR, "weight_decay": config.WEIGHT_DECAY})
+        return torch.optim.Adam(groups, weight_decay=0.0)
     if stage_name == "detector_only":
         return torch.optim.Adam([p for p in detector.parameters() if p.requires_grad], lr=config.DETECTOR_LR, weight_decay=config.WEIGHT_DECAY)
     slm_params, other_params = split_student_param_groups(student)
     groups = []
     if slm_params:
-        groups.append({"params": slm_params, "lr": config.JOINT_PHASE_PARAM_LR})
+        groups.append({"params": slm_params, "lr": config.JOINT_PHASE_PARAM_LR, "weight_decay": config.PHASE_WEIGHT_DECAY})
     if other_params:
-        groups.append({"params": other_params, "lr": config.JOINT_STUDENT_LR})
-    groups.append({"params": [p for p in detector.parameters() if p.requires_grad], "lr": config.JOINT_DETECTOR_LR})
-    return torch.optim.Adam(groups, weight_decay=config.WEIGHT_DECAY)
+        groups.append({"params": other_params, "lr": config.JOINT_STUDENT_LR, "weight_decay": config.WEIGHT_DECAY})
+    groups.append({"params": [p for p in detector.parameters() if p.requires_grad], "lr": config.JOINT_DETECTOR_LR, "weight_decay": config.WEIGHT_DECAY})
+    return torch.optim.Adam(groups, weight_decay=0.0)
 
 
 def set_trainable(module, trainable):
@@ -91,9 +92,19 @@ def collect_slm_statistics(student):
     stats = {}
     for layer_name in ("slm1", "slm2"):
         slm = getattr(student, layer_name)
+        wrapped = slm.wrapped_phase().detach().float()
         centered = slm.centered_phase().detach().float()
+        wrapped_flat = wrapped.flatten(1)
+        resultant = torch.sqrt(torch.mean(torch.cos(wrapped_flat), dim=1) ** 2 + torch.mean(torch.sin(wrapped_flat), dim=1) ** 2)
+        circular_std = torch.sqrt(torch.clamp(-2.0 * torch.log(torch.clamp(resultant, min=1e-8)), min=0.0)).mean()
+        near_boundary = (
+            (wrapped_flat < student.config.PHASE_NEAR_BOUNDARY_EPS)
+            | (wrapped_flat > 2 * np.pi - student.config.PHASE_NEAR_BOUNDARY_EPS)
+        ).float().mean(dim=1).mean()
         stats[f"{layer_name}_wrapped_std"] = float(centered.std(unbiased=False).item())
         stats[f"{layer_name}_wrapped_span"] = float((centered.amax() - centered.amin()).item())
+        stats[f"{layer_name}_circular_std"] = float(circular_std.item())
+        stats[f"{layer_name}_near_boundary_ratio"] = float(near_boundary.item())
     return stats
 
 
@@ -108,17 +119,26 @@ def save_student_best(config, student, path, epoch, loss_value, extra=None):
     for key, value in student_state.items():
         if "phase_raw" in key:
             payload[key] = value.detach().cpu()
+            payload[key.replace("phase_raw", "wrapped_slm_0_2pi")] = torch.remainder(value.detach().cpu(), 2 * np.pi)
     if extra:
         payload.update(extra)
     torch.save(payload, path)
 
 
-def save_detector_best(detector, path, epoch, loss_value, extra=None):
+def save_detector_best(detector, path, epoch, loss_value, extra=None, student=None, config=None):
     payload = {
         "detector_state_dict": detector.state_dict(),
         "epoch": int(epoch),
         "loss": float(loss_value),
     }
+    if student is not None:
+        student_state = student.state_dict()
+        payload["student_state_dict"] = student_state
+        payload["student_enable_norm"] = bool(getattr(student, "enable_norm", False))
+        for key, value in student_state.items():
+            if "phase_raw" in key:
+                payload[key] = value.detach().cpu()
+                payload[key.replace("phase_raw", "wrapped_slm_0_2pi")] = torch.remainder(value.detach().cpu(), 2 * np.pi)
     if extra:
         payload.update(extra)
     torch.save(payload, path)

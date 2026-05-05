@@ -52,16 +52,33 @@ class CompositeOpticalFeatureLoss(nn.Module):
         penalties = []
         stds = []
         spans = []
+        circular_stds = []
+        near_ratios = []
         for slm_layer in (student.slm1, student.slm2):
+            wrapped = slm_layer.wrapped_phase()
             centered = slm_layer.centered_phase()
             flat = centered.flatten(1)
             std = flat.std(dim=1, unbiased=False).mean()
             span = (flat.amax(dim=1) - flat.amin(dim=1)).mean()
+            wrapped_flat = wrapped.flatten(1)
+            resultant = torch.sqrt(torch.mean(torch.cos(wrapped_flat), dim=1) ** 2 + torch.mean(torch.sin(wrapped_flat), dim=1) ** 2)
+            circular_std = torch.sqrt(torch.clamp(-2.0 * torch.log(torch.clamp(resultant, min=1e-8)), min=0.0)).mean()
+            near_boundary = ((wrapped_flat < self.config.PHASE_NEAR_BOUNDARY_EPS) | (wrapped_flat > 2 * torch.pi - self.config.PHASE_NEAR_BOUNDARY_EPS)).float().mean(dim=1).mean()
             penalties.append(F.relu(self.config.PHASE_STD_TARGET - std))
             penalties.append(F.relu(self.config.PHASE_SPAN_TARGET - span))
+            penalties.append(F.relu(self.config.PHASE_CIRCULAR_STD_TARGET - circular_std))
+            penalties.append(F.relu(near_boundary - self.config.PHASE_NEAR_BOUNDARY_LIMIT))
             stds.append(std.detach())
             spans.append(span.detach())
-        return sum(penalties) / max(len(penalties), 1), sum(stds) / len(stds), sum(spans) / len(spans)
+            circular_stds.append(circular_std.detach())
+            near_ratios.append(near_boundary.detach())
+        return (
+            sum(penalties) / max(len(penalties), 1),
+            sum(stds) / len(stds),
+            sum(spans) / len(spans),
+            sum(circular_stds) / len(circular_stds),
+            sum(near_ratios) / len(near_ratios),
+        )
 
     def forward(self, student_feature, teacher_feature, student):
         loss_full = F.mse_loss(student_feature, teacher_feature)
@@ -71,7 +88,7 @@ class CompositeOpticalFeatureLoss(nn.Module):
         loss_grad = self.gradient_loss(student_feature, teacher_feature)
         loss_freq = self.frequency_loss(student_feature, teacher_feature)
         loss_smooth = self.phase_smoothness_loss(student)
-        loss_div, std, span = self.phase_diversity_loss(student)
+        loss_div, std, span, circular_std, near_boundary = self.phase_diversity_loss(student)
         total = (
             loss_full * self.config.LOSS_FULL_WEIGHT
             + loss_low1 * self.config.LOSS_LOW1_WEIGHT
@@ -94,6 +111,8 @@ class CompositeOpticalFeatureLoss(nn.Module):
             "slm_diversity": float(loss_div.detach().item()),
             "slm_std": float(std.item()),
             "slm_span": float(span.item()),
+            "slm_circular_std": float(circular_std.item()),
+            "slm_near_boundary": float(near_boundary.item()),
         }
         return total, stats
 
