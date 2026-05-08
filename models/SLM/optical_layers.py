@@ -4,18 +4,41 @@ import torch.nn as nn
 
 
 class SLMLayer(nn.Module):
-    def __init__(self, config, resolution=None, mode=None):
+    def __init__(self, config, resolution=None, mode=None, layer_index=1):
         super().__init__()
         self.config = config
         resolution = config.RESOLUTION if resolution is None else resolution
         mode = config.SLM_MODE if mode is None else mode
         assert mode in {"phase", "amp_phase"}
         self.mode = mode
-        self.phase_raw = nn.Parameter(torch.rand(1, 1, *resolution) * 2 * np.pi)
+        self.layer_index = layer_index
+        self.phase_raw = nn.Parameter(self._initial_phase(resolution))
         if mode == "amp_phase":
             self.amp_raw = nn.Parameter(torch.rand(1, 1, *resolution))
         else:
             self.register_parameter("amp_raw", None)
+
+    def _initial_phase(self, resolution):
+        init_mode = str(getattr(self.config, "SLM_INIT_MODE", "random")).lower()
+        if init_mode in {"vortex", "vortex_checkpoint"}:
+            height, width = resolution
+            y = torch.linspace(-1.0, 1.0, height)
+            x = torch.linspace(-1.0, 1.0, width)
+            yy, xx = torch.meshgrid(y, x, indexing="ij")
+            theta = torch.atan2(yy, xx)
+            radius2 = xx.square() + yy.square()
+            if self.layer_index == 1:
+                charge = float(getattr(self.config, "SLM_VORTEX_CHARGE_1", 1.0))
+                radial_scale = float(getattr(self.config, "SLM_VORTEX_RADIAL_SCALE_1", 0.35))
+            else:
+                charge = float(getattr(self.config, "SLM_VORTEX_CHARGE_2", -1.0))
+                radial_scale = float(getattr(self.config, "SLM_VORTEX_RADIAL_SCALE_2", -0.25))
+            phase = charge * theta + radial_scale * np.pi * radius2
+            noise_std = float(getattr(self.config, "SLM_INIT_NOISE_STD", 0.0))
+            if noise_std > 0:
+                phase = phase + torch.randn_like(phase) * noise_std
+            return torch.remainder(phase, 2 * np.pi).view(1, 1, height, width)
+        return torch.rand(1, 1, *resolution) * 2 * np.pi
 
     def wrapped_phase(self):
         return torch.remainder(self.phase_raw, 2 * np.pi)
@@ -52,9 +75,9 @@ class OpticalStudent(nn.Module):
     def __init__(self, config, enable_norm=None):
         super().__init__()
         self.config = config
-        self.slm1 = SLMLayer(config)
+        self.slm1 = SLMLayer(config, layer_index=1)
         self.prop1 = ASMPropagation(config, config.PROP_DISTANCE_1)
-        self.slm2 = SLMLayer(config)
+        self.slm2 = SLMLayer(config, layer_index=2)
         self.prop2 = ASMPropagation(config, config.PROP_DISTANCE_2)
         self.enable_norm = config.ENABLE_STUDENT_NORM if enable_norm is None else enable_norm
 

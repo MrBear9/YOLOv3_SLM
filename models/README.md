@@ -46,6 +46,8 @@ SLM phase training has a few hardware-facing safeguards:
 - `losses_slm.py` penalizes low circular phase spread and excessive concentration near the `0 / 2*pi` wrap boundary.
 - `optical_student_best.pth` is saved only when the SLM phase quality check passes, including centered std/span, circular std, and near-boundary ratio checks.
 - `detector_best.pth` can still carry the paired student weights used by that detector, but it does not overwrite the standalone SLM extraction checkpoint unless the phase quality check passes.
+- `optical_layers.py` supports vortex phase initialization for both SLM layers. This gives the phase optimizer a non-flat optical pattern instead of relying only on random phase.
+- `ConfigSLM.SLM_INIT_MODE` controls initialization: `random`, `vortex`, `checkpoint`, or `vortex_checkpoint`. `checkpoint` and `vortex_checkpoint` load `ConfigSLM.SLM_INIT_CHECKPOINT` into the student but still start training from the first student-only stage.
 
 The SLM checkpoint payload intentionally avoids a top-level `"phase"` key, so phase extraction scripts can search tensor parameter names such as `phase_raw` without accidentally matching a string metadata field. It also stores wrapped `*_wrapped_slm_0_2pi` tensors for SLM loading.
 

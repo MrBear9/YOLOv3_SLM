@@ -45,7 +45,13 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device, stage
                 component_totals[key] += loss_stats.get(key, 0.0)
             component_totals["total"] += float(loss.detach().item())
             component_totals["feature_total"] += feature_stats["feature_total"]
-            detections = decode_detections_anchor_v8(config, predictions)
+            detections = decode_detections_anchor_v8(
+                config,
+                predictions,
+                conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
+                nms_thresh=getattr(config, "METRIC_NMS_THRESH", config.NMS_THRESH),
+                max_det=getattr(config, "METRIC_MAX_DET", config.MAX_DET),
+            )
 
             for sample_idx, sample_detections in enumerate(detections):
                 gt_by_class = {}

@@ -49,6 +49,27 @@ def load_teacher_detector_checkpoint(teacher, detector, checkpoint_path, device)
     return info
 
 
+def load_student_checkpoint(student, checkpoint_path, device):
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
+        return {"loaded": 0, "total": len(student.state_dict()), "path": checkpoint_path, "reason": "not_found"}
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = extract_state_dict(checkpoint)
+    loaded, total = load_matching_state(student, state_dict, prefixes=("student.",))
+    if isinstance(checkpoint, dict) and "student_enable_norm" in checkpoint:
+        student.enable_norm = bool(checkpoint["student_enable_norm"])
+    return {
+        "loaded": loaded,
+        "total": total,
+        "path": checkpoint_path,
+        "epoch": checkpoint.get("epoch") if isinstance(checkpoint, dict) else None,
+        "loss": checkpoint.get("loss") if isinstance(checkpoint, dict) else None,
+        "val_map50": checkpoint.get("val_map50") if isinstance(checkpoint, dict) else None,
+    }
+
+
 def split_student_param_groups(student):
     slm_params = []
     other_params = []

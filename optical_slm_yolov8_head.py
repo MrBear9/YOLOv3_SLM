@@ -16,6 +16,7 @@ from models.SLM.optical_layers import OpticalStudent
 from models.SLM.utils_slm import (
     build_stage_optimizer,
     collect_slm_statistics,
+    load_student_checkpoint,
     load_teacher_detector_checkpoint,
     save_detector_best,
     save_student_best,
@@ -67,6 +68,8 @@ def log_config():
     log_to_file(Config, f"Save detector best: {Config.get_detector_best_path()}")
     log_to_file(Config, f"Validation interval: {Config.VAL_INTERVAL}")
     log_to_file(Config, f"Visualization: split={Config.VIS_DATASET_SPLIT}, interval={Config.VIS_INTERVAL}")
+    log_to_file(Config, f"SLM init mode: {Config.SLM_INIT_MODE}")
+    log_to_file(Config, f"SLM init checkpoint: {Config.SLM_INIT_CHECKPOINT}")
     log_to_file(Config, "Checkpoint payload intentionally omits a 'phase' key for SLM extraction compatibility.")
 
 
@@ -87,6 +90,14 @@ def train():
     reference_detector.eval()
 
     student = OpticalStudent(Config).to(device)
+    init_mode = str(Config.SLM_INIT_MODE).strip().lower()
+    if init_mode in {"checkpoint", "vortex_checkpoint"}:
+        student_info = load_student_checkpoint(student, Config.SLM_INIT_CHECKPOINT, device)
+        log_to_file(Config, f"Initialized SLM student from checkpoint: {student_info}")
+        if student_info["loaded"] == 0:
+            log_to_file(Config, "SLM checkpoint initialization loaded 0 tensors; using current initialized phases.")
+    else:
+        log_to_file(Config, f"Initialized SLM student with mode={init_mode}")
     detector = YOLOv8AnchorHead(Config, in_channels=1, out_channels=Config.get_detector_output_channels()).to(device)
     detector.load_state_dict(reference_detector.state_dict(), strict=False)
     if Config.ENABLE_CHANNELS_LAST and torch.cuda.is_available():

@@ -80,17 +80,25 @@ class ConfigSLM:
     LOSS_SSIM_WEIGHT = 0.3
     LOSS_GRAD_WEIGHT = 0.25
     LOSS_FREQ_WEIGHT = 0.15
-    LOSS_PHASE_SMOOTH_WEIGHT = 0.001  # 相位平滑损失权重
-    LOSS_PHASE_DIVERSITY_WEIGHT = 1.00  # 相位多样性损失权重
-    PHASE_STD_TARGET = 0.90  # 相位标准差目标值
-    PHASE_SPAN_TARGET = 4.80  # 相位范围目标值
-    PHASE_CIRCULAR_STD_TARGET = 0.80  # 相位圆标准差目标值
-    PHASE_NEAR_BOUNDARY_LIMIT = 0.85  # 相位近边界限制值
-    PHASE_NEAR_BOUNDARY_EPS = 0.05  # 相位近边界容差值
-    PHASE_BEST_MIN_STD = 0.30  # 相位最佳最小标准差值
-    PHASE_BEST_MIN_CIRCULAR_STD = 0.35  # 相位最佳最小圆标准差值
-    PHASE_BEST_MAX_NEAR_BOUNDARY_RATIO = 0.90  # 相位最佳最大近边界比值
-    PHASE_BEST_MIN_SPAN = 2.50  # 相位最佳最小范围值
+    LOSS_PHASE_SMOOTH_WEIGHT = 0.001
+    LOSS_PHASE_DIVERSITY_WEIGHT = 1.0
+    PHASE_STD_TARGET = 0.90
+    PHASE_SPAN_TARGET = 4.80
+    PHASE_CIRCULAR_STD_TARGET = 0.80
+    PHASE_NEAR_BOUNDARY_LIMIT = 0.85
+    PHASE_NEAR_BOUNDARY_EPS = 0.05
+    PHASE_BEST_MIN_STD = 0.30
+    PHASE_BEST_MIN_CIRCULAR_STD = 0.35
+    PHASE_BEST_MAX_NEAR_BOUNDARY_RATIO = 0.90
+    PHASE_BEST_MIN_SPAN = 2.50
+
+    SLM_INIT_MODE = "vortex"  # random, vortex, checkpoint, vortex_checkpoint
+    SLM_INIT_CHECKPOINT = r"output\OpticalSLM_YOLOv8Head_student\optical_student_best.pth"
+    SLM_VORTEX_CHARGE_1 = 1.0
+    SLM_VORTEX_CHARGE_2 = -1.0
+    SLM_VORTEX_RADIAL_SCALE_1 = 0.35
+    SLM_VORTEX_RADIAL_SCALE_2 = -0.25
+    SLM_INIT_NOISE_STD = 0.03
 
     WAVELENGTH = 532e-9
     PIXEL_SIZE = 6.4e-6
@@ -110,17 +118,18 @@ class ConfigSLM:
     ENABLE_WBF = False
     METRIC_IOU_THRESHOLD = 0.5
 
-    VAL_INTERVAL = 1  # 验证间隔
-    VIS_INTERVAL = 5  # 可视化间隔
+    VAL_INTERVAL = 1
+    VIS_INTERVAL = 5
     VIS_BATCH_SIZE = 4
     VIS_DPI = 130
     VIS_DATASET_SPLIT = "val"
     VIS_SEED = 20260504
-    VIS_CONF_THRESH = 0.5  # 可视化时的置信度阈值
-    VIS_NMS_THRESH = 0.35  # 可视化时的NMS阈值
-    VIS_MAX_DET = 5  # 可视化时的最大检测框数量
-    VIS_SHOW_BEST_MATCHED_ANCHORS = False  # 是否显示最佳匹配anchor
-    VIS_MAX_GT_ANCHOR_OVERLAYS = 2  # 最大显示的GT anchor数量
+    VIS_CONF_THRESH = 0.5
+    VIS_NMS_THRESH = 0.35
+    VIS_MAX_DET = 5
+    VIS_SHOW_BEST_MATCHED_ANCHORS = False
+    VIS_MAX_GT_ANCHOR_OVERLAYS = 2
+
     NUM_WORKERS = min(8, os.cpu_count() or 0)
     PIN_MEMORY = torch.cuda.is_available()
     PERSISTENT_WORKERS = True
@@ -145,6 +154,8 @@ class ConfigSLM:
             "OPTICAL_SLM_YAML_PATH": ("YAML_PATH", str),
             "OPTICAL_SLM_OUTPUT_DIR": ("OUTPUT_DIR", str),
             "OPTICAL_SLM_TEACHER_DETECTOR_CHECKPOINT": ("TEACHER_DETECTOR_CHECKPOINT", str),
+            "OPTICAL_SLM_INIT_MODE": ("SLM_INIT_MODE", str),
+            "OPTICAL_SLM_INIT_CHECKPOINT": ("SLM_INIT_CHECKPOINT", str),
             "OPTICAL_SLM_BATCH_SIZE": ("BATCH_SIZE", int),
             "OPTICAL_SLM_EPOCHS": ("EPOCHS", int),
             "OPTICAL_SLM_NUM_WORKERS": ("NUM_WORKERS", int),
@@ -160,6 +171,7 @@ class ConfigSLM:
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
         cls.OUTPUT_DIR = resolve_project_path(cls.OUTPUT_DIR)
         cls.TEACHER_DETECTOR_CHECKPOINT = resolve_project_path(cls.TEACHER_DETECTOR_CHECKPOINT)
+        cls.SLM_INIT_CHECKPOINT = resolve_project_path(cls.SLM_INIT_CHECKPOINT)
         cls.ANCHOR_CONFIG_PATH = resolve_project_path(cls.ANCHOR_CONFIG_PATH)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
         cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]

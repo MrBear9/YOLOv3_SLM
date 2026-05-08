@@ -56,6 +56,7 @@ def log_all_parameters():
     log_to_file(Config, f"Loss weights box/obj/noobj/cls: {Config.BOX_WEIGHT_BASE}/{Config.OBJ_WEIGHT_BASE}/{Config.NOOBJ_WEIGHT_BASE}/{Config.CLS_WEIGHT_BASE}")
     log_to_file(Config, f"LR teacher/detector: {Config.PHASE1_TEACHER_LR}/{Config.PHASE1_DETECTOR_LR} -> {Config.PHASE2_TEACHER_LR}/{Config.PHASE2_DETECTOR_LR} -> {Config.PHASE3_TEACHER_LR}/{Config.PHASE3_DETECTOR_LR}")
     log_to_file(Config, f"Detection conf/nms/max_det: {Config.CONF_THRESH}/{Config.NMS_THRESH}/{Config.MAX_DET}")
+    log_to_file(Config, f"Metric conf/nms/max_det: {Config.METRIC_CONF_THRESH}/{Config.METRIC_NMS_THRESH}/{Config.METRIC_MAX_DET}")
     log_to_file(Config, f"Output: {Config.TEACHER_OUTPUT_DIR}")
     teacher = ConvTeacher()
     detector = YOLOv8AnchorHead(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
@@ -177,11 +178,12 @@ def train():
         if val_metrics is not None and val_metrics["map50"] > best_map50:
             best_map50 = val_metrics["map50"]
             is_best = True
-        elif val_metrics is None and avg_train["total"] < best_loss:
+        elif val_loader is None and avg_train["total"] < best_loss:
             is_best = True
 
         if is_best:
-            best_loss = avg_train["total"]
+            if val_metrics is None:
+                best_loss = avg_train["total"]
             model_core = unwrap_module(model)
             torch.save(model_core.detector.state_dict(), os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_best.pth"))
             if Config.SAVE_TEACHER_WEIGHTS:
