@@ -14,9 +14,9 @@ def decode_boxes_to_absolute(pred_boxes, anchors, stride):
         torch.arange(grid_w, device=device, dtype=dtype),
         indexing="ij",
     )
-    grid_x = grid_x.view(1, grid_h, grid_w, 1)
-    grid_y = grid_y.view(1, grid_h, grid_w, 1)
-    anchor_tensor = anchors.view(1, 1, 1, 3, 2).to(device=device, dtype=dtype)
+    grid_x = grid_x.contiguous().view(1, grid_h, grid_w, 1)
+    grid_y = grid_y.contiguous().view(1, grid_h, grid_w, 1)
+    anchor_tensor = anchors.contiguous().view(1, 1, 1, 3, 2).to(device=device, dtype=dtype)
     x = (torch.sigmoid(pred_boxes[..., 0]) + grid_x) * stride
     y = (torch.sigmoid(pred_boxes[..., 1]) + grid_y) * stride
     w = torch.exp(torch.clamp(pred_boxes[..., 2], min=-8.0, max=8.0)) * anchor_tensor[..., 0]
@@ -68,7 +68,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
 
         for i, pred in enumerate(predictions):
             _, _, grid_h, grid_w = pred.shape
-            pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
+            pred = pred.contiguous().permute(0, 2, 3, 1).contiguous().reshape(batch_size, grid_h, grid_w, 3, -1)
             prepared_scales.append(
                 {
                     "pred_boxes": pred[..., :4],
@@ -148,9 +148,9 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
                 gt_boxes_abs = gt_boxes_abs_by_batch[b]
                 if gt_boxes_abs.numel() == 0:
                     continue
-                flat_pred_boxes = pred_boxes_abs[b].reshape(-1, 4)
+                flat_pred_boxes = pred_boxes_abs[b].contiguous().reshape(-1, 4)
                 max_iou = bbox_iou_matrix_xywh(flat_pred_boxes, gt_boxes_abs).max(dim=1).values
-                ignore_mask[b] = max_iou.view(scale_data["grid_h"], scale_data["grid_w"], 3) >= config.NOOBJ_IGNORE_IOU
+                ignore_mask[b] = max_iou.contiguous().view(scale_data["grid_h"], scale_data["grid_w"], 3) >= config.NOOBJ_IGNORE_IOU
             noobj_mask = (target_obj <= 0.5) & (~ignore_mask)
 
             if obj_mask.any():

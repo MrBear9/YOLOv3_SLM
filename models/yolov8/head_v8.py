@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from models.runtime import prepare_conv_tensor
+from models.runtime import prepare_conv_tensor, should_use_channels_last
 from models.teacher import ConvTeacher
 
 
@@ -74,10 +74,10 @@ class YOLOv8AnchorDetectBranch(nn.Module):
 
     def forward(self, x):
         b, _, h, w = x.shape
-        box = self.box(x).view(b, 3, 4, h, w)
-        obj = self.obj(x).view(b, 3, 1, h, w)
-        cls = self.cls(x).view(b, 3, -1, h, w)
-        return torch.cat([box, obj, cls], dim=2).view(b, -1, h, w)
+        box = self.box(x).contiguous().view(b, 3, 4, h, w)
+        obj = self.obj(x).contiguous().view(b, 3, 1, h, w)
+        cls = self.cls(x).contiguous().view(b, 3, -1, h, w)
+        return torch.cat([box, obj, cls], dim=2).contiguous().view(b, -1, h, w)
 
 
 class YOLOv8AnchorHead(nn.Module):
@@ -112,6 +112,11 @@ class YOLOv8AnchorHead(nn.Module):
         self.head_p4 = YOLOv8AnchorDetectBranch(base_ch * 4, out_channels)
         self.head_p5 = YOLOv8AnchorDetectBranch(base_ch * 8, out_channels)
 
+    def _preserve_layout_after_resize(self, x):
+        if x.is_floating_point() and x.dim() == 4 and should_use_channels_last(self.config):
+            return x.contiguous(memory_format=torch.channels_last)
+        return x.contiguous() if x.is_floating_point() else x
+
     def forward(self, x):
         x = self.stem(x)
         x320 = self.c2f1(self.down1(x))
@@ -119,8 +124,10 @@ class YOLOv8AnchorHead(nn.Module):
         x80 = self.c2f3(self.down3(x160))
         x40 = self.c2f4(self.down4(x80))
         p5 = self.sppf(self.down5(x40))
-        p4 = self.fuse_p4(torch.cat([self.up_p5(p5), x40], dim=1))
-        p3 = self.fuse_p3(torch.cat([self.up_p4(p4), x80], dim=1))
+        p5_up = self._preserve_layout_after_resize(self.up_p5(p5))
+        p4 = self.fuse_p4(torch.cat([p5_up, x40], dim=1))
+        p4_up = self._preserve_layout_after_resize(self.up_p4(p4))
+        p3 = self.fuse_p3(torch.cat([p4_up, x80], dim=1))
         p4 = self.pan_p4(torch.cat([self.down_p3(p3), p4], dim=1))
         p5 = self.pan_p5(torch.cat([self.down_p4(p4), p5], dim=1))
         return self.head_p3(p3), self.head_p4(p4), self.head_p5(p5)

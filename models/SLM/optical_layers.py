@@ -37,7 +37,7 @@ class SLMLayer(nn.Module):
             noise_std = float(getattr(self.config, "SLM_INIT_NOISE_STD", 0.0))
             if noise_std > 0:
                 phase = phase + torch.randn_like(phase) * noise_std
-            return torch.remainder(phase, 2 * np.pi).view(1, 1, height, width)
+            return torch.remainder(phase, 2 * np.pi).contiguous().view(1, 1, height, width)
         return torch.rand(1, 1, *resolution) * 2 * np.pi
 
     def wrapped_phase(self):

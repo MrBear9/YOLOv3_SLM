@@ -15,7 +15,7 @@ def decode_detections_anchor_v8(config, preds, conf_thresh=None, nms_thresh=None
     for scale_idx, pred in enumerate(preds):
         grid_h, grid_w = pred.shape[2], pred.shape[3]
         stride = config.STRIDES[scale_idx]
-        pred = pred.permute(0, 2, 3, 1).reshape(batch_size, grid_h, grid_w, 3, -1)
+        pred = pred.contiguous().permute(0, 2, 3, 1).contiguous().reshape(batch_size, grid_h, grid_w, 3, -1)
         obj_conf = torch.sigmoid(pred[..., 4])
         cls_conf = torch.sigmoid(pred[..., 5:])
         cls_score, cls_id = cls_conf.max(dim=-1)
@@ -31,9 +31,9 @@ def decode_detections_anchor_v8(config, preds, conf_thresh=None, nms_thresh=None
             torch.arange(grid_w, device=device, dtype=dtype),
             indexing="ij",
         )
-        grid_x = grid_x.view(1, grid_h, grid_w, 1)
-        grid_y = grid_y.view(1, grid_h, grid_w, 1)
-        anchor_tensor = torch.tensor(config.ANCHORS[scale_idx], device=device, dtype=dtype).view(1, 1, 1, 3, 2)
+        grid_x = grid_x.contiguous().view(1, grid_h, grid_w, 1)
+        grid_y = grid_y.contiguous().view(1, grid_h, grid_w, 1)
+        anchor_tensor = torch.tensor(config.ANCHORS[scale_idx], device=device, dtype=dtype).contiguous().view(1, 1, 1, 3, 2)
 
         x_center = (grid_x + torch.sigmoid(pred[..., 0])) * stride
         y_center = (grid_y + torch.sigmoid(pred[..., 1])) * stride

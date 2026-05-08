@@ -3,6 +3,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _interpolate_preserve_layout(x, *args, **kwargs):
+    channels_last = x.dim() == 4 and x.is_contiguous(memory_format=torch.channels_last)
+    out = F.interpolate(x, *args, **kwargs)
+    if out.dim() != 4:
+        return out
+    if channels_last:
+        return out.contiguous(memory_format=torch.channels_last)
+    return out.contiguous()
+
+
 class CompositeOpticalFeatureLoss(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -121,11 +131,11 @@ def prediction_response_tensor(config, preds):
     response_maps = []
     for pred in preds:
         grid_h, grid_w = pred.shape[2], pred.shape[3]
-        pred = pred.permute(0, 2, 3, 1).reshape(pred.shape[0], grid_h, grid_w, 3, -1)
+        pred = pred.contiguous().permute(0, 2, 3, 1).contiguous().reshape(pred.shape[0], grid_h, grid_w, 3, -1)
         obj_conf = torch.sigmoid(pred[..., 4])
         cls_conf = torch.sigmoid(pred[..., 5:]).max(dim=-1).values
         response = (obj_conf * cls_conf).max(dim=-1).values.unsqueeze(1)
-        response = F.interpolate(response, size=(config.IMG_SIZE, config.IMG_SIZE), mode="bilinear", align_corners=False)
+        response = _interpolate_preserve_layout(response, size=(config.IMG_SIZE, config.IMG_SIZE), mode="bilinear", align_corners=False)
         response_maps.append(response)
     return torch.stack(response_maps, dim=0).max(dim=0).values
 

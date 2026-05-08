@@ -3,6 +3,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _interpolate_preserve_layout(x, *args, **kwargs):
+    channels_last = x.dim() == 4 and x.is_contiguous(memory_format=torch.channels_last)
+    out = F.interpolate(x, *args, **kwargs)
+    if out.dim() != 4:
+        return out
+    if channels_last:
+        return out.contiguous(memory_format=torch.channels_last)
+    return out.contiguous()
+
+
 class SqueezeExcite(nn.Module):
     def __init__(self, channels, reduction=8):
         super().__init__()
@@ -71,10 +81,10 @@ class ConvTeacher(nn.Module):
         x1 = self.stage1(self.conv1(x))
         x2 = self.stage2(self.conv2(x1))
         x3 = self.stage3(self.conv3(x2))
-        skip1 = F.interpolate(self.skip1(x1), size=x3.shape[-2:], mode="bilinear", align_corners=False)
-        skip2 = F.interpolate(self.skip2(x2), size=x3.shape[-2:], mode="bilinear", align_corners=False)
+        skip1 = _interpolate_preserve_layout(self.skip1(x1), size=x3.shape[-2:], mode="bilinear", align_corners=False)
+        skip2 = _interpolate_preserve_layout(self.skip2(x2), size=x3.shape[-2:], mode="bilinear", align_corners=False)
         f = self.context(x3 + skip1 + skip2)
         f = self.refine(f)
         f = torch.abs(self.project(f))
-        f = F.interpolate(f, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        f = _interpolate_preserve_layout(f, size=x.shape[-2:], mode="bilinear", align_corners=False)
         return torch.sigmoid(f)
