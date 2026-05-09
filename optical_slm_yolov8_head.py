@@ -55,6 +55,18 @@ def prepare_batch(batch, device):
     return gray, rgb, batch["targets"]
 
 
+def configure_student_norm_for_stage(stage_name, deployment_norm_mode):
+    schedule = str(getattr(Config, "STUDENT_NORM_SCHEDULE", "always")).lower()
+    if schedule == "none":
+        stage_norm_mode = "none"
+    elif schedule == "late" and stage_name == "student_only":
+        stage_norm_mode = Config.STUDENT_NORM_EARLY_MODE
+    else:
+        stage_norm_mode = deployment_norm_mode
+    Config.STUDENT_NORM_MODE = stage_norm_mode
+    return stage_norm_mode
+
+
 def log_config():
     log_to_file(Config, "=" * 80)
     log_to_file(Config, "Optical SLM student training with YOLOv8-head teacher")
@@ -70,6 +82,24 @@ def log_config():
     log_to_file(Config, f"Visualization: split={Config.VIS_DATASET_SPLIT}, interval={Config.VIS_INTERVAL}")
     log_to_file(Config, f"SLM init mode: {Config.SLM_INIT_MODE}")
     log_to_file(Config, f"SLM init checkpoint: {Config.SLM_INIT_CHECKPOINT}")
+    log_to_file(
+        Config,
+        f"Student normalization: enabled={Config.ENABLE_STUDENT_NORM}, schedule={Config.STUDENT_NORM_SCHEDULE}, "
+        f"early_mode={Config.STUDENT_NORM_EARLY_MODE}, deployment_mode={Config.STUDENT_NORM_MODE}, "
+        f"percentile={Config.STUDENT_NORM_PERCENTILE}",
+    )
+    log_to_file(
+        Config,
+        "Feature loss weights full/low1/low2/ssim/grad/freq/pearson: "
+        f"{Config.LOSS_FULL_WEIGHT}/{Config.LOSS_LOW1_WEIGHT}/{Config.LOSS_LOW2_WEIGHT}/"
+        f"{Config.LOSS_SSIM_WEIGHT}/{Config.LOSS_GRAD_WEIGHT}/{Config.LOSS_FREQ_WEIGHT}/{Config.LOSS_PEARSON_WEIGHT}",
+    )
+    log_to_file(
+        Config,
+        "Phase regularization weight/targets diversity/std/span/circular: "
+        f"{Config.LOSS_PHASE_DIVERSITY_WEIGHT}/{Config.PHASE_STD_TARGET}/"
+        f"{Config.PHASE_SPAN_TARGET}/{Config.PHASE_CIRCULAR_STD_TARGET}",
+    )
     log_to_file(Config, "Checkpoint payload intentionally omits a 'phase' key for SLM extraction compatibility.")
 
 
@@ -145,11 +175,13 @@ def train():
     best_map50 = -1.0
     history = {"train_total": [], "val_total": [], "precision": [], "recall": [], "f1": [], "map50": []}
     global_epoch = 0
+    deployment_norm_mode = Config.STUDENT_NORM_MODE
     init_epoch_log_table(Config)
 
     for stage_name, stage_epochs in stage_schedule():
         if stage_epochs <= 0:
             continue
+        stage_norm_mode = configure_student_norm_for_stage(stage_name, deployment_norm_mode)
         if stage_name == "student_only":
             set_trainable(student, True)
             set_trainable(detector, False)
@@ -160,7 +192,8 @@ def train():
             set_trainable(student, True)
             set_trainable(detector, True)
         optimizer = build_stage_optimizer(Config, student, detector, stage_name)
-        log_to_file(Config, f"Start stage={stage_name}, epochs={stage_epochs}")
+        norm_is_deployment_ready = Config.ENABLE_STUDENT_NORM and stage_norm_mode != "none"
+        log_to_file(Config, f"Start stage={stage_name}, epochs={stage_epochs}, student_norm_mode={stage_norm_mode}")
 
         for _ in range(stage_epochs):
             student.train(stage_name != "detector_only")
@@ -247,7 +280,7 @@ def train():
                 for key in ("val_total", "precision", "recall", "f1", "map50"):
                     history[key].append(np.nan)
 
-            if stage_name in {"student_only", "joint_balance"} and slm_ok and avg_total < best_student_loss:
+            if stage_name in {"student_only", "joint_balance"} and norm_is_deployment_ready and slm_ok and avg_total < best_student_loss:
                 best_student_loss = avg_total
                 save_student_best(
                     Config,
@@ -261,6 +294,12 @@ def train():
                     },
                 )
                 log_to_file(Config, f"Saved best SLM student: epoch={global_epoch}, loss={avg_total:.6f}")
+            elif stage_name == "student_only" and not norm_is_deployment_ready:
+                log_to_file(
+                    Config,
+                    "Student-only phase was trained without deployment normalization; standalone "
+                    "optical_student_best.pth is deferred until normalized detector/joint training.",
+                )
 
             detector_score_is_best = False
             if val_metrics is not None and val_metrics["map50"] > best_map50:

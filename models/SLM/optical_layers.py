@@ -88,7 +88,18 @@ class OpticalStudent(nn.Module):
         field = self.prop2(self.slm2(field))
         out = torch.abs(field) ** 2
         if self.enable_norm:
-            out = out / (out.mean(dim=[2, 3], keepdim=True) + self.config.OPTICAL_NORM_EPS)
+            norm_mode = str(getattr(self.config, "STUDENT_NORM_MODE", "mean")).lower()
+            if norm_mode == "max":
+                scale = out.amax(dim=[2, 3], keepdim=True)
+            elif norm_mode == "percentile":
+                flat = out.flatten(2)
+                q = float(getattr(self.config, "STUDENT_NORM_PERCENTILE", 0.995))
+                scale = torch.quantile(flat, q, dim=2, keepdim=True).view(out.shape[0], out.shape[1], 1, 1)
+            elif norm_mode == "none":
+                scale = torch.ones_like(out.mean(dim=[2, 3], keepdim=True))
+            else:
+                scale = out.mean(dim=[2, 3], keepdim=True)
+            out = out / (scale + self.config.OPTICAL_NORM_EPS)
         return out
 
 

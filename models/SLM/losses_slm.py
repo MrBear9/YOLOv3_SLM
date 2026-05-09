@@ -46,6 +46,19 @@ class CompositeOpticalFeatureLoss(nn.Module):
         freq_t = torch.fft.fft2(teacher_feature.squeeze(1), norm="ortho")
         return F.l1_loss(torch.log1p(torch.abs(freq_s)), torch.log1p(torch.abs(freq_t)))
 
+    def pearson_loss(self, student_feature, teacher_feature):
+        batch_size = student_feature.shape[0]
+        student_flat = student_feature.reshape(batch_size, -1)
+        teacher_flat = teacher_feature.reshape(batch_size, -1)
+        student_centered = student_flat - student_flat.mean(dim=1, keepdim=True)
+        teacher_centered = teacher_flat - teacher_flat.mean(dim=1, keepdim=True)
+        student_std = student_centered.std(dim=1, keepdim=True, unbiased=False)
+        teacher_std = teacher_centered.std(dim=1, keepdim=True, unbiased=False)
+        corr = (student_centered * teacher_centered).mean(dim=1, keepdim=True) / (
+            student_std * teacher_std + self.config.OPTICAL_FIELD_EPS
+        )
+        return torch.clamp((1.0 - corr.mean()) * 0.5, min=0.0)
+
     def phase_smoothness_loss(self, student):
         terms = []
         for slm_layer in (student.slm1, student.slm2):
@@ -97,6 +110,7 @@ class CompositeOpticalFeatureLoss(nn.Module):
         loss_ssim = self.ssim_loss(student_feature, teacher_feature)
         loss_grad = self.gradient_loss(student_feature, teacher_feature)
         loss_freq = self.frequency_loss(student_feature, teacher_feature)
+        loss_pearson = self.pearson_loss(student_feature, teacher_feature)
         loss_smooth = self.phase_smoothness_loss(student)
         loss_div, std, span, circular_std, near_boundary = self.phase_diversity_loss(student)
         total = (
@@ -106,6 +120,7 @@ class CompositeOpticalFeatureLoss(nn.Module):
             + loss_ssim * self.config.LOSS_SSIM_WEIGHT
             + loss_grad * self.config.LOSS_GRAD_WEIGHT
             + loss_freq * self.config.LOSS_FREQ_WEIGHT
+            + loss_pearson * self.config.LOSS_PEARSON_WEIGHT
             + loss_smooth * self.config.LOSS_PHASE_SMOOTH_WEIGHT
             + loss_div * self.config.LOSS_PHASE_DIVERSITY_WEIGHT
         )
@@ -117,6 +132,7 @@ class CompositeOpticalFeatureLoss(nn.Module):
             "ssim": float(loss_ssim.detach().item()),
             "grad": float(loss_grad.detach().item()),
             "freq": float(loss_freq.detach().item()),
+            "pearson": float(loss_pearson.detach().item()),
             "slm_smooth": float(loss_smooth.detach().item()),
             "slm_diversity": float(loss_div.detach().item()),
             "slm_std": float(std.item()),
