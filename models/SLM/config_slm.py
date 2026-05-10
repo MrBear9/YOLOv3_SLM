@@ -26,7 +26,7 @@ class ConfigSLM:
     IMG_SIZE = 640
     BATCH_SIZE = 8
     STUDENT_ONLY_EPOCHS = 60
-    DETECTOR_ONLY_EPOCHS = 120
+    DETECTOR_ONLY_EPOCHS = 40
     JOINT_EPOCHS = 60
     EPOCHS = STUDENT_ONLY_EPOCHS + DETECTOR_ONLY_EPOCHS + JOINT_EPOCHS
 
@@ -60,12 +60,14 @@ class ConfigSLM:
 
     STUDENT_LR = 1e-3
     PHASE_PARAM_LR = 2e-3
-    DETECTOR_LR = 4e-4
+    DETECTOR_LR = 2e-4
     JOINT_STUDENT_LR = 5e-5
     JOINT_PHASE_PARAM_LR = 1e-4
     JOINT_DETECTOR_LR = 2e-4
     WEIGHT_DECAY = 3e-5
     PHASE_WEIGHT_DECAY = 0.0
+    LR_SCHEDULER = "CosineAnnealingLR"
+    ETA_MIN = 1e-6
 
     FEATURE_LOSS_WEIGHT_STUDENT = 1.0
     DETECTION_LOSS_WEIGHT_STUDENT = 0.0
@@ -110,8 +112,8 @@ class ConfigSLM:
     OPTICAL_FIELD_EPS = 1e-8
     OPTICAL_NORM_EPS = 1e-6
     ENABLE_STUDENT_NORM = True
-    STUDENT_NORM_SCHEDULE = "late"  # always, late, none
-    STUDENT_NORM_EARLY_MODE = "none"
+    STUDENT_NORM_SCHEDULE = "always"  # always, late, none
+    STUDENT_NORM_EARLY_MODE = "max"
     STUDENT_NORM_MODE = "max"  # mean, max, percentile, none
     STUDENT_NORM_PERCENTILE = 0.995
 
@@ -165,8 +167,15 @@ class ConfigSLM:
             "OPTICAL_SLM_STUDENT_NORM_EARLY_MODE": ("STUDENT_NORM_EARLY_MODE", str),
             "OPTICAL_SLM_STUDENT_NORM_MODE": ("STUDENT_NORM_MODE", str),
             "OPTICAL_SLM_STUDENT_NORM_PERCENTILE": ("STUDENT_NORM_PERCENTILE", float),
+            "OPTICAL_SLM_DETECTOR_LR": ("DETECTOR_LR", float),
+            "OPTICAL_SLM_JOINT_DETECTOR_LR": ("JOINT_DETECTOR_LR", float),
+            "OPTICAL_SLM_LR_SCHEDULER": ("LR_SCHEDULER", str),
+            "OPTICAL_SLM_ETA_MIN": ("ETA_MIN", float),
             "OPTICAL_SLM_BATCH_SIZE": ("BATCH_SIZE", int),
             "OPTICAL_SLM_EPOCHS": ("EPOCHS", int),
+            "OPTICAL_SLM_STUDENT_ONLY_EPOCHS": ("STUDENT_ONLY_EPOCHS", int),
+            "OPTICAL_SLM_DETECTOR_ONLY_EPOCHS": ("DETECTOR_ONLY_EPOCHS", int),
+            "OPTICAL_SLM_JOINT_EPOCHS": ("JOINT_EPOCHS", int),
             "OPTICAL_SLM_NUM_WORKERS": ("NUM_WORKERS", int),
         }
         for env_name, (attr, caster) in overrides.items():
@@ -177,6 +186,7 @@ class ConfigSLM:
     @classmethod
     def initialize(cls):
         cls.apply_runtime_overrides()
+        cls.EPOCHS = cls.STUDENT_ONLY_EPOCHS + cls.DETECTOR_ONLY_EPOCHS + cls.JOINT_EPOCHS
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
         cls.OUTPUT_DIR = resolve_project_path(cls.OUTPUT_DIR)
         cls.TEACHER_DETECTOR_CHECKPOINT = resolve_project_path(cls.TEACHER_DETECTOR_CHECKPOINT)

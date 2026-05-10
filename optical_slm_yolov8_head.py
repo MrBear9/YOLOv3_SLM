@@ -5,6 +5,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -67,6 +68,12 @@ def configure_student_norm_for_stage(stage_name, deployment_norm_mode):
     return stage_norm_mode
 
 
+def build_stage_scheduler(optimizer, stage_epochs):
+    if str(getattr(Config, "LR_SCHEDULER", "")).lower() != "cosineannealinglr":
+        return None
+    return CosineAnnealingLR(optimizer, T_max=max(int(stage_epochs), 1), eta_min=Config.ETA_MIN)
+
+
 def log_config():
     log_to_file(Config, "=" * 80)
     log_to_file(Config, "Optical SLM student training with YOLOv8-head teacher")
@@ -78,6 +85,8 @@ def log_config():
     log_to_file(Config, f"Epochs student/detector/joint: {Config.STUDENT_ONLY_EPOCHS}/{Config.DETECTOR_ONLY_EPOCHS}/{Config.JOINT_EPOCHS}")
     log_to_file(Config, f"Save student best: {Config.get_student_best_path()}")
     log_to_file(Config, f"Save detector best: {Config.get_detector_best_path()}")
+    log_to_file(Config, f"LR student/phase/detector/joint_detector: {Config.STUDENT_LR}/{Config.PHASE_PARAM_LR}/{Config.DETECTOR_LR}/{Config.JOINT_DETECTOR_LR}")
+    log_to_file(Config, f"LR scheduler: {Config.LR_SCHEDULER}, eta_min={Config.ETA_MIN}")
     log_to_file(Config, f"Validation interval: {Config.VAL_INTERVAL}")
     log_to_file(Config, f"Visualization: split={Config.VIS_DATASET_SPLIT}, interval={Config.VIS_INTERVAL}")
     log_to_file(Config, f"SLM init mode: {Config.SLM_INIT_MODE}")
@@ -192,8 +201,13 @@ def train():
             set_trainable(student, True)
             set_trainable(detector, True)
         optimizer = build_stage_optimizer(Config, student, detector, stage_name)
+        scheduler = build_stage_scheduler(optimizer, stage_epochs)
         norm_is_deployment_ready = Config.ENABLE_STUDENT_NORM and stage_norm_mode != "none"
-        log_to_file(Config, f"Start stage={stage_name}, epochs={stage_epochs}, student_norm_mode={stage_norm_mode}")
+        log_to_file(
+            Config,
+            f"Start stage={stage_name}, epochs={stage_epochs}, student_norm_mode={stage_norm_mode}, "
+            f"scheduler={Config.LR_SCHEDULER if scheduler is not None else 'none'}",
+        )
 
         for _ in range(stage_epochs):
             student.train(stage_name != "detector_only")
@@ -239,6 +253,9 @@ def train():
                 epoch_feature += float(feature_loss.detach().item())
                 epoch_detection += float(detection_loss.detach().item())
                 epoch_response += float(response_loss.detach().item())
+
+            if scheduler is not None:
+                scheduler.step()
 
             num_batches = max(len(train_loader), 1)
             avg_total = epoch_total / num_batches

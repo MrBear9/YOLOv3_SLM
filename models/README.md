@@ -43,7 +43,9 @@ It does not import or initialize `optical_teacher_yolo.py`, so running the YOLOv
 SLM phase training has a few hardware-facing safeguards:
 
 - SLM phase parameters use `PHASE_WEIGHT_DECAY = 0.0`; ordinary weight decay would pull `phase_raw` toward zero and can collapse the phase map.
-- `OpticalStudent` now supports staged normalization. By default `STUDENT_NORM_SCHEDULE = "late"` uses `STUDENT_NORM_EARLY_MODE = "none"` during the first `student_only` stage, then switches to the deployment normalization mode `STUDENT_NORM_MODE = "max"` for detector-only and joint training. This lets the phase layers first learn an unconstrained optical intensity pattern, then trains the detector on the normalized feature distribution used at inference.
+- `OpticalStudent` now defaults to `STUDENT_NORM_SCHEDULE = "always"` and `STUDENT_NORM_MODE = "max"`, so `student_only`, detector-only, joint training, and inference all see the same normalized SLM feature distribution. This avoids the hard distribution jump caused by training phase layers with `none` and then training the detector with `max`.
+- Detector-only training is intentionally short by default (`DETECTOR_ONLY_EPOCHS = 40`) with a lower detector LR (`DETECTOR_LR = 2e-4`) because the detector quickly overfits the fixed SLM feature map after the first mAP plateau.
+- `optical_slm_yolov8_head.py` supports per-stage `CosineAnnealingLR` with `ETA_MIN = 1e-6`, matching the teacher YOLOv8-head training style. A new scheduler is created whenever the stage optimizer is rebuilt.
 - `losses_slm.py` includes a Pearson correlation feature term. This gives the SLM student a scale/offset-insensitive structural target, reducing the hard lower bound caused by absolute-value MSE terms when student and teacher feature scales differ.
 - The phase diversity loss is now a lightweight regularizer instead of a dominant objective: `LOSS_PHASE_DIVERSITY_WEIGHT = 0.15`, with relaxed std/span/circular-std targets. It still rejects nearly flat phase maps, but leaves more room for feature matching.
 - `losses_slm.py` penalizes low circular phase spread and excessive concentration near the `0 / 2*pi` wrap boundary.
@@ -57,15 +59,16 @@ Useful runtime overrides:
 
 ```powershell
 $env:OPTICAL_SLM_INIT_MODE="vortex"
-$env:OPTICAL_SLM_STUDENT_NORM_SCHEDULE="late"
+$env:OPTICAL_SLM_STUDENT_NORM_SCHEDULE="always"
 $env:OPTICAL_SLM_STUDENT_NORM_MODE="max"
 python .\optical_slm_yolov8_head.py
 ```
 
-For an ablation that keeps normalization enabled in every stage:
+For an ablation that delays normalization until after `student_only`:
 
 ```powershell
-$env:OPTICAL_SLM_STUDENT_NORM_SCHEDULE="always"
+$env:OPTICAL_SLM_STUDENT_NORM_SCHEDULE="late"
+$env:OPTICAL_SLM_STUDENT_NORM_EARLY_MODE="none"
 python .\optical_slm_yolov8_head.py
 ```
 

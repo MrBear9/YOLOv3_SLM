@@ -57,7 +57,7 @@ class ConfigYOLOv8Anchor:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
     IMG_SIZE = 640
-    BATCH_SIZE = 8
+    BATCH_SIZE = 16
     STAGE1_LOCATE_EPOCHS = 60
     STAGE2_TEXTURE_EPOCHS = 80
     STAGE3_BALANCE_EPOCHS = 200
@@ -76,7 +76,7 @@ class ConfigYOLOv8Anchor:
     ANCHORS = None
     ANCHOR_SOURCE = "default"
     POSITIVE_ANCHOR_IOU = 0.35
-    MAX_POSITIVE_ANCHORS = 1
+    MAX_POSITIVE_ANCHORS = 2
     NOOBJ_IGNORE_IOU = 0.68
 
     BOX_WEIGHT_BASE = 1.45
@@ -95,6 +95,8 @@ class ConfigYOLOv8Anchor:
     LEARNING_RATE = 3e-4
     WEIGHT_DECAY = 3e-5
     OPTIMIZER = "Adam"
+    LR_SCHEDULER = "CosineAnnealingLR"
+    ETA_MIN = 1e-6
 
     TEACHER_INIT_MODE = "scratch"
     TEACHER_INIT_CHECKPOINT = r"output/OpticalTeacherYOLO/teacher_final.pth"
@@ -253,7 +255,7 @@ class ConfigYOLOv8Anchor:
                 "box_weight": cls.BOX_WEIGHT_BASE * 1.35,
                 "obj_weight": cls.OBJ_WEIGHT_BASE * 1.15,
                 "noobj_weight": cls.NOOBJ_WEIGHT_BASE,
-                "cls_weight": cls.CLS_WEIGHT_BASE * 0.72,
+                "cls_weight": cls.CLS_WEIGHT_BASE * 1.43,
                 "size_weights": {
                     "small": cls.SMALL_OBJ_WEIGHT,
                     "medium": cls.MEDIUM_OBJ_WEIGHT,

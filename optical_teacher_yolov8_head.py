@@ -26,6 +26,7 @@ from models.training_utils import (
     save_training_curves,
     set_detector_trainable,
 )
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 from models.yolov8.head_v8 import TeacherWithYOLOv8AnchorDetector, YOLOv8AnchorHead
 from models.yolov8.loss_anchor_v8 import YOLOv3AnchorLossForV8Head
@@ -129,6 +130,7 @@ def train():
     best_map50 = -1.0
     current_phase = None
     optimizer = None
+    scheduler = None
 
     log_to_file(Config, "=" * 60)
     log_to_file(Config, "Training YOLOv8-style head with legacy YOLOv3 anchor loss")
@@ -143,7 +145,14 @@ def train():
         if phase != current_phase:
             current_phase = phase
             optimizer = build_optimizer_from_model(Config, model, teacher_lr=stage_settings["teacher_lr"], detector_lr=stage_settings["detector_lr"])
-            log_to_file(Config, f"Epoch {epoch}: phase={phase}, teacher_lr={stage_settings['teacher_lr']:.6g}, detector_lr={stage_settings['detector_lr']:.6g}")
+            if phase == "locate_gt":
+                phase_epochs = Config.STAGE1_LOCATE_EPOCHS
+            elif phase == "texture_detail":
+                phase_epochs = Config.STAGE2_TEXTURE_EPOCHS
+            else:
+                phase_epochs = Config.STAGE3_BALANCE_EPOCHS
+            scheduler = CosineAnnealingLR(optimizer, T_max=phase_epochs, eta_min=Config.ETA_MIN)
+            log_to_file(Config, f"Epoch {epoch}: phase={phase}, teacher_lr={stage_settings['teacher_lr']:.6g}, detector_lr={stage_settings['detector_lr']:.6g}, cosine_T_max={phase_epochs}")
 
         for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True):
             batch_images, batch_targets = prepare_batch(Config, batch, device)
@@ -160,6 +169,7 @@ def train():
 
         avg_train = {key: value / max(len(train_loader), 1) for key, value in train_component_sums.items()}
         history["train_total"].append(avg_train["total"])
+        scheduler.step()
         current_lr = max(group["lr"] for group in optimizer.param_groups)
         val_losses = None
         val_metrics = None
