@@ -24,7 +24,7 @@ class ConfigSLM:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
     IMG_SIZE = 640
-    BATCH_SIZE = 8
+    BATCH_SIZE = 16
     STUDENT_ONLY_EPOCHS = 60
     DETECTOR_ONLY_EPOCHS = 40
     JOINT_EPOCHS = 60
@@ -52,9 +52,9 @@ class ConfigSLM:
     LARGE_OBJ_WEIGHT = 1.5
 
     BOX_WEIGHT_BASE = 1.32
-    OBJ_WEIGHT_BASE = 0.56
-    NOOBJ_WEIGHT_BASE = 0.26
-    CLS_WEIGHT_BASE = 0.32
+    OBJ_WEIGHT_BASE = 1.00 # 0.56-->1.00
+    NOOBJ_WEIGHT_BASE = 0.15 # 0.26-->0.15
+    CLS_WEIGHT_BASE = 0.70 # 0.32-->0.7
     FOCAL_ALPHA = 0.28
     FOCAL_GAMMA = 1.6
 
@@ -112,13 +112,13 @@ class ConfigSLM:
     OPTICAL_FIELD_EPS = 1e-8
     OPTICAL_NORM_EPS = 1e-6
     ENABLE_STUDENT_NORM = True
-    STUDENT_NORM_SCHEDULE = "always"  # always, late, none
-    STUDENT_NORM_EARLY_MODE = "max"
+    STUDENT_NORM_SCHEDULE = "late"  # always, late, none
+    STUDENT_NORM_EARLY_MODE = "none"
     STUDENT_NORM_MODE = "max"  # mean, max, percentile, none
     STUDENT_NORM_PERCENTILE = 0.995
 
-    CONF_THRESH = 0.5
-    NMS_THRESH = 0.35
+    CONF_THRESH = 0.7 # 0.5-->0.7
+    NMS_THRESH = 0.25 # 0.35-->0.25
     MAX_DET = 5
     AGNOSTIC_NMS = False
     ENABLE_CONTAINMENT_SUPPRESSION = False
@@ -137,7 +137,7 @@ class ConfigSLM:
     VIS_SHOW_BEST_MATCHED_ANCHORS = False
     VIS_MAX_GT_ANCHOR_OVERLAYS = 2
 
-    NUM_WORKERS = min(8, os.cpu_count() or 0)
+    NUM_WORKERS = min(12, os.cpu_count() or 0)
     PIN_MEMORY = torch.cuda.is_available()
     PERSISTENT_WORKERS = True
     PREFETCH_FACTOR = 4
