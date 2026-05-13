@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from models.runtime import prepare_conv_tensor, should_use_channels_last
-from models.teacher import ConvTeacher
+from models.teacher import build_teacher
 
 
 class ConvBNAct(nn.Module):
@@ -137,7 +137,7 @@ class TeacherWithYOLOv8AnchorDetector(nn.Module):
     def __init__(self, config, teacher=None, detector=None):
         super().__init__()
         self.config = config
-        self.teacher = ConvTeacher() if teacher is None else teacher
+        self.teacher = build_teacher(config) if teacher is None else teacher
         self.detector = YOLOv8AnchorHead(config, in_channels=1, out_channels=config.get_detector_output_channels()) if detector is None else detector
 
     def forward(self, x, return_feature=False):

@@ -24,7 +24,7 @@ from models.SLM.utils_slm import (
     set_trainable,
 )
 from models.runtime import init_epoch_log_table, init_log_file, log_epoch_table_row, log_to_file
-from models.teacher import ConvTeacher
+from models.teacher import build_teacher
 from models.training_utils import save_training_curves
 from models.yolov8.head_v8 import YOLOv8AnchorHead
 from models.yolov8.loss_anchor_v8 import YOLOv3AnchorLossForV8Head
@@ -82,6 +82,7 @@ def log_config():
     log_to_file(Config, f"Dataset: {Config.YAML_PATH}")
     log_to_file(Config, f"Output: {Config.OUTPUT_DIR}")
     log_to_file(Config, f"Teacher detector checkpoint: {Config.TEACHER_DETECTOR_CHECKPOINT}")
+    log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}")
     log_to_file(Config, f"Classes: {Config.CLASS_NAMES}")
     log_to_file(
         Config,
@@ -145,7 +146,7 @@ def train():
     log_config()
     device = torch.device(Config.DEVICE)
 
-    teacher = ConvTeacher().to(device)
+    teacher = build_teacher(Config).to(device)
     reference_detector = YOLOv8AnchorHead(Config, in_channels=1, out_channels=Config.get_detector_output_channels()).to(device)
     checkpoint_info = load_teacher_detector_checkpoint(teacher, reference_detector, Config.TEACHER_DETECTOR_CHECKPOINT, device)
     log_to_file(Config, f"Loaded teacher/detector checkpoint: {checkpoint_info}")

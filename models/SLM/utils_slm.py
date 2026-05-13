@@ -38,6 +38,8 @@ def load_teacher_detector_checkpoint(teacher, detector, checkpoint_path, device)
         checkpoint = torch.load(checkpoint_path, map_location=device)
     info = {}
     if isinstance(checkpoint, dict) and "teacher_state_dict" in checkpoint and "detector_state_dict" in checkpoint:
+        if "teacher_arch" in checkpoint:
+            info["teacher_arch"] = checkpoint["teacher_arch"]
         info["teacher_loaded"], info["teacher_total"] = load_matching_state(teacher, extract_state_dict(checkpoint["teacher_state_dict"]), prefixes=("teacher.",))
         info["detector_loaded"], info["detector_total"] = load_matching_state(detector, extract_state_dict(checkpoint["detector_state_dict"]), prefixes=("detector.",))
         return info

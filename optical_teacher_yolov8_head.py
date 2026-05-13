@@ -18,7 +18,7 @@ from models.runtime import (
     unwrap_module,
     wrap_data_parallel,
 )
-from models.teacher import ConvTeacher
+from models.teacher import build_teacher
 from models.teacher_guidance import compute_teacher_guidance_loss
 from models.training_utils import (
     build_optimizer_from_model,
@@ -59,8 +59,9 @@ def log_all_parameters():
     log_to_file(Config, f"Detection conf/nms/max_det: {Config.CONF_THRESH}/{Config.NMS_THRESH}/{Config.MAX_DET}")
     log_to_file(Config, f"Metric conf/nms/max_det: {Config.METRIC_CONF_THRESH}/{Config.METRIC_NMS_THRESH}/{Config.METRIC_MAX_DET}")
     log_to_file(Config, f"Output: {Config.TEACHER_OUTPUT_DIR}")
-    teacher = ConvTeacher()
+    teacher = build_teacher(Config)
     detector = YOLOv8AnchorHead(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
+    log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}")
     log_to_file(Config, f"Teacher parameters: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
     log_to_file(Config, f"Detector parameters: {sum(p.numel() for p in detector.parameters() if p.requires_grad):,}")
     log_to_file(Config, "=" * 80)
@@ -78,7 +79,7 @@ def train():
             torch.backends.cuda.matmul.allow_tf32 = Config.ENABLE_TF32
 
     log_to_file(Config, f"Using device: {device}")
-    teacher = ConvTeacher()
+    teacher = build_teacher(Config)
     loaded_teacher, teacher_message = initialize_teacher_weights(Config, teacher, device)
     log_to_file(Config, teacher_message)
     freeze_teacher = Config.FREEZE_TEACHER and loaded_teacher
@@ -205,6 +206,7 @@ def train():
                         "epoch": epoch,
                         "loss": avg_train["total"],
                         "val_map50": best_map50 if val_metrics is not None else None,
+                        "teacher_arch": Config.TEACHER_ARCH,
                         "head_type": "yolov8_style_head_yolov3_anchor_loss",
                     },
                     joint_best_path,
@@ -240,6 +242,7 @@ def train():
                 "epoch": Config.EPOCHS - 1,
                 "loss": history["train_total"][-1] if history["train_total"] else None,
                 "val_map50": best_map50 if best_map50 >= 0 else None,
+                "teacher_arch": Config.TEACHER_ARCH,
                 "head_type": "yolov8_style_head_yolov3_anchor_loss",
             },
             joint_final_path,

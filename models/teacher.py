@@ -48,6 +48,63 @@ class TeacherResidualBlock(nn.Module):
         return self.act(out + identity)
 
 
+class TeacherConvBNAct(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, groups=1):
+        super().__init__()
+        padding = kernel_size // 2
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, groups=groups, bias=False)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+
+class TeacherBottleneck(nn.Module):
+    def __init__(self, channels, shortcut=True, expansion=0.5):
+        super().__init__()
+        hidden = max(int(channels * expansion), 8)
+        self.cv1 = TeacherConvBNAct(channels, hidden, 1)
+        self.cv2 = TeacherConvBNAct(hidden, channels, 3)
+        self.se = SqueezeExcite(channels)
+        self.shortcut = shortcut
+
+    def forward(self, x):
+        y = self.se(self.cv2(self.cv1(x)))
+        return x + y if self.shortcut else y
+
+
+class TeacherC2f(nn.Module):
+    def __init__(self, in_channels, out_channels, num_blocks=2, shortcut=True, expansion=0.5):
+        super().__init__()
+        hidden = max(int(out_channels * expansion), 8)
+        self.cv1 = TeacherConvBNAct(in_channels, 2 * hidden, 1)
+        self.blocks = nn.ModuleList(TeacherBottleneck(hidden, shortcut=shortcut, expansion=1.0) for _ in range(num_blocks))
+        self.cv2 = TeacherConvBNAct((2 + num_blocks) * hidden, out_channels, 1)
+
+    def forward(self, x):
+        parts = list(self.cv1(x).chunk(2, dim=1))
+        for block in self.blocks:
+            parts.append(block(parts[-1]))
+        return self.cv2(torch.cat(parts, dim=1))
+
+
+class TeacherSPPF(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=5):
+        super().__init__()
+        hidden = max(in_channels // 2, 8)
+        self.cv1 = TeacherConvBNAct(in_channels, hidden, 1)
+        self.cv2 = TeacherConvBNAct(hidden * 4, out_channels, 1)
+        self.pool = nn.MaxPool2d(kernel_size, stride=1, padding=kernel_size // 2)
+
+    def forward(self, x):
+        x = self.cv1(x)
+        y1 = self.pool(x)
+        y2 = self.pool(y1)
+        y3 = self.pool(y2)
+        return self.cv2(torch.cat([x, y1, y2, y3], dim=1))
+
+
 class ConvTeacher(nn.Module):
     def __init__(self):
         super().__init__()
@@ -88,3 +145,58 @@ class ConvTeacher(nn.Module):
         f = torch.abs(self.project(f))
         f = _interpolate_preserve_layout(f, size=x.shape[-2:], mode="bilinear", align_corners=False)
         return torch.sigmoid(f)
+
+
+class ConvTeacherV2(nn.Module):
+    """Light YOLOv8-style optical teacher with a 1-channel feature bridge."""
+
+    def __init__(self, base_channels=24, c2f_blocks=2):
+        super().__init__()
+        c1 = base_channels
+        c2 = base_channels * 2
+        c3 = base_channels * 4
+        self.stem = TeacherConvBNAct(1, c1, 3, 2)
+        self.stage1 = TeacherC2f(c1, c1, c2f_blocks, shortcut=True)
+        self.down2 = TeacherConvBNAct(c1, c2, 3, 2)
+        self.stage2 = TeacherC2f(c2, c2, c2f_blocks + 1, shortcut=True)
+        self.down3 = TeacherConvBNAct(c2, c3, 3, 2)
+        self.stage3 = TeacherC2f(c3, c3, c2f_blocks + 1, shortcut=True)
+        self.sppf = TeacherSPPF(c3, c3)
+        self.skip1 = nn.Sequential(nn.Conv2d(c1, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
+        self.skip2 = nn.Sequential(nn.Conv2d(c2, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
+        self.context = nn.Sequential(
+            TeacherC2f(c3, c3, c2f_blocks, shortcut=True),
+            TeacherResidualBlock(c3, dilation=2),
+        )
+        self.refine = nn.Sequential(
+            TeacherConvBNAct(c3, c2, 3),
+            TeacherC2f(c2, c2, max(c2f_blocks, 1), shortcut=True),
+            TeacherConvBNAct(c2, c1, 1),
+        )
+        self.bridge = nn.Conv2d(c1, 1, 1, bias=False)
+
+    def forward(self, x):
+        if x.shape[1] > 1:
+            x = x.mean(dim=1, keepdim=True)
+        x1 = self.stage1(self.stem(x))
+        x2 = self.stage2(self.down2(x1))
+        x3 = self.stage3(self.down3(x2))
+        p3 = self.sppf(x3)
+        skip1 = _interpolate_preserve_layout(self.skip1(x1), size=p3.shape[-2:], mode="bilinear", align_corners=False)
+        skip2 = _interpolate_preserve_layout(self.skip2(x2), size=p3.shape[-2:], mode="bilinear", align_corners=False)
+        f = self.context(p3 + skip1 + skip2)
+        f = self.refine(f)
+        f = torch.abs(self.bridge(f))
+        f = _interpolate_preserve_layout(f, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        return torch.sigmoid(f)
+
+
+def build_teacher(config=None):
+    arch = str(getattr(config, "TEACHER_ARCH", "convteacher_v2") if config is not None else "convteacher_v2").strip().lower()
+    if arch in {"convteacher", "convteacher_v1", "v1", "legacy"}:
+        return ConvTeacher()
+    if arch in {"convteacher_v2", "v2", "light_yolov8", "yolov8_light"}:
+        base_channels = int(getattr(config, "TEACHER_V2_BASE_CHANNELS", 24) if config is not None else 24)
+        c2f_blocks = int(getattr(config, "TEACHER_V2_C2F_BLOCKS", 2) if config is not None else 2)
+        return ConvTeacherV2(base_channels=base_channels, c2f_blocks=c2f_blocks)
+    raise ValueError(f"Unsupported TEACHER_ARCH: {arch}")

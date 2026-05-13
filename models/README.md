@@ -92,3 +92,8 @@ python .\optical_slm_yolov8_head.py
 The SLM checkpoint payload intentionally avoids a top-level `"phase"` key, so phase extraction scripts can search tensor parameter names such as `phase_raw` without accidentally matching a string metadata field. It also stores wrapped `*_wrapped_slm_0_2pi` tensors for SLM loading.
 
 `Optical_yolo_detect/Optical_SLM_yolov8_head_model.py` loads those two SLM outputs for visualization/evaluation, and its local README explains the expected input/output files.
+
+Teacher architecture selection:
+
+- `TEACHER_ARCH = "convteacher"` keeps the original lightweight optical teacher.
+- `TEACHER_ARCH = "convteacher_v2"` uses the current light YOLOv8-style teacher front-end. It still accepts a 1-channel input and emits the same 1-channel feature bridge for the detector/SLM path, but adds lightweight C2f/SPPF context inside the teacher.
