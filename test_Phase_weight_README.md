@@ -67,7 +67,7 @@ SLM phase is periodic, but the trainable tensor `phase_raw` is an ordinary uncon
 The current SLM training code avoids this by:
 
 - setting `PHASE_WEIGHT_DECAY = 0.0` for `phase_raw` parameters,
-- using `STUDENT_NORM_MODE = "max"` in all stages by default, so phase learning, detector training, and inference share the same normalized optical feature distribution,
+- supporting a short `student_adapt_max` stage when training starts with unnormalized optical intensity and later switches to `max` normalization,
 - adding a Pearson correlation feature loss to focus part of the optimization on spatial structure instead of only absolute scale,
 - adding circular phase diversity loss,
 - lowering the phase diversity weight/targets so diversity prevents collapse without dominating feature learning,

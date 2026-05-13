@@ -84,13 +84,15 @@ def split_student_param_groups(student):
 
 
 def build_stage_optimizer(config, student, detector, stage_name):
-    if stage_name == "student_only":
+    if stage_name in {"student_only", "student_adapt_max"}:
         slm_params, other_params = split_student_param_groups(student)
+        phase_lr = config.ADAPT_PHASE_PARAM_LR if stage_name == "student_adapt_max" else config.PHASE_PARAM_LR
+        student_lr = config.ADAPT_STUDENT_LR if stage_name == "student_adapt_max" else config.STUDENT_LR
         groups = []
         if slm_params:
-            groups.append({"params": slm_params, "lr": config.PHASE_PARAM_LR, "weight_decay": config.PHASE_WEIGHT_DECAY})
+            groups.append({"params": slm_params, "lr": phase_lr, "weight_decay": config.PHASE_WEIGHT_DECAY})
         if other_params:
-            groups.append({"params": other_params, "lr": config.STUDENT_LR, "weight_decay": config.WEIGHT_DECAY})
+            groups.append({"params": other_params, "lr": student_lr, "weight_decay": config.WEIGHT_DECAY})
         return torch.optim.Adam(groups, weight_decay=0.0)
     if stage_name == "detector_only":
         return torch.optim.Adam([p for p in detector.parameters() if p.requires_grad], lr=config.DETECTOR_LR, weight_decay=config.WEIGHT_DECAY)

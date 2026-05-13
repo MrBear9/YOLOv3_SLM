@@ -42,6 +42,7 @@ def configure_backends():
 def stage_schedule():
     return [
         ("student_only", Config.STUDENT_ONLY_EPOCHS),
+        ("student_adapt_max", Config.STUDENT_ADAPT_MAX_EPOCHS),
         ("detector_only", Config.DETECTOR_ONLY_EPOCHS),
         ("joint_balance", Config.JOINT_EPOCHS),
     ]
@@ -82,10 +83,19 @@ def log_config():
     log_to_file(Config, f"Output: {Config.OUTPUT_DIR}")
     log_to_file(Config, f"Teacher detector checkpoint: {Config.TEACHER_DETECTOR_CHECKPOINT}")
     log_to_file(Config, f"Classes: {Config.CLASS_NAMES}")
-    log_to_file(Config, f"Epochs student/detector/joint: {Config.STUDENT_ONLY_EPOCHS}/{Config.DETECTOR_ONLY_EPOCHS}/{Config.JOINT_EPOCHS}")
+    log_to_file(
+        Config,
+        f"Epochs student/adapt/detector/joint: "
+        f"{Config.STUDENT_ONLY_EPOCHS}/{Config.STUDENT_ADAPT_MAX_EPOCHS}/{Config.DETECTOR_ONLY_EPOCHS}/{Config.JOINT_EPOCHS}",
+    )
     log_to_file(Config, f"Save student best: {Config.get_student_best_path()}")
     log_to_file(Config, f"Save detector best: {Config.get_detector_best_path()}")
-    log_to_file(Config, f"LR student/phase/detector/joint_detector: {Config.STUDENT_LR}/{Config.PHASE_PARAM_LR}/{Config.DETECTOR_LR}/{Config.JOINT_DETECTOR_LR}")
+    log_to_file(
+        Config,
+        f"LR student/phase/adapt_student/adapt_phase/detector/joint_detector: "
+        f"{Config.STUDENT_LR}/{Config.PHASE_PARAM_LR}/{Config.ADAPT_STUDENT_LR}/"
+        f"{Config.ADAPT_PHASE_PARAM_LR}/{Config.DETECTOR_LR}/{Config.JOINT_DETECTOR_LR}",
+    )
     log_to_file(Config, f"LR scheduler: {Config.LR_SCHEDULER}, eta_min={Config.ETA_MIN}")
     log_to_file(Config, f"Validation interval: {Config.VAL_INTERVAL}")
     log_to_file(Config, f"Visualization: split={Config.VIS_DATASET_SPLIT}, interval={Config.VIS_INTERVAL}")
@@ -102,6 +112,17 @@ def log_config():
         "Feature loss weights full/low1/low2/ssim/grad/freq/pearson: "
         f"{Config.LOSS_FULL_WEIGHT}/{Config.LOSS_LOW1_WEIGHT}/{Config.LOSS_LOW2_WEIGHT}/"
         f"{Config.LOSS_SSIM_WEIGHT}/{Config.LOSS_GRAD_WEIGHT}/{Config.LOSS_FREQ_WEIGHT}/{Config.LOSS_PEARSON_WEIGHT}",
+    )
+    log_to_file(
+        Config,
+        f"Stage loss weights student/adapt/joint_feature/joint_detection: "
+        f"{Config.FEATURE_LOSS_WEIGHT_STUDENT}/{Config.FEATURE_LOSS_WEIGHT_ADAPT}/"
+        f"{Config.FEATURE_LOSS_WEIGHT_JOINT}/{Config.DETECTION_LOSS_WEIGHT_JOINT}",
+    )
+    log_to_file(
+        Config,
+        f"Detector early stop: patience={Config.DETECTOR_EARLY_STOP_PATIENCE}, "
+        f"min_delta={Config.DETECTOR_EARLY_STOP_MIN_DELTA}",
     )
     log_to_file(
         Config,
@@ -182,6 +203,7 @@ def train():
     best_student_loss = float("inf")
     best_detector_loss = float("inf")
     best_map50 = -1.0
+    best_student_map50 = -1.0
     history = {"train_total": [], "val_total": [], "precision": [], "recall": [], "f1": [], "map50": []}
     global_epoch = 0
     deployment_norm_mode = Config.STUDENT_NORM_MODE
@@ -191,7 +213,7 @@ def train():
         if stage_epochs <= 0:
             continue
         stage_norm_mode = configure_student_norm_for_stage(stage_name, deployment_norm_mode)
-        if stage_name == "student_only":
+        if stage_name in {"student_only", "student_adapt_max"}:
             set_trainable(student, True)
             set_trainable(detector, False)
         elif stage_name == "detector_only":
@@ -208,10 +230,11 @@ def train():
             f"Start stage={stage_name}, epochs={stage_epochs}, student_norm_mode={stage_norm_mode}, "
             f"scheduler={Config.LR_SCHEDULER if scheduler is not None else 'none'}",
         )
+        detector_no_improve = 0
 
         for _ in range(stage_epochs):
             student.train(stage_name != "detector_only")
-            detector.train(stage_name != "student_only")
+            detector.train(stage_name not in {"student_only", "student_adapt_max"})
             epoch_total = 0.0
             epoch_feature = 0.0
             epoch_detection = 0.0
@@ -226,7 +249,7 @@ def train():
 
                 feature_loss, _ = feature_criterion(student_feature, teacher_feature.detach(), student)
                 response_loss, _ = detection_response_loss(Config, reference_detector, student_feature, teacher_feature.detach())
-                if stage_name == "student_only" and Config.DETECTION_LOSS_WEIGHT_STUDENT <= 0:
+                if stage_name in {"student_only", "student_adapt_max"} and Config.DETECTION_LOSS_WEIGHT_STUDENT <= 0:
                     detection_loss = torch.zeros((), device=device)
                 else:
                     predictions = detector(student_feature)
@@ -238,6 +261,8 @@ def train():
                         + detection_loss * Config.DETECTION_LOSS_WEIGHT_STUDENT
                         + response_loss
                     )
+                elif stage_name == "student_adapt_max":
+                    total_loss = feature_loss * Config.FEATURE_LOSS_WEIGHT_ADAPT + response_loss
                 elif stage_name == "detector_only":
                     total_loss = detection_loss * Config.DETECTION_LOSS_WEIGHT_DETECTOR
                 else:
@@ -297,8 +322,18 @@ def train():
                 for key in ("val_total", "precision", "recall", "f1", "map50"):
                     history[key].append(np.nan)
 
-            if stage_name in {"student_only", "joint_balance"} and norm_is_deployment_ready and slm_ok and avg_total < best_student_loss:
+            student_score_is_best = False
+            if norm_is_deployment_ready and slm_ok and stage_name == "student_adapt_max":
+                student_score_is_best = avg_feature < best_student_loss
+            elif norm_is_deployment_ready and slm_ok and stage_name == "joint_balance":
+                if val_metrics is not None:
+                    student_score_is_best = val_metrics["map50"] > best_student_map50 + Config.DETECTOR_EARLY_STOP_MIN_DELTA
+                else:
+                    student_score_is_best = avg_total < best_student_loss
+            if student_score_is_best:
                 best_student_loss = avg_total
+                if val_metrics is not None:
+                    best_student_map50 = val_metrics["map50"]
                 save_student_best(
                     Config,
                     student,
@@ -308,9 +343,14 @@ def train():
                     extra={
                         "slm_stats": slm_stats,
                         "val_map50": val_metrics["map50"] if val_metrics is not None else None,
+                        "selection_metric": "adapt_feature_loss" if stage_name == "student_adapt_max" else ("val_map50" if val_metrics is not None else "train_loss"),
                     },
                 )
-                log_to_file(Config, f"Saved best SLM student: epoch={global_epoch}, loss={avg_total:.6f}")
+                log_to_file(
+                    Config,
+                    f"Saved best SLM student: epoch={global_epoch}, loss={avg_total:.6f}, "
+                    f"map50={best_student_map50:.4f}" if val_metrics is not None else f"Saved best SLM student: epoch={global_epoch}, loss={avg_total:.6f}",
+                )
             elif stage_name == "student_only" and not norm_is_deployment_ready:
                 log_to_file(
                     Config,
@@ -319,9 +359,12 @@ def train():
                 )
 
             detector_score_is_best = False
-            if val_metrics is not None and val_metrics["map50"] > best_map50:
+            if stage_name in {"detector_only", "joint_balance"} and val_metrics is not None and val_metrics["map50"] > best_map50 + Config.DETECTOR_EARLY_STOP_MIN_DELTA:
                 best_map50 = val_metrics["map50"]
                 detector_score_is_best = True
+                detector_no_improve = 0
+            elif val_metrics is not None and stage_name == "detector_only":
+                detector_no_improve += 1
             elif val_metrics is None and avg_total < best_detector_loss:
                 detector_score_is_best = True
             if stage_name in {"detector_only", "joint_balance"} and detector_score_is_best:
@@ -345,8 +388,10 @@ def train():
                             "slm_stats": slm_stats,
                             "val_map50": best_map50 if val_metrics is not None else None,
                             "paired_with_detector_best": True,
+                            "selection_metric": "paired_detector_val_map50",
                         },
                     )
+                    best_student_map50 = max(best_student_map50, best_map50)
                 else:
                     log_to_file(
                         Config,
@@ -396,6 +441,17 @@ def train():
                 best_status=Config.EPOCH_TABLE_BEST_MARK if detector_score_is_best else "",
             )
             global_epoch += 1
+            if (
+                stage_name == "detector_only"
+                and Config.DETECTOR_EARLY_STOP_PATIENCE > 0
+                and detector_no_improve >= Config.DETECTOR_EARLY_STOP_PATIENCE
+            ):
+                log_to_file(
+                    Config,
+                    f"Early stopping detector_only after {detector_no_improve} epochs without mAP50 improvement. "
+                    f"Best mAP50={best_map50:.4f}.",
+                )
+                break
 
     if not os.path.exists(Config.get_student_best_path()):
         slm_stats = collect_slm_statistics(student)

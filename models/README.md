@@ -43,8 +43,10 @@ It does not import or initialize `optical_teacher_yolo.py`, so running the YOLOv
 SLM phase training has a few hardware-facing safeguards:
 
 - SLM phase parameters use `PHASE_WEIGHT_DECAY = 0.0`; ordinary weight decay would pull `phase_raw` toward zero and can collapse the phase map.
-- `OpticalStudent` now defaults to `STUDENT_NORM_SCHEDULE = "always"` and `STUDENT_NORM_MODE = "max"`, so `student_only`, detector-only, joint training, and inference all see the same normalized SLM feature distribution. This avoids the hard distribution jump caused by training phase layers with `none` and then training the detector with `max`.
-- Detector-only training is intentionally short by default (`DETECTOR_ONLY_EPOCHS = 40`) with a lower detector LR (`DETECTOR_LR = 2e-4`) because the detector quickly overfits the fixed SLM feature map after the first mAP plateau.
+- `OpticalStudent` now defaults to `STUDENT_NORM_SCHEDULE = "late"` with `STUDENT_NORM_EARLY_MODE = "none"`, because direct `max` normalization during `student_only` can suppress useful optical feature learning in this setup.
+- Training uses a short `student_adapt_max` stage after `student_only`. In this stage the detector stays frozen, `STUDENT_NORM_MODE = "max"` is enabled, and only the SLM student is optimized. Its purpose is to reduce the feature mismatch caused by switching from unnormalized optical intensity to the normalized feature distribution used by detector training and inference.
+- Detector-only training is intentionally short by default (`DETECTOR_ONLY_EPOCHS = 40`) with a lower detector LR (`DETECTOR_LR = 2e-4`) because the detector quickly overfits the fixed SLM feature map after the first mAP plateau. It also supports mAP-based early stopping with `DETECTOR_EARLY_STOP_PATIENCE`.
+- Joint training gives more weight to feature preservation and less to detection loss than before (`FEATURE_LOSS_WEIGHT_JOINT = 0.70`, `DETECTION_LOSS_WEIGHT_JOINT = 0.80`) so it is less likely to reduce train detection loss while damaging validation loss.
 - `optical_slm_yolov8_head.py` supports per-stage `CosineAnnealingLR` with `ETA_MIN = 1e-6`, matching the teacher YOLOv8-head training style. A new scheduler is created whenever the stage optimizer is rebuilt.
 - `losses_slm.py` includes a Pearson correlation feature term. This gives the SLM student a scale/offset-insensitive structural target, reducing the hard lower bound caused by absolute-value MSE terms when student and teacher feature scales differ.
 - The phase diversity loss is now a lightweight regularizer instead of a dominant objective: `LOSS_PHASE_DIVERSITY_WEIGHT = 0.15`, with relaxed std/span/circular-std targets. It still rejects nearly flat phase maps, but leaves more room for feature matching.
@@ -64,13 +66,19 @@ $env:OPTICAL_SLM_STUDENT_NORM_MODE="max"
 python .\optical_slm_yolov8_head.py
 ```
 
-For an ablation that delays normalization until after `student_only`:
+For the default delayed-normalization run:
 
 ```powershell
 $env:OPTICAL_SLM_STUDENT_NORM_SCHEDULE="late"
 $env:OPTICAL_SLM_STUDENT_NORM_EARLY_MODE="none"
+$env:OPTICAL_SLM_STUDENT_ADAPT_MAX_EPOCHS="15"
 python .\optical_slm_yolov8_head.py
 ```
+
+Checkpoint selection notes:
+
+- `detector_best.pth` is selected by validation `mAP50` and carries the paired `student_state_dict`.
+- `optical_student_best.pth` is no longer meant to be a final-train-loss snapshot. During detector/joint training it is refreshed from the student paired with the best detector mAP, so standalone SLM extraction and detector evaluation stay aligned.
 
 To continue from an earlier student checkpoint while still retraining from the first student stage:
 
