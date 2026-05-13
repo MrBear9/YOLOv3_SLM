@@ -78,7 +78,11 @@ def load_student_from_checkpoint(student, checkpoint, checkpoint_path):
         "total": total,
         "epoch": checkpoint.get("epoch") if isinstance(checkpoint, dict) else None,
         "loss": checkpoint.get("loss") if isinstance(checkpoint, dict) else None,
+        "train_loss": checkpoint.get("train_loss") if isinstance(checkpoint, dict) else None,
+        "val_loss": checkpoint.get("val_loss") if isinstance(checkpoint, dict) else None,
         "val_map50": checkpoint.get("val_map50") if isinstance(checkpoint, dict) else None,
+        "selection_metric": checkpoint.get("selection_metric") if isinstance(checkpoint, dict) else None,
+        "paired_with_detector_best": checkpoint.get("paired_with_detector_best") if isinstance(checkpoint, dict) else None,
     }
 
 
@@ -97,7 +101,10 @@ def load_detector(detector, checkpoint_path, device):
         "total": total,
         "epoch": checkpoint.get("epoch") if isinstance(checkpoint, dict) else None,
         "loss": checkpoint.get("loss") if isinstance(checkpoint, dict) else None,
+        "train_loss": checkpoint.get("train_loss") if isinstance(checkpoint, dict) else None,
+        "val_loss": checkpoint.get("val_loss") if isinstance(checkpoint, dict) else None,
         "val_map50": checkpoint.get("val_map50") if isinstance(checkpoint, dict) else None,
+        "selection_metric": checkpoint.get("selection_metric") if isinstance(checkpoint, dict) else None,
         "checkpoint": checkpoint,
     }
 
@@ -197,10 +204,17 @@ def run(args):
     paired_student_available = isinstance(detector_checkpoint, dict) and "student_state_dict" in detector_checkpoint
     if args.prefer_paired_student and paired_student_available:
         student_info = load_student_from_checkpoint(student, detector_checkpoint, args.detector_checkpoint)
-        student_source = f"paired student_state_dict from detector checkpoint ({args.detector_checkpoint})"
+        student_source = "detector_checkpoint.student_state_dict"
+        student_source_path = args.detector_checkpoint
+        student_source_note = "Using paired student from detector_best.pth; --student-checkpoint was ignored."
     else:
         student_info = load_student(student, args.student_checkpoint, device)
-        student_source = str(args.student_checkpoint)
+        student_source = "student_checkpoint"
+        student_source_path = args.student_checkpoint
+        if args.prefer_paired_student:
+            student_source_note = "No paired student_state_dict found in detector checkpoint; fell back to --student-checkpoint."
+        else:
+            student_source_note = "--no-prefer-paired-student was set; using --student-checkpoint."
     student.eval()
     detector.eval()
 
@@ -253,13 +267,19 @@ def run(args):
     map50 = float(np.mean(ap_values)) if ap_values else 0.0
     summary = (
         "Optical SLM YOLOv8-head simulation summary\n"
-        f"Student checkpoint: {args.student_checkpoint}\n"
         f"Detector checkpoint: {args.detector_checkpoint}\n"
-        f"Student source: {student_source}\n"
+        f"Requested student checkpoint: {args.student_checkpoint}\n"
+        f"Actual student source: {student_source}\n"
+        f"Actual student source path: {student_source_path}\n"
+        f"Student source note: {student_source_note}\n"
         f"Student loaded: {student_info['loaded']}/{student_info['total']}\n"
-        f"Student epoch/loss/val_mAP50: {student_info['epoch']}/{student_info['loss']}/{student_info['val_map50']}\n"
+        f"Student epoch/loss/train_loss/val_loss/val_mAP50: "
+        f"{student_info['epoch']}/{student_info['loss']}/{student_info['train_loss']}/{student_info['val_loss']}/{student_info['val_map50']}\n"
+        f"Student selection metric / paired flag: {student_info['selection_metric']}/{student_info['paired_with_detector_best']}\n"
         f"Detector loaded: {detector_info['loaded']}/{detector_info['total']}\n"
-        f"Detector epoch/loss/val_mAP50: {detector_info['epoch']}/{detector_info['loss']}/{detector_info['val_map50']}\n"
+        f"Detector epoch/loss/train_loss/val_loss/val_mAP50: "
+        f"{detector_info['epoch']}/{detector_info['loss']}/{detector_info['train_loss']}/{detector_info['val_loss']}/{detector_info['val_map50']}\n"
+        f"Detector selection metric: {detector_info['selection_metric']}\n"
         f"Paired student in detector checkpoint: {paired_student_available}\n"
         f"Images: {seen}\n"
         f"Precision: {precision:.6f}\n"

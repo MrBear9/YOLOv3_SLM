@@ -88,8 +88,13 @@ def log_config():
         f"Epochs student/adapt/detector/joint: "
         f"{Config.STUDENT_ONLY_EPOCHS}/{Config.STUDENT_ADAPT_MAX_EPOCHS}/{Config.DETECTOR_ONLY_EPOCHS}/{Config.JOINT_EPOCHS}",
     )
-    log_to_file(Config, f"Save student best: {Config.get_student_best_path()}")
-    log_to_file(Config, f"Save detector best: {Config.get_detector_best_path()}")
+    log_to_file(Config, f"Save paired detector best: {Config.get_detector_best_path()}")
+    log_to_file(Config, f"Save paired student mirror: {Config.get_student_best_path()}")
+    log_to_file(
+        Config,
+        "Recommended inference checkpoint: detector_best.pth, because it carries the detector and "
+        "the paired student_state_dict from the same best-mAP epoch.",
+    )
     log_to_file(
         Config,
         f"LR student/phase/adapt_student/adapt_phase/detector/joint_detector: "
@@ -240,7 +245,7 @@ def train():
             epoch_detection = 0.0
             epoch_response = 0.0
 
-            for batch in tqdm(train_loader, desc=f"Epoch {global_epoch}/{Config.EPOCHS} [{stage_name}]", leave=True):
+            for batch in tqdm(train_loader, desc=f"Epoch {global_epoch + 1}/{Config.EPOCHS} [{stage_name}]", leave=True):
                 gray, rgb, targets = prepare_batch(batch, device)
                 optimizer.zero_grad()
                 with torch.no_grad():
@@ -288,6 +293,7 @@ def train():
             avg_detection = epoch_detection / num_batches
             avg_response = epoch_response / num_batches
             history["train_total"].append(avg_total)
+            display_epoch = global_epoch + 1
             slm_stats = collect_slm_statistics(student)
             slm_ok = (
                 slm_stats["slm1_wrapped_std"] >= Config.PHASE_BEST_MIN_STD
@@ -334,22 +340,10 @@ def train():
                 best_student_loss = avg_total
                 if val_metrics is not None:
                     best_student_map50 = val_metrics["map50"]
-                save_student_best(
-                    Config,
-                    student,
-                    Config.get_student_best_path(),
-                    global_epoch,
-                    avg_total,
-                    extra={
-                        "slm_stats": slm_stats,
-                        "val_map50": val_metrics["map50"] if val_metrics is not None else None,
-                        "selection_metric": "adapt_feature_loss" if stage_name == "student_adapt_max" else ("val_map50" if val_metrics is not None else "train_loss"),
-                    },
-                )
                 log_to_file(
                     Config,
-                    f"Saved best SLM student: epoch={global_epoch}, loss={avg_total:.6f}, "
-                    f"map50={best_student_map50:.4f}" if val_metrics is not None else f"Saved best SLM student: epoch={global_epoch}, loss={avg_total:.6f}",
+                    f"Tracked best normalized SLM student candidate: epoch={display_epoch}, train_loss={avg_total:.6f}, "
+                    f"val_loss={val_losses['total']:.6f}, map50={best_student_map50:.4f}" if val_metrics is not None else f"Tracked best normalized SLM student candidate: epoch={display_epoch}, train_loss={avg_total:.6f}",
                 )
             elif stage_name == "student_only" and not norm_is_deployment_ready:
                 log_to_file(
@@ -372,36 +366,52 @@ def train():
                 save_detector_best(
                     detector,
                     Config.get_detector_best_path(),
-                    global_epoch,
+                    display_epoch,
                     avg_total,
-                    extra={"val_map50": best_map50 if val_metrics is not None else None},
+                    extra={
+                        "train_loss": avg_total,
+                        "val_loss": val_losses["total"] if val_losses is not None else None,
+                        "val_map50": best_map50 if val_metrics is not None else None,
+                        "selection_metric": "detector_val_map50" if val_metrics is not None else "detector_train_loss",
+                        "recommended_inference_checkpoint": True,
+                        "paired_student_source": "student_state_dict",
+                        "paired_student_epoch": display_epoch,
+                        "paired_student_stage": stage_name,
+                        "student_norm_mode": Config.STUDENT_NORM_MODE,
+                        "student_norm_schedule": Config.STUDENT_NORM_SCHEDULE,
+                        "slm_stats": slm_stats,
+                        "slm_quality_passed": bool(slm_ok),
+                    },
                     student=student,
+                    config=Config,
                 )
-                if slm_ok:
-                    save_student_best(
-                        Config,
-                        student,
-                        Config.get_student_best_path(),
-                        global_epoch,
-                        avg_total,
-                        extra={
-                            "slm_stats": slm_stats,
-                            "val_map50": best_map50 if val_metrics is not None else None,
-                            "paired_with_detector_best": True,
-                            "selection_metric": "paired_detector_val_map50",
-                        },
-                    )
-                    best_student_map50 = max(best_student_map50, best_map50)
-                else:
-                    log_to_file(
-                        Config,
-                        "Detector best was updated, but standalone optical_student_best.pth was not overwritten "
-                        "because SLM phase diversity check failed.",
-                    )
+                save_student_best(
+                    Config,
+                    student,
+                    Config.get_student_best_path(),
+                    display_epoch,
+                    avg_total,
+                    extra={
+                        "train_loss": avg_total,
+                        "val_loss": val_losses["total"] if val_losses is not None else None,
+                        "slm_stats": slm_stats,
+                        "val_map50": best_map50 if val_metrics is not None else None,
+                        "paired_with_detector_best": True,
+                        "paired_detector_checkpoint": Config.get_detector_best_path(),
+                        "paired_student_epoch": display_epoch,
+                        "paired_student_stage": stage_name,
+                        "selection_metric": "paired_detector_val_map50" if val_metrics is not None else "paired_detector_train_loss",
+                        "recommended_inference_checkpoint": False,
+                        "student_norm_mode": Config.STUDENT_NORM_MODE,
+                        "student_norm_schedule": Config.STUDENT_NORM_SCHEDULE,
+                        "slm_quality_passed": bool(slm_ok),
+                    },
+                )
+                best_student_map50 = max(best_student_map50, best_map50)
                 log_to_file(
                     Config,
-                    f"Saved best detector: epoch={global_epoch}, loss={avg_total:.6f}, "
-                    f"map50={best_map50:.4f}" if val_metrics is not None else f"Saved best detector: epoch={global_epoch}, loss={avg_total:.6f}",
+                    f"Saved best detector + paired SLM student: epoch={display_epoch}, train_loss={avg_total:.6f}, "
+                    f"val_loss={val_losses['total']:.6f}, map50={best_map50:.4f}, slm_quality_passed={slm_ok}" if val_metrics is not None else f"Saved best detector + paired SLM student: epoch={display_epoch}, train_loss={avg_total:.6f}, slm_quality_passed={slm_ok}",
                 )
 
             if global_epoch % Config.VIS_INTERVAL == 0:
@@ -420,7 +430,7 @@ def train():
 
             log_to_file(
                 Config,
-                f"Epoch {global_epoch:03d} [{stage_name}] total={avg_total:.6f} "
+                f"Epoch {display_epoch:03d} [{stage_name}] total={avg_total:.6f} "
                 f"feature={avg_feature:.6f} detection={avg_detection:.6f} response={avg_response:.6f} "
                 f"slm_std={slm_stats['slm1_wrapped_std']:.3f}/{slm_stats['slm2_wrapped_std']:.3f} "
                 f"slm_circ={slm_stats['slm1_circular_std']:.3f}/{slm_stats['slm2_circular_std']:.3f} "
@@ -453,21 +463,70 @@ def train():
                 )
                 break
 
+    if not os.path.exists(Config.get_detector_best_path()):
+        fallback_loss = history["train_total"][-1] if history["train_total"] else 0.0
+        slm_stats = collect_slm_statistics(student)
+        save_detector_best(
+            detector,
+            Config.get_detector_best_path(),
+            global_epoch + 1,
+            fallback_loss,
+            extra={
+                "train_loss": fallback_loss,
+                "val_loss": None,
+                "val_map50": None,
+                "selection_metric": "fallback_last_train_loss",
+                "recommended_inference_checkpoint": True,
+                "paired_student_source": "student_state_dict",
+                "paired_student_epoch": global_epoch + 1,
+                "paired_student_stage": "fallback_last_epoch",
+                "student_norm_mode": Config.STUDENT_NORM_MODE,
+                "student_norm_schedule": Config.STUDENT_NORM_SCHEDULE,
+                "slm_stats": slm_stats,
+                "slm_quality_passed": False,
+            },
+            student=student,
+            config=Config,
+        )
+        save_student_best(
+            Config,
+            student,
+            Config.get_student_best_path(),
+            global_epoch + 1,
+            fallback_loss,
+            extra={
+                "train_loss": fallback_loss,
+                "val_loss": None,
+                "val_map50": None,
+                "slm_stats": slm_stats,
+                "paired_with_detector_best": True,
+                "paired_detector_checkpoint": Config.get_detector_best_path(),
+                "paired_student_epoch": global_epoch + 1,
+                "paired_student_stage": "fallback_last_epoch",
+                "selection_metric": "fallback_last_train_loss",
+                "recommended_inference_checkpoint": False,
+                "student_norm_mode": Config.STUDENT_NORM_MODE,
+                "student_norm_schedule": Config.STUDENT_NORM_SCHEDULE,
+                "slm_quality_passed": False,
+            },
+        )
+        log_to_file(
+            Config,
+            "No validation-selected detector best was saved; wrote fallback detector_best.pth with the final "
+            "student_state_dict for checkpoint compatibility.",
+        )
     if not os.path.exists(Config.get_student_best_path()):
         slm_stats = collect_slm_statistics(student)
         log_to_file(
             Config,
-            "No standalone optical_student_best.pth was saved because no epoch passed the SLM phase quality check. "
-            f"Last stats: {slm_stats}",
+            "No paired optical_student_best.pth was saved because detector_best.pth was never updated and fallback "
+            f"student mirror creation failed. Last stats: {slm_stats}",
         )
-    if not os.path.exists(Config.get_detector_best_path()):
-        fallback_loss = history["train_total"][-1] if history["train_total"] else 0.0
-        save_detector_best(detector, Config.get_detector_best_path(), global_epoch, fallback_loss, student=student)
     save_training_curves(history, Config.OUTPUT_DIR)
     log_to_file(Config, "=" * 80)
     log_to_file(Config, "Training complete")
-    log_to_file(Config, f"Best SLM student saved to: {Config.get_student_best_path()}")
-    log_to_file(Config, f"Best detector saved to: {Config.get_detector_best_path()}")
+    log_to_file(Config, f"Recommended inference checkpoint: {Config.get_detector_best_path()}")
+    log_to_file(Config, f"Paired SLM student mirror for phase extraction: {Config.get_student_best_path()}")
 
 
 if __name__ == "__main__":

@@ -37,8 +37,8 @@ It does not import or initialize `optical_teacher_yolo.py`, so running the YOLOv
 
 `optical_slm_yolov8_head.py` trains the SLM optical student and a YOLOv8-style anchor detector from a checkpoint produced by `optical_teacher_yolov8_head.py`. It saves only:
 
-- `optical_student_best.pth`: best SLM/student weights.
-- `detector_best.pth`: best detector weights.
+- `detector_best.pth`: recommended inference checkpoint, selected by validation `mAP50`.
+- `optical_student_best.pth`: standalone mirror of the student weights paired with `detector_best.pth`, mainly for SLM phase extraction.
 
 SLM phase training has a few hardware-facing safeguards:
 
@@ -51,8 +51,9 @@ SLM phase training has a few hardware-facing safeguards:
 - `losses_slm.py` includes a Pearson correlation feature term. This gives the SLM student a scale/offset-insensitive structural target, reducing the hard lower bound caused by absolute-value MSE terms when student and teacher feature scales differ.
 - The phase diversity loss is now a lightweight regularizer instead of a dominant objective: `LOSS_PHASE_DIVERSITY_WEIGHT = 0.15`, with relaxed std/span/circular-std targets. It still rejects nearly flat phase maps, but leaves more room for feature matching.
 - `losses_slm.py` penalizes low circular phase spread and excessive concentration near the `0 / 2*pi` wrap boundary.
-- `optical_student_best.pth` is saved only when the SLM phase quality check passes, including centered std/span, circular std, and near-boundary ratio checks.
-- `detector_best.pth` can still carry the paired student weights used by that detector, but it does not overwrite the standalone SLM extraction checkpoint unless the phase quality check passes.
+- `student_adapt_max` only tracks normalized feature adaptation quality; it does not write `optical_student_best.pth`, because that stage is not selected by detector mAP.
+- `detector_best.pth` carries both `detector_state_dict` and the paired `student_state_dict` from the same best-mAP epoch. This is the checkpoint to use for optical-student + detector inference, especially when mAP peaks around the detector-only window and later joint training does not improve.
+- `optical_student_best.pth` is refreshed from the same student snapshot whenever `detector_best.pth` is updated, so phase extraction and detector evaluation stay aligned. Its metadata still records whether the SLM phase diversity check passed.
 - `optical_layers.py` supports vortex phase initialization for both SLM layers. This gives the phase optimizer a non-flat optical pattern instead of relying only on random phase.
 - `ConfigSLM.SLM_INIT_MODE` controls initialization: `random`, `vortex`, `checkpoint`, or `vortex_checkpoint`. `checkpoint` and `vortex_checkpoint` load `ConfigSLM.SLM_INIT_CHECKPOINT` into the student but still start training from the first student-only stage.
 - Teacher `abs` is intentionally unchanged for now. If the teacher is retrained later, removing `abs` may make the target feature range more compatible with physical optical intensity, but that is a separate experiment.
@@ -77,8 +78,8 @@ python .\optical_slm_yolov8_head.py
 
 Checkpoint selection notes:
 
-- `detector_best.pth` is selected by validation `mAP50` and carries the paired `student_state_dict`.
-- `optical_student_best.pth` is no longer meant to be a final-train-loss snapshot. During detector/joint training it is refreshed from the student paired with the best detector mAP, so standalone SLM extraction and detector evaluation stay aligned.
+- `detector_best.pth` is selected by validation `mAP50`, carries the paired `student_state_dict`, and is marked as the recommended inference checkpoint.
+- `optical_student_best.pth` is no longer meant to be a final-train-loss or feature-loss snapshot. It mirrors the student paired with the best detector mAP, so standalone SLM extraction and detector evaluation stay aligned.
 
 To continue from an earlier student checkpoint while still retraining from the first student stage:
 

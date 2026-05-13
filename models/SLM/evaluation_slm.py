@@ -43,11 +43,21 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
             gray, teacher_input, targets = _move_batch_to_device(config, batch, device)
             teacher_feature = teacher_core(teacher_input)
             student_feature = student_core(gray)
-            predictions = detector_core(student_feature)
             feature_loss, _ = feature_criterion(student_feature, teacher_feature, student_core)
-            detection_loss, loss_stats = detection_criterion(predictions, targets)
+
+            evaluate_detector = stage_name not in {"student_only", "student_adapt_max"}
+            if evaluate_detector:
+                predictions = detector_core(student_feature)
+                detection_loss, loss_stats = detection_criterion(predictions, targets)
+            else:
+                predictions = None
+                detection_loss = torch.zeros((), device=device)
+                loss_stats = {"box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
+
             if stage_name == "student_only":
                 total_loss = feature_loss * config.FEATURE_LOSS_WEIGHT_STUDENT + detection_loss * config.DETECTION_LOSS_WEIGHT_STUDENT
+            elif stage_name == "student_adapt_max":
+                total_loss = feature_loss * config.FEATURE_LOSS_WEIGHT_ADAPT
             elif stage_name == "detector_only":
                 total_loss = detection_loss * config.DETECTION_LOSS_WEIGHT_DETECTOR
             else:
@@ -58,6 +68,9 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
             totals["detection"] += float(detection_loss.detach().item())
             for key in ("box", "obj", "noobj", "cls"):
                 totals[key] += loss_stats.get(key, 0.0)
+
+            if not evaluate_detector:
+                continue
 
             detections = decode_detections_anchor_v8(config, predictions)
             for sample_idx, sample_detections in enumerate(detections):
