@@ -19,7 +19,7 @@ from models.runtime import (
     wrap_data_parallel,
 )
 from models.teacher import build_teacher
-from models.teacher_guidance import compute_teacher_guidance_loss
+from models.teacher_guidance import compute_teacher_guidance_loss, compute_teacher_guidance_loss_v3
 from models.training_utils import (
     build_optimizer_from_model,
     initialize_teacher_weights,
@@ -64,6 +64,10 @@ def log_all_parameters():
     log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}")
     log_to_file(Config, f"Teacher parameters: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
     log_to_file(Config, f"Detector parameters: {sum(p.numel() for p in detector.parameters() if p.requires_grad):,}")
+    if str(Config.TEACHER_ARCH).strip().lower() in {"convteacher_v3", "v3"}:
+        log_to_file(Config, f"V3 residual_scale={Config.TEACHER_V3_RESIDUAL_SCALE}, "
+                    f"bg_identity_weight={Config.TEACHER_V3_BG_IDENTITY_WEIGHT}, "
+                    f"grad_consistency_weight={Config.TEACHER_V3_GRAD_CONSISTENCY_WEIGHT}")
     log_to_file(Config, "=" * 80)
 
 
@@ -86,6 +90,12 @@ def train():
     for p in teacher.parameters():
         p.requires_grad = not freeze_teacher
     log_to_file(Config, f"Teacher status: {'frozen' if freeze_teacher else 'trainable'}")
+
+    is_v3 = str(Config.TEACHER_ARCH).strip().lower() in {"convteacher_v3", "v3"}
+    if is_v3:
+        log_to_file(Config, f"V3 teacher: residual_scale={Config.TEACHER_V3_RESIDUAL_SCALE}, "
+                    f"bg_identity_weight={Config.TEACHER_V3_BG_IDENTITY_WEIGHT}, "
+                    f"grad_consistency_weight={Config.TEACHER_V3_GRAD_CONSISTENCY_WEIGHT}")
 
     detector = YOLOv8AnchorHead(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
     model = wrap_data_parallel(Config, TeacherWithYOLOv8AnchorDetector(Config, teacher=teacher, detector=detector), module_name="TeacherWithYOLOv8AnchorDetector")
@@ -160,7 +170,10 @@ def train():
             optimizer.zero_grad()
             teacher_features, predictions = model(batch_images, return_feature=True)
             loss, loss_stats = criterion(predictions, batch_targets)
-            feature_loss, _ = compute_teacher_guidance_loss(Config, teacher_features, batch_targets, stage_settings=stage_settings)
+            if is_v3:
+                feature_loss, _ = compute_teacher_guidance_loss_v3(Config, teacher_features, batch_images, batch_targets)
+            else:
+                feature_loss, _ = compute_teacher_guidance_loss(Config, teacher_features, batch_targets, stage_settings=stage_settings)
             loss = loss + feature_loss
             loss.backward()
             optimizer.step()
@@ -175,7 +188,7 @@ def train():
         val_losses = None
         val_metrics = None
         if val_loader is not None and ((epoch + 1) % Config.VAL_INTERVAL == 0):
-            val_losses, val_metrics = evaluate_model_anchor_v8(Config, model, val_loader, criterion, device, stage_settings=stage_settings)
+            val_losses, val_metrics = evaluate_model_anchor_v8(Config, model, val_loader, criterion, device, stage_settings=stage_settings, is_v3=is_v3)
             history["val_total"].append(val_losses["total"])
             history["precision"].append(val_metrics["precision"])
             history["recall"].append(val_metrics["recall"])

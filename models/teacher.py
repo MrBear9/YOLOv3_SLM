@@ -191,6 +191,96 @@ class ConvTeacherV2(nn.Module):
         return torch.sigmoid(f)
 
 
+class ConvTeacherV3(nn.Module):
+    """YOLOv8-style teacher with residual+gate output (V2 backbone, new output head).
+
+    Shares the same C2f feedforward backbone as ConvTeacherV2.  The difference
+    is in the output: instead of ``sigmoid(abs(bridge(refine)))`` — a purely
+    synthetic feature map — V3 produces::
+
+        det_feature = gray + residual_scale * gate * residual
+
+    where *residual* (tanh) learns what to add/subtract and *gate* (sigmoid)
+    learns where to apply the modification.  The original gray signal is
+    always preserved; the network only needs to learn sparse enhancements
+    in object-relevant regions.
+
+    Auxiliary heads (heat / box / edge) are provided for optional pretraining
+    and are not used during joint detection training.
+    """
+
+    def __init__(self, base_channels=24, c2f_blocks=2, residual_scale=0.30):
+        super().__init__()
+        c1 = base_channels
+        c2 = base_channels * 2
+        c3 = base_channels * 4
+        self.residual_scale = float(residual_scale)
+
+        # --- Backbone (identical to ConvTeacherV2) ---
+        self.stem = TeacherConvBNAct(1, c1, 3, 2)
+        self.stage1 = TeacherC2f(c1, c1, c2f_blocks, shortcut=True)
+        self.down2 = TeacherConvBNAct(c1, c2, 3, 2)
+        self.stage2 = TeacherC2f(c2, c2, c2f_blocks + 1, shortcut=True)
+        self.down3 = TeacherConvBNAct(c2, c3, 3, 2)
+        self.stage3 = TeacherC2f(c3, c3, c2f_blocks + 1, shortcut=True)
+        self.sppf = TeacherSPPF(c3, c3)
+        self.skip1 = nn.Sequential(nn.Conv2d(c1, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
+        self.skip2 = nn.Sequential(nn.Conv2d(c2, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
+        self.context = nn.Sequential(
+            TeacherC2f(c3, c3, c2f_blocks, shortcut=True),
+            TeacherResidualBlock(c3, dilation=2),
+        )
+        self.refine = nn.Sequential(
+            TeacherConvBNAct(c3, c2, 3),
+            TeacherC2f(c2, c2, max(c2f_blocks, 1), shortcut=True),
+            TeacherConvBNAct(c2, c1, 1),
+        )
+
+        # --- Output heads (replaces bridge + abs + sigmoid) ---
+        self.residual_head = nn.Sequential(TeacherConvBNAct(c1, c1), nn.Conv2d(c1, 1, 1))
+        self.gate_head = nn.Sequential(nn.Conv2d(c1, 1, 1), nn.Sigmoid())
+
+        # --- Auxiliary pretraining heads (not used in joint training) ---
+        self.heat_head = nn.Conv2d(c1, 1, 1)
+        self.box_head = nn.Conv2d(c1, 1, 1)
+        self.edge_head = nn.Conv2d(c1, 1, 1)
+
+    def forward(self, x, return_aux=False):
+        if x.shape[1] > 1:
+            x = x.mean(dim=1, keepdim=True)
+        gray = x.clamp(0.0, 1.0)
+
+        # Backbone (same as V2 up to refine)
+        x1 = self.stage1(self.stem(gray))
+        x2 = self.stage2(self.down2(x1))
+        x3 = self.stage3(self.down3(x2))
+        p3 = self.sppf(x3)
+        skip1 = _interpolate_preserve_layout(self.skip1(x1), size=p3.shape[-2:], mode="bilinear", align_corners=False)
+        skip2 = _interpolate_preserve_layout(self.skip2(x2), size=p3.shape[-2:], mode="bilinear", align_corners=False)
+        f = self.context(p3 + skip1 + skip2)
+        f = self.refine(f)
+
+        # Upsample to original resolution before applying heads
+        f = _interpolate_preserve_layout(f, size=gray.shape[-2:], mode="bilinear", align_corners=False)
+
+        # Residual + gate output
+        residual = torch.tanh(self.residual_head(f))
+        gate = self.gate_head(f)
+        det_feature = (gray + self.residual_scale * gate * residual).clamp(0.0, 1.0)
+
+        if return_aux:
+            return {
+                "det_feature": det_feature,
+                "gray": gray,
+                "heat_logits": self.heat_head(f),
+                "box_logits": self.box_head(f),
+                "edge_logits": self.edge_head(f),
+                "gate": gate,
+                "residual": residual,
+            }
+        return det_feature
+
+
 def build_teacher(config=None):
     arch = str(getattr(config, "TEACHER_ARCH", "convteacher_v2") if config is not None else "convteacher_v2").strip().lower()
     if arch in {"convteacher", "convteacher_v1", "v1", "legacy"}:
@@ -199,4 +289,9 @@ def build_teacher(config=None):
         base_channels = int(getattr(config, "TEACHER_V2_BASE_CHANNELS", 24) if config is not None else 24)
         c2f_blocks = int(getattr(config, "TEACHER_V2_C2F_BLOCKS", 2) if config is not None else 2)
         return ConvTeacherV2(base_channels=base_channels, c2f_blocks=c2f_blocks)
+    if arch in {"convteacher_v3", "v3"}:
+        base_channels = int(getattr(config, "TEACHER_V3_BASE_CHANNELS", 24) if config is not None else 24)
+        c2f_blocks = int(getattr(config, "TEACHER_V3_C2F_BLOCKS", 2) if config is not None else 2)
+        residual_scale = float(getattr(config, "TEACHER_V3_RESIDUAL_SCALE", 0.30) if config is not None else 0.30)
+        return ConvTeacherV3(base_channels=base_channels, c2f_blocks=c2f_blocks, residual_scale=residual_scale)
     raise ValueError(f"Unsupported TEACHER_ARCH: {arch}")

@@ -93,3 +93,92 @@ def enhance_feature_for_display(feature_map):
         return np.zeros_like(feature_map)
     feature_map = np.clip((feature_map - low) / (high - low), 0.0, 1.0)
     return np.power(feature_map, 0.8)
+
+
+def build_foreground_mask_from_targets(config, targets, img_size, device, dtype):
+    """Build a binary foreground mask from detection targets (no Gaussian).
+
+    Returns (foreground_mask, target_map) where target_map is a simple
+    box-fill + Gaussian heatmap used for lightweight region-aware losses.
+    """
+    batch_size = len(targets)
+    foreground_mask = torch.zeros((batch_size, 1, img_size, img_size), device=device, dtype=torch.bool)
+    target_map = torch.zeros((batch_size, 1, img_size, img_size), device=device, dtype=dtype)
+
+    for batch_idx, sample_targets in enumerate(targets):
+        if len(sample_targets) == 0:
+            continue
+        for target in sample_targets:
+            if target.shape[0] < 5:
+                continue
+            x_center = float(target[1].item() * img_size)
+            y_center = float(target[2].item() * img_size)
+            width = max(float(target[3].item() * img_size), 1.0)
+            height = max(float(target[4].item() * img_size), 1.0)
+
+            x1 = max(0, int(np.floor(x_center - width / 2)))
+            y1 = max(0, int(np.floor(y_center - height / 2)))
+            x2 = min(img_size, int(np.ceil(x_center + width / 2)))
+            y2 = min(img_size, int(np.ceil(y_center + height / 2)))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            foreground_mask[batch_idx, :, y1:y2, x1:x2] = True
+            target_map[batch_idx, :, y1:y2, x1:x2] = 1.0
+
+    return foreground_mask, target_map
+
+
+def compute_teacher_guidance_loss_v3(config, det_feature, gray_image, targets):
+    """V3 guidance loss for residual+gate teacher output.
+
+    The V3 teacher outputs ``det_feature = gray + scale * gate * residual``.
+    This loss enforces two constraints:
+
+    1. **Background identity**: in regions without objects,
+       ``det_feature`` should equal ``gray`` — the teacher must not
+       modify the background.
+    2. **Gradient consistency**: in background regions, the spatial
+       gradients of ``det_feature`` should match those of ``gray``,
+       preserving edges and texture for the detector.
+
+    Both losses are applied *outside* object boxes only, leaving the
+    teacher free to enhance foreground regions.
+    """
+    img_size = det_feature.shape[-1]
+    device = det_feature.device
+    dtype = det_feature.dtype
+
+    foreground_mask, _ = build_foreground_mask_from_targets(config, targets, img_size, device, dtype)
+    bg_mask = (~foreground_mask).float()
+
+    # 1. Background identity: |det_feature - gray| weighted by background mask
+    bg_diff = (det_feature - gray_image).abs()
+    bg_identity = (bg_diff * bg_mask).sum() / bg_mask.sum().clamp(min=1.0)
+
+    # 2. Gradient consistency in background
+    dx_f = det_feature[:, :, :, 1:] - det_feature[:, :, :, :-1]
+    dx_g = gray_image[:, :, :, 1:] - gray_image[:, :, :, :-1]
+    dy_f = det_feature[:, :, 1:, :] - det_feature[:, :, :-1, :]
+    dy_g = gray_image[:, :, 1:, :] - gray_image[:, :, :-1, :]
+
+    fg_mask = foreground_mask.float()
+    wx = 1.0 - 0.5 * torch.maximum(fg_mask[:, :, :, 1:], fg_mask[:, :, :, :-1])
+    wy = 1.0 - 0.5 * torch.maximum(fg_mask[:, :, 1:, :], fg_mask[:, :, :-1, :])
+
+    grad_consistency = (dx_f - dx_g).abs().mul(wx).mean() + (dy_f - dy_g).abs().mul(wy).mean()
+
+    bg_weight = float(getattr(config, "TEACHER_V3_BG_IDENTITY_WEIGHT", 0.04))
+    grad_weight = float(getattr(config, "TEACHER_V3_GRAD_CONSISTENCY_WEIGHT", 0.02))
+
+    total = bg_weight * bg_identity + grad_weight * grad_consistency
+    stats = {
+        "feature_heatmap": 0.0,
+        "feature_contrast": 0.0,
+        "feature_sparsity": 0.0,
+        "feature_tv": 0.0,
+        "feature_bg_identity": float(bg_identity.detach().item()),
+        "feature_grad_consistency": float(grad_consistency.detach().item()),
+        "feature_total": float(total.detach().item()),
+    }
+    return total, stats

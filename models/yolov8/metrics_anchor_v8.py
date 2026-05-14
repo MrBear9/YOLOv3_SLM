@@ -4,7 +4,7 @@ from tqdm import tqdm
 
 from models.geometry import bbox_iou_xywh
 from models.runtime import prepare_batch
-from models.teacher_guidance import compute_teacher_guidance_loss
+from models.teacher_guidance import compute_teacher_guidance_loss, compute_teacher_guidance_loss_v3
 from .decode_anchor_v8 import decode_detections_anchor_v8
 
 
@@ -28,7 +28,7 @@ def compute_average_precision(detections, total_gt):
     return float(np.sum((mrec[indices + 1] - mrec[indices]) * mpre[indices + 1]))
 
 
-def evaluate_model_anchor_v8(config, model, dataloader, criterion, device, stage_settings=None):
+def evaluate_model_anchor_v8(config, model, dataloader, criterion, device, stage_settings=None, is_v3=False):
     model.eval()
     metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
@@ -39,7 +39,10 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device, stage
             batch_images, batch_targets = prepare_batch(config, batch, device)
             teacher_features, predictions = model(batch_images, return_feature=True)
             loss, loss_stats = criterion(predictions, batch_targets)
-            feature_loss, feature_stats = compute_teacher_guidance_loss(config, teacher_features, batch_targets, stage_settings=stage_settings)
+            if is_v3:
+                feature_loss, feature_stats = compute_teacher_guidance_loss_v3(config, teacher_features, batch_images, batch_targets)
+            else:
+                feature_loss, feature_stats = compute_teacher_guidance_loss(config, teacher_features, batch_targets, stage_settings=stage_settings)
             loss = loss + feature_loss
             for key in ("box", "obj", "noobj", "cls"):
                 component_totals[key] += loss_stats.get(key, 0.0)
