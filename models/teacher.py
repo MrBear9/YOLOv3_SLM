@@ -281,6 +281,96 @@ class ConvTeacherV3(nn.Module):
         return det_feature
 
 
+class ConvTeacherUNet(nn.Module):
+    """U-Net encoder-decoder teacher with residual+gate output.
+
+    Architecture derived from the Temple all_train_teacher.py ConvTeacher:
+
+    - Encoder: 4 stages (1→16→32→64→128) with stride-2 downsampling
+      and residual blocks at each level, SPPF at the bottleneck.
+    - Decoder: 3 upsampling stages with U-Net skip connections from
+      each encoder level, preserving fine spatial details.
+    - Output: ``det_feature = gray + residual_scale * gate * residual``
+      where *residual* (tanh) and *gate* (sigmoid) are learned from
+      the decoder's output.  Auxiliary heads (heat/box/edge) are
+      available for pretraining.
+
+    Compared to ConvTeacherV2/V3, the U-Net skip connections at every
+    encoder-decoder level preserve more spatial detail, which is
+    critical for precise bounding-box regression.
+    """
+
+    def __init__(self, base_channels=16, residual_scale=0.30):
+        super().__init__()
+        c1 = base_channels          # 16
+        c2 = base_channels * 2      # 32
+        c3 = base_channels * 4      # 64
+        c4 = base_channels * 8      # 128
+        self.residual_scale = float(residual_scale)
+
+        # --- Encoder ---
+        self.enc1 = nn.Sequential(TeacherConvBNAct(1, c1), TeacherResidualBlock(c1))
+        self.enc2 = nn.Sequential(TeacherConvBNAct(c1, c2, 3, 2), TeacherResidualBlock(c2))
+        self.enc3 = nn.Sequential(TeacherConvBNAct(c2, c3, 3, 2), TeacherResidualBlock(c3))
+        self.enc4 = nn.Sequential(
+            TeacherConvBNAct(c3, c4, 3, 2),
+            TeacherResidualBlock(c4),
+            TeacherSPPF(c4, c4),
+        )
+
+        # --- Decoder (U-Net skip connections) ---
+        self.dec3 = nn.Sequential(TeacherConvBNAct(c4 + c3, c3), TeacherResidualBlock(c3))
+        self.dec2 = nn.Sequential(TeacherConvBNAct(c3 + c2, c2), TeacherResidualBlock(c2))
+        self.dec1 = nn.Sequential(TeacherConvBNAct(c2 + c1, c1), TeacherResidualBlock(c1))
+
+        # --- Output heads ---
+        self.residual_head = nn.Sequential(TeacherConvBNAct(c1, c1), nn.Conv2d(c1, 1, 1))
+        self.gate_head = nn.Sequential(nn.Conv2d(c1, 1, 1), nn.Sigmoid())
+
+        # --- Auxiliary pretraining heads ---
+        self.heat_head = nn.Conv2d(c1, 1, 1)
+        self.box_head = nn.Conv2d(c1, 1, 1)
+        self.edge_head = nn.Conv2d(c1, 1, 1)
+
+    def forward(self, x, return_aux=False):
+        if x.shape[1] > 1:
+            x = x.mean(dim=1, keepdim=True)
+        gray = x.clamp(0.0, 1.0)
+
+        # Encoder
+        e1 = self.enc1(gray)                                               # [B, c1, H,   W]
+        e2 = self.enc2(e1)                                                 # [B, c2, H/2, W/2]
+        e3 = self.enc3(e2)                                                 # [B, c3, H/4, W/4]
+        e4 = self.enc4(e3)                                                 # [B, c4, H/8, W/8]
+
+        # Decoder with U-Net skip connections at every level
+        d3 = _interpolate_preserve_layout(e4, size=e3.shape[-2:], mode="bilinear", align_corners=False)
+        d3 = self.dec3(torch.cat([d3, e3], dim=1))                        # [B, c3, H/4, W/4]
+
+        d2 = _interpolate_preserve_layout(d3, size=e2.shape[-2:], mode="bilinear", align_corners=False)
+        d2 = self.dec2(torch.cat([d2, e2], dim=1))                        # [B, c2, H/2, W/2]
+
+        d1 = _interpolate_preserve_layout(d2, size=e1.shape[-2:], mode="bilinear", align_corners=False)
+        d1 = self.dec1(torch.cat([d1, e1], dim=1))                        # [B, c1, H,   W]
+
+        # Residual + gate output
+        residual = torch.tanh(self.residual_head(d1))
+        gate = self.gate_head(d1)
+        det_feature = (gray + self.residual_scale * gate * residual).clamp(0.0, 1.0)
+
+        if return_aux:
+            return {
+                "det_feature": det_feature,
+                "gray": gray,
+                "heat_logits": self.heat_head(d1),
+                "box_logits": self.box_head(d1),
+                "edge_logits": self.edge_head(d1),
+                "gate": gate,
+                "residual": residual,
+            }
+        return det_feature
+
+
 def build_teacher(config=None):
     arch = str(getattr(config, "TEACHER_ARCH", "convteacher_v2") if config is not None else "convteacher_v2").strip().lower()
     if arch in {"convteacher", "convteacher_v1", "v1", "legacy"}:
@@ -294,4 +384,8 @@ def build_teacher(config=None):
         c2f_blocks = int(getattr(config, "TEACHER_V3_C2F_BLOCKS", 2) if config is not None else 2)
         residual_scale = float(getattr(config, "TEACHER_V3_RESIDUAL_SCALE", 0.30) if config is not None else 0.30)
         return ConvTeacherV3(base_channels=base_channels, c2f_blocks=c2f_blocks, residual_scale=residual_scale)
+    if arch in {"convteacher_unet", "unet"}:
+        base_channels = int(getattr(config, "TEACHER_UNET_BASE_CHANNELS", 16) if config is not None else 16)
+        residual_scale = float(getattr(config, "TEACHER_UNET_RESIDUAL_SCALE", 0.30) if config is not None else 0.30)
+        return ConvTeacherUNet(base_channels=base_channels, residual_scale=residual_scale)
     raise ValueError(f"Unsupported TEACHER_ARCH: {arch}")

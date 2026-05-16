@@ -71,6 +71,8 @@ class ConfigYOLOv8Anchor:
     TEACHER_V3_C2F_BLOCKS = 2
     TEACHER_V3_RESIDUAL_SCALE = 0.30
     TEACHER_V3_GUIDE_FUSION_ALPHA = 1.0
+    TEACHER_UNET_BASE_CHANNELS = 16
+    TEACHER_UNET_RESIDUAL_SCALE = 0.30
     YOLOV8_BASE_CHANNELS = 32
     YOLOV8_C2F_BLOCKS = 3
     DEFAULT_ANCHORS = [
@@ -86,12 +88,25 @@ class ConfigYOLOv8Anchor:
     MAX_POSITIVE_ANCHORS = 2
     NOOBJ_IGNORE_IOU = 0.68
 
-    BOX_WEIGHT_BASE = 1.45
-    OBJ_WEIGHT_BASE = 0.72
-    NOOBJ_WEIGHT_BASE = 0.18
-    CLS_WEIGHT_BASE = 0.35
-    FOCAL_ALPHA = 0.28
-    FOCAL_GAMMA = 1.6
+    # Anchor assignment — ratio-based (Temple-style)
+    ANCHOR_MATCH_RATIO_THRESH = 3.5
+    ASSIGN_NEIGHBOR_CELLS = True
+
+    # Hard negative mining
+    HARD_NEG_RATIO = 30
+    HARD_NEG_MIN = 512
+
+    # Box decode: sigmoid * BOX_DECODE_RANGE - (BOX_DECODE_RANGE - 1) / 2
+    #   1.0 → sigmoid       → [0, 1]      (legacy, single-cell)
+    #   2.0 → sigmoid*2-0.5 → [-0.5, 1.5] (Temple, neighbor-cell)
+    BOX_DECODE_RANGE = 2.0
+
+    BOX_WEIGHT_BASE = 5.0
+    OBJ_WEIGHT_BASE = 2.0
+    NOOBJ_WEIGHT_BASE = 2.0
+    CLS_WEIGHT_BASE = 1.8
+    FOCAL_ALPHA = 0.35
+    FOCAL_GAMMA = 2.0
 
     PHASE1_TEACHER_LR = 4e-4
     PHASE1_DETECTOR_LR = 3e-4

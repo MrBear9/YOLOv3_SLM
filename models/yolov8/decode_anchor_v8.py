@@ -11,6 +11,8 @@ def decode_detections_anchor_v8(config, preds, conf_thresh=None, nms_thresh=None
     img_size = config.IMG_SIZE if img_size is None else img_size
     batch_size = preds[0].shape[0]
     detections = [[] for _ in range(batch_size)]
+    box_decode_range = float(getattr(config, "BOX_DECODE_RANGE", 2.0))
+    half = (box_decode_range - 1.0) / 2.0
 
     for scale_idx, pred in enumerate(preds):
         grid_h, grid_w = pred.shape[2], pred.shape[3]
@@ -35,8 +37,8 @@ def decode_detections_anchor_v8(config, preds, conf_thresh=None, nms_thresh=None
         grid_y = grid_y.contiguous().view(1, grid_h, grid_w, 1)
         anchor_tensor = torch.tensor(config.ANCHORS[scale_idx], device=device, dtype=dtype).contiguous().view(1, 1, 1, 3, 2)
 
-        x_center = (grid_x + torch.sigmoid(pred[..., 0])) * stride
-        y_center = (grid_y + torch.sigmoid(pred[..., 1])) * stride
+        x_center = (grid_x + torch.sigmoid(pred[..., 0]) * box_decode_range - half) * stride
+        y_center = (grid_y + torch.sigmoid(pred[..., 1]) * box_decode_range - half) * stride
         w = anchor_tensor[..., 0] * torch.exp(torch.clamp(pred[..., 2], min=-8.0, max=8.0))
         h = anchor_tensor[..., 1] * torch.exp(torch.clamp(pred[..., 3], min=-8.0, max=8.0))
         x_center = x_center.clamp(0, img_size - 1)

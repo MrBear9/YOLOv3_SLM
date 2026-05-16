@@ -55,6 +55,11 @@ def log_all_parameters():
     log_to_file(Config, f"Anchor source: {Config.ANCHOR_SOURCE}")
     log_to_file(Config, f"Anchors: {Config.ANCHORS}")
     log_to_file(Config, f"Loss weights box/obj/noobj/cls: {Config.BOX_WEIGHT_BASE}/{Config.OBJ_WEIGHT_BASE}/{Config.NOOBJ_WEIGHT_BASE}/{Config.CLS_WEIGHT_BASE}")
+    log_to_file(Config, f"Focal alpha/gamma: {Config.FOCAL_ALPHA}/{Config.FOCAL_GAMMA}")
+    log_to_file(Config, f"Anchor matching: ratio_thresh={Config.ANCHOR_MATCH_RATIO_THRESH}, "
+                f"neighbor_cells={Config.ASSIGN_NEIGHBOR_CELLS}")
+    log_to_file(Config, f"Hard negative mining: ratio={Config.HARD_NEG_RATIO}, min={Config.HARD_NEG_MIN}")
+    log_to_file(Config, f"Box decode range: {Config.BOX_DECODE_RANGE}")
     log_to_file(Config, f"LR teacher/detector: {Config.PHASE1_TEACHER_LR}/{Config.PHASE1_DETECTOR_LR} -> {Config.PHASE2_TEACHER_LR}/{Config.PHASE2_DETECTOR_LR} -> {Config.PHASE3_TEACHER_LR}/{Config.PHASE3_DETECTOR_LR}")
     log_to_file(Config, f"Detection conf/nms/max_det: {Config.CONF_THRESH}/{Config.NMS_THRESH}/{Config.MAX_DET}")
     log_to_file(Config, f"Metric conf/nms/max_det: {Config.METRIC_CONF_THRESH}/{Config.METRIC_NMS_THRESH}/{Config.METRIC_MAX_DET}")
@@ -64,8 +69,14 @@ def log_all_parameters():
     log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}")
     log_to_file(Config, f"Teacher parameters: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
     log_to_file(Config, f"Detector parameters: {sum(p.numel() for p in detector.parameters() if p.requires_grad):,}")
-    if str(Config.TEACHER_ARCH).strip().lower() in {"convteacher_v3", "v3"}:
+    arch_lower = str(Config.TEACHER_ARCH).strip().lower()
+    if arch_lower in {"convteacher_v3", "v3"}:
         log_to_file(Config, f"V3 residual_scale={Config.TEACHER_V3_RESIDUAL_SCALE}, "
+                    f"bg_identity_weight={Config.TEACHER_V3_BG_IDENTITY_WEIGHT}, "
+                    f"grad_consistency_weight={Config.TEACHER_V3_GRAD_CONSISTENCY_WEIGHT}")
+    elif arch_lower in {"convteacher_unet", "unet"}:
+        log_to_file(Config, f"UNet base_ch={Config.TEACHER_UNET_BASE_CHANNELS}, "
+                    f"residual_scale={Config.TEACHER_UNET_RESIDUAL_SCALE}, "
                     f"bg_identity_weight={Config.TEACHER_V3_BG_IDENTITY_WEIGHT}, "
                     f"grad_consistency_weight={Config.TEACHER_V3_GRAD_CONSISTENCY_WEIGHT}")
     log_to_file(Config, "=" * 80)
@@ -91,9 +102,10 @@ def train():
         p.requires_grad = not freeze_teacher
     log_to_file(Config, f"Teacher status: {'frozen' if freeze_teacher else 'trainable'}")
 
-    is_v3 = str(Config.TEACHER_ARCH).strip().lower() in {"convteacher_v3", "v3"}
+    arch_lower = str(Config.TEACHER_ARCH).strip().lower()
+    is_v3 = arch_lower in {"convteacher_v3", "v3", "convteacher_unet", "unet"}
     if is_v3:
-        log_to_file(Config, f"V3 teacher: residual_scale={Config.TEACHER_V3_RESIDUAL_SCALE}, "
+        log_to_file(Config, f"Residual+gate teacher ({arch_lower}): "
                     f"bg_identity_weight={Config.TEACHER_V3_BG_IDENTITY_WEIGHT}, "
                     f"grad_consistency_weight={Config.TEACHER_V3_GRAD_CONSISTENCY_WEIGHT}")
 
