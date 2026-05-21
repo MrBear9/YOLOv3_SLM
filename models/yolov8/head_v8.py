@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from models.runtime import prepare_conv_tensor, should_use_channels_last
 from models.teacher import build_teacher
@@ -15,6 +16,34 @@ class ConvBNAct(nn.Module):
 
     def forward(self, x):
         return self.act(self.bn(self.conv(x)))
+
+
+class ResBlock(nn.Module):
+    """Lightweight residual block — simpler than C2f, FPGA-friendly."""
+
+    def __init__(self, channels):
+        super().__init__()
+        self.cv1 = ConvBNAct(channels, channels, 3)
+        self.cv2 = nn.Sequential(nn.Conv2d(channels, channels, 3, 1, 1, bias=False), nn.BatchNorm2d(channels))
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        return self.act(x + self.cv2(self.cv1(x)))
+
+
+class ECABlock(nn.Module):
+    """Efficient Channel Attention — 1D conv over channel dimension."""
+
+    def __init__(self, channels, kernel_size=3):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size, padding=(kernel_size - 1) // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        y = self.pool(x).squeeze(-1).transpose(-1, -2)
+        y = self.conv(y).transpose(-1, -2).unsqueeze(-1)
+        return x * self.sigmoid(y)
 
 
 class Bottleneck(nn.Module):
@@ -133,17 +162,116 @@ class YOLOv8AnchorHead(nn.Module):
         return self.head_p3(p3), self.head_p4(p4), self.head_p5(p5)
 
 
-class TeacherWithYOLOv8AnchorDetector(nn.Module):
+class YOLOLightHead(nn.Module):
+    """Lightweight FPGA-friendly detection head.
+
+    Simplified compared to YOLOv8AnchorHead:
+      - No C2f blocks → simple ResBlock instead
+      - No PAN bottom-up path → top-down FPN only
+      - No multi-branch detection heads → 1×1 Conv direct output
+      - ECA attention for lightweight channel reweighting
+
+    Output format is identical to YOLOv8AnchorHead (anchor-based).
+    """
+
+    def __init__(self, config, in_channels=1, out_channels=None, base_ch=None):
+        super().__init__()
+        self.config = config
+        out_channels = config.get_detector_output_channels() if out_channels is None else out_channels
+        c = base_ch if base_ch is not None else int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
+        c2, c4, c8 = c * 2, c * 4, c * 8
+
+        # Stem: 1 → c → c2 → c4 → c8  (down to stride 8)
+        self.stem = nn.Sequential(
+            ConvBNAct(in_channels, c),
+            ResBlock(c),
+            ConvBNAct(c, c2, 3, 2),
+            ResBlock(c2),
+            ConvBNAct(c2, c4, 3, 2),
+            ResBlock(c4),
+            ConvBNAct(c4, c8, 3, 2),
+            ResBlock(c8),
+        )
+
+        # P3 / P4 / P5 paths
+        self.p4_path = nn.Sequential(ConvBNAct(c8, c8, 3, 2), ResBlock(c8))
+        self.p5_path = nn.Sequential(ConvBNAct(c8, c8, 3, 2), ResBlock(c8), SPPF(c8, c8))
+
+        # Top-down FPN with ECA
+        self.fuse_p4 = nn.Sequential(ConvBNAct(c8 * 2, c4), ResBlock(c4), ECABlock(c4))
+        self.fuse_p3 = nn.Sequential(ConvBNAct(c4 + c8, c2), ResBlock(c2), ECABlock(c2))
+
+        # 1×1 Conv detection heads
+        self.head_p3 = nn.Conv2d(c2, out_channels, 1)
+        self.head_p4 = nn.Conv2d(c4, out_channels, 1)
+        self.head_p5 = nn.Conv2d(c8, out_channels, 1)
+
+    def forward(self, x, return_features=False):
+        p3_feat = self.stem(x)                                           # [B, c8, 80, 80]
+        p4_feat = self.p4_path(p3_feat)                                  # [B, c8, 40, 40]
+        p5_feat = self.p5_path(p4_feat)                                  # [B, c8, 20, 20]
+
+        p5_up = F.interpolate(p5_feat, size=p4_feat.shape[-2:], mode="nearest")
+        p4_fused = self.fuse_p4(torch.cat([p5_up, p4_feat], dim=1))      # [B, c4, 40, 40]
+
+        p4_up = F.interpolate(p4_fused, size=p3_feat.shape[-2:], mode="nearest")
+        p3_fused = self.fuse_p3(torch.cat([p4_up, p3_feat], dim=1))      # [B, c2, 80, 80]
+
+        preds = (self.head_p3(p3_fused), self.head_p4(p4_fused), self.head_p5(p5_feat))
+        if return_features:
+            return preds, {"s8": p3_feat, "s16": p4_feat, "s32": p5_feat}
+        return preds
+
+
+def build_detector_head(config, in_channels=1, out_channels=None):
+    """Factory: build the configured detector head type."""
+    head_type = str(getattr(config, "DETECTOR_HEAD_TYPE", "yolov8_anchor")).strip().lower()
+    out_channels = config.get_detector_output_channels() if out_channels is None else out_channels
+    if head_type in {"light", "yolo_light"}:
+        base_ch = int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
+        return YOLOLightHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch)
+    base_ch = int(getattr(config, "YOLOV8_BASE_CHANNELS", 32))
+    c2f_blocks = int(getattr(config, "YOLOV8_C2F_BLOCKS", 3))
+    return YOLOv8AnchorHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch, c2f_blocks=c2f_blocks)
+
+
+class TeacherWithDetector(nn.Module):
+    """Teacher + Detector wrapper.
+
+    Supports both YOLOv8AnchorHead and YOLOLightHead via
+    ``build_detector_head(config)``.  The detector type is controlled by
+    ``DETECTOR_HEAD_TYPE`` in config.
+    """
+
     def __init__(self, config, teacher=None, detector=None):
         super().__init__()
         self.config = config
         self.teacher = build_teacher(config) if teacher is None else teacher
-        self.detector = YOLOv8AnchorHead(config, in_channels=1, out_channels=config.get_detector_output_channels()) if detector is None else detector
+        self.detector = build_detector_head(config, in_channels=1) if detector is None else detector
 
-    def forward(self, x, return_feature=False):
+    def forward(self, x, return_feature=False, return_teacher_aux=False, return_det_features=False):
         x = prepare_conv_tensor(self.config, x)
-        features = self.teacher(x)
-        detections = self.detector(prepare_conv_tensor(self.config, features))
+        need_aux = return_teacher_aux or return_det_features
+        teacher_out = self.teacher(x, return_aux=need_aux)
+        teacher_feature = teacher_out["det_feature"] if need_aux else teacher_out
+        det_out = self.detector(prepare_conv_tensor(self.config, teacher_feature), return_features=return_det_features)
+        if return_det_features:
+            detections, det_features = det_out
+        else:
+            detections, det_features = det_out, None
+
+        if not return_feature and not need_aux:
+            return detections
+        result = []
         if return_feature:
-            return features, detections
-        return detections
+            result.append(teacher_feature)
+        result.append(detections)
+        if return_teacher_aux:
+            result.append(teacher_out)
+        if return_det_features:
+            result.append(det_features)
+        return tuple(result)
+
+
+# Backward-compatible alias
+TeacherWithYOLOv8AnchorDetector = TeacherWithDetector

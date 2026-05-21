@@ -260,6 +260,9 @@ class ConvTeacherV3(nn.Module):
         f = self.context(p3 + skip1 + skip2)
         f = self.refine(f)
 
+        # Multi-scale features for distillation (before upsampling)
+        feat_scale8 = f                                                # [B, c1, H/8, W/8] — deepest fused
+
         # Upsample to original resolution before applying heads
         f = _interpolate_preserve_layout(f, size=gray.shape[-2:], mode="bilinear", align_corners=False)
 
@@ -277,6 +280,10 @@ class ConvTeacherV3(nn.Module):
                 "edge_logits": self.edge_head(f),
                 "gate": gate,
                 "residual": residual,
+                # Multi-scale features for detector distillation (training only)
+                "feat_scale2": x1,       # [B, c1, H/2, W/2] — shallow texture
+                "feat_scale4": x2,       # [B, c2, H/4, W/4] — mid-level structure
+                "feat_scale8": feat_scale8,  # [B, c1, H/8, W/8] — deep semantics
             }
         return det_feature
 
@@ -367,6 +374,10 @@ class ConvTeacherUNet(nn.Module):
                 "edge_logits": self.edge_head(d1),
                 "gate": gate,
                 "residual": residual,
+                # Multi-scale features for detector distillation (training only)
+                "feat_scale2": d2,          # [B, c2, H/2, W/2] — decoder mid-level
+                "feat_scale4": d3,          # [B, c3, H/4, W/4] — decoder upper
+                "feat_scale8": e4,          # [B, c4, H/8, W/8] — bottleneck deepest
             }
         return det_feature
 

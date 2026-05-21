@@ -42,6 +42,8 @@ class ConfigSLM:
     TEACHER_UNET_RESIDUAL_SCALE = 0.30
     YOLOV8_BASE_CHANNELS = 32
     YOLOV8_C2F_BLOCKS = 3
+    DETECTOR_HEAD_TYPE = "light"
+    YOLO_LIGHT_BASE_CH = 16
     DEFAULT_ANCHORS = [
         [[26, 23], [47, 49], [100, 67]],
         [[103, 169], [203, 107], [351, 177]],
