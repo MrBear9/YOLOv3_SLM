@@ -22,7 +22,7 @@ from models.runtime import prepare_batch
 from models.teacher_guidance import enhance_feature_for_display
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 from models.yolov8.decode_anchor_v8 import decode_detections_anchor_v8
-from models.yolov8.head_v8 import TeacherWithYOLOv8AnchorDetector, YOLOv8AnchorHead
+from models.yolov8.head_v8 import TeacherWithDetector, build_detector_head
 
 
 DEFAULT_CHECKPOINT = ROOT / "output" / "OpticalTeacherYOLO_YOLOv8Head" / "teacher_detector_final.pth"
@@ -271,9 +271,9 @@ def evaluate(args):
         dataset.files = dataset.files[: args.max_eval_images]
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=identity_collate)
 
-    teacher_detector = TeacherWithYOLOv8AnchorDetector(
+    teacher_detector = TeacherWithDetector(
         Config,
-        detector=YOLOv8AnchorHead(Config, in_channels=1, out_channels=Config.get_detector_output_channels()),
+        detector=build_detector_head(Config, in_channels=1),
     ).to(device)
     checkpoint_info = load_checkpoint(teacher_detector, args.checkpoint, device)
     teacher_detector.eval()

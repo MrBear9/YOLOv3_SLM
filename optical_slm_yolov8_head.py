@@ -26,7 +26,7 @@ from models.SLM.utils_slm import (
 from models.runtime import init_epoch_log_table, init_log_file, log_epoch_table_row, log_to_file
 from models.teacher import build_teacher
 from models.training_utils import save_training_curves
-from models.yolov8.head_v8 import YOLOv8AnchorHead
+from models.yolov8.head_v8 import build_detector_head
 from models.yolov8.loss_anchor_v8 import YOLOv3AnchorLossForV8Head
 
 
@@ -147,7 +147,7 @@ def train():
     device = torch.device(Config.DEVICE)
 
     teacher = build_teacher(Config).to(device)
-    reference_detector = YOLOv8AnchorHead(Config, in_channels=1, out_channels=Config.get_detector_output_channels()).to(device)
+    reference_detector = build_detector_head(Config, in_channels=1).to(device)
     checkpoint_info = load_teacher_detector_checkpoint(teacher, reference_detector, Config.TEACHER_DETECTOR_CHECKPOINT, device)
     log_to_file(Config, f"Loaded teacher/detector checkpoint: {checkpoint_info}")
     set_trainable(teacher, False)
@@ -164,7 +164,7 @@ def train():
             log_to_file(Config, "SLM checkpoint initialization loaded 0 tensors; using current initialized phases.")
     else:
         log_to_file(Config, f"Initialized SLM student with mode={init_mode}")
-    detector = YOLOv8AnchorHead(Config, in_channels=1, out_channels=Config.get_detector_output_channels()).to(device)
+    detector = build_detector_head(Config, in_channels=1).to(device)
     detector.load_state_dict(reference_detector.state_dict(), strict=False)
     if Config.ENABLE_CHANNELS_LAST and torch.cuda.is_available():
         student = student.to(memory_format=torch.channels_last)

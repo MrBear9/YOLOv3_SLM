@@ -185,6 +185,54 @@ def compute_teacher_guidance_loss_v3(config, det_feature, gray_image, targets):
     return total, stats
 
 
+def compute_teacher_guidance_loss_v2_deep(config, teacher_feature, targets):
+    """Guidance loss for deep semantic projection V2 teacher.
+
+    The V2 teacher outputs ``sigmoid(project(deep_features))`` — a
+    semantic projection, not a heatmap.  This loss only enforces
+    foreground/background separation without prescribing a specific
+    spatial pattern, leaving the network free to learn what the
+    detector needs.
+
+    Components:
+      - contrast:   push foreground high, background low
+      - sparsity:   suppress background activation
+      - tv:         mild spatial smoothness
+    """
+    img_size = teacher_feature.shape[-1]
+    device = teacher_feature.device
+    dtype = teacher_feature.dtype
+
+    foreground_mask, _ = build_foreground_mask_from_targets(config, targets, img_size, device, dtype)
+    background_mask = ~foreground_mask
+
+    fg_mean = teacher_feature[foreground_mask].mean() if foreground_mask.any() else torch.zeros((), device=device, dtype=dtype)
+    bg_mean = teacher_feature[background_mask].mean() if background_mask.any() else torch.zeros((), device=device, dtype=dtype)
+
+    fg_target = float(getattr(config, "FEATURE_FOREGROUND_TARGET", 0.74))
+    bg_target = float(getattr(config, "FEATURE_BACKGROUND_TARGET", 0.05))
+    contrast_weight = float(getattr(config, "FEATURE_CONTRAST_WEIGHT_BASE", 0.024))
+    sparsity_weight = float(getattr(config, "FEATURE_SPARSITY_WEIGHT_BASE", 0.012))
+    tv_weight = float(getattr(config, "FEATURE_TV_WEIGHT_BASE", 0.004))
+
+    contrast_loss = F.relu(fg_target - fg_mean) + F.relu(bg_mean - bg_target)
+    sparsity_loss = bg_mean
+    tv_loss = (
+        torch.abs(teacher_feature[:, :, 1:, :] - teacher_feature[:, :, :-1, :]).mean()
+        + torch.abs(teacher_feature[:, :, :, 1:] - teacher_feature[:, :, :, :-1]).mean()
+    )
+
+    total = contrast_weight * contrast_loss + sparsity_weight * sparsity_loss + tv_weight * tv_loss
+    stats = {
+        "feature_heatmap": 0.0,
+        "feature_contrast": float(contrast_loss.detach().item()),
+        "feature_sparsity": float(sparsity_loss.detach().item()),
+        "feature_tv": float(tv_loss.detach().item()),
+        "feature_total": float(total.detach().item()),
+    }
+    return total, stats
+
+
 class FeatureDistillationLoss(nn.Module):
     """Multi-scale feature distillation from teacher to detector.
 
@@ -231,13 +279,10 @@ def build_feature_distillation_loss(config):
     if arch in {"convteacher_v3", "v3"}:
         c = int(getattr(config, "TEACHER_V3_BASE_CHANNELS", 24))
         teacher_chs = (c, c * 2, c)       # feat_scale8: c, feat_scale4: 2c, feat_scale2: c
-    elif arch in {"convteacher_unet", "unet"}:
-        c = int(getattr(config, "TEACHER_UNET_BASE_CHANNELS", 16))
-        teacher_chs = (c * 8, c * 4, c * 2)  # feat_scale8: 8c, feat_scale4: 4c, feat_scale2: 2c
     else:
-        # V2 — uses bottleneck features
+        # V2 (deep projection) — feat_scale8: c1, feat_scale4/2: c3
         c = int(getattr(config, "TEACHER_V2_BASE_CHANNELS", 24))
-        teacher_chs = (c, c * 2, c)
+        teacher_chs = (c, c * 4, c * 4)
 
     # Detector feature channels  {s8, s16, s32}
     head_type = str(getattr(config, "DETECTOR_HEAD_TYPE", "yolov8_anchor")).strip().lower()

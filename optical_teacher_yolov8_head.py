@@ -19,7 +19,7 @@ from models.runtime import (
     wrap_data_parallel,
 )
 from models.teacher import build_teacher
-from models.teacher_guidance import compute_teacher_guidance_loss, compute_teacher_guidance_loss_v3, build_feature_distillation_loss
+from models.teacher_guidance import compute_teacher_guidance_loss, compute_teacher_guidance_loss_v2_deep, compute_teacher_guidance_loss_v3, build_feature_distillation_loss
 from models.training_utils import (
     build_optimizer_from_model,
     initialize_teacher_weights,
@@ -28,7 +28,7 @@ from models.training_utils import (
 )
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
-from models.yolov8.head_v8 import TeacherWithYOLOv8AnchorDetector, YOLOv8AnchorHead, build_detector_head
+from models.yolov8.head_v8 import TeacherWithDetector, build_detector_head
 from models.yolov8.loss_anchor_v8 import YOLOv3AnchorLossForV8Head
 from models.yolov8.metrics_anchor_v8 import evaluate_model_anchor_v8
 from models.yolov8.visualization_anchor_v8 import save_detection_visualization_anchor_v8
@@ -75,13 +75,11 @@ def log_all_parameters():
         log_to_file(Config, f"V3 residual_scale={Config.TEACHER_V3_RESIDUAL_SCALE}, "
                     f"bg_identity_weight={Config.TEACHER_V3_BG_IDENTITY_WEIGHT}, "
                     f"grad_consistency_weight={Config.TEACHER_V3_GRAD_CONSISTENCY_WEIGHT}")
-    elif arch_lower in {"convteacher_unet", "unet"}:
-        log_to_file(Config, f"UNet base_ch={Config.TEACHER_UNET_BASE_CHANNELS}, "
-                    f"residual_scale={Config.TEACHER_UNET_RESIDUAL_SCALE}, "
-                    f"bg_identity_weight={Config.TEACHER_V3_BG_IDENTITY_WEIGHT}, "
-                    f"grad_consistency_weight={Config.TEACHER_V3_GRAD_CONSISTENCY_WEIGHT}")
     if getattr(Config, "ENABLE_FEATURE_DISTILL", False):
         log_to_file(Config, f"Feature distillation: weight={Config.FEATURE_DISTILL_WEIGHT}")
+    guide_enabled = getattr(Config, "USE_TEACHER_GUIDANCE_LOSS", True)
+    if not guide_enabled:
+        log_to_file(Config, "Teacher guidance loss: DISABLED (pure detection-driven)")
     log_to_file(Config, "=" * 80)
 
 
@@ -106,14 +104,14 @@ def train():
     log_to_file(Config, f"Teacher status: {'frozen' if freeze_teacher else 'trainable'}")
 
     arch_lower = str(Config.TEACHER_ARCH).strip().lower()
-    is_v3 = arch_lower in {"convteacher_v3", "v3", "convteacher_unet", "unet"}
+    is_v3 = arch_lower in {"convteacher_v3", "v3"}
     if is_v3:
         log_to_file(Config, f"Residual+gate teacher ({arch_lower}): "
                     f"bg_identity_weight={Config.TEACHER_V3_BG_IDENTITY_WEIGHT}, "
                     f"grad_consistency_weight={Config.TEACHER_V3_GRAD_CONSISTENCY_WEIGHT}")
 
     detector = build_detector_head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
-    model = wrap_data_parallel(Config, TeacherWithYOLOv8AnchorDetector(Config, teacher=teacher, detector=detector), module_name="TeacherWithDetector")
+    model = wrap_data_parallel(Config, TeacherWithDetector(Config, teacher=teacher, detector=detector), module_name="TeacherWithDetector")
     set_detector_trainable(model, True)
 
     distill_loss_fn = None
@@ -197,11 +195,14 @@ def train():
                 teacher_features, predictions = model(batch_images, return_feature=True)
 
             loss, loss_stats = criterion(predictions, batch_targets)
-            if is_v3:
-                feature_loss, _ = compute_teacher_guidance_loss_v3(Config, teacher_features, batch_images, batch_targets)
-            else:
-                feature_loss, _ = compute_teacher_guidance_loss(Config, teacher_features, batch_targets, stage_settings=stage_settings)
-            loss = loss + feature_loss
+            if getattr(Config, "USE_TEACHER_GUIDANCE_LOSS", True):
+                if is_v3:
+                    feature_loss, _ = compute_teacher_guidance_loss_v3(Config, teacher_features, batch_images, batch_targets)
+                elif arch_lower in {"convteacher_v2", "v2"}:
+                    feature_loss, _ = compute_teacher_guidance_loss_v2_deep(Config, teacher_features, batch_targets)
+                else:
+                    feature_loss, _ = compute_teacher_guidance_loss(Config, teacher_features, batch_targets, stage_settings=stage_settings)
+                loss = loss + feature_loss
 
             if enable_distill and distill_loss_fn is not None:
                 distill_loss, _ = distill_loss_fn(teacher_aux, det_features)

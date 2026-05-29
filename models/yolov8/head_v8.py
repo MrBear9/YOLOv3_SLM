@@ -273,5 +273,3 @@ class TeacherWithDetector(nn.Module):
         return tuple(result)
 
 
-# Backward-compatible alias
-TeacherWithYOLOv8AnchorDetector = TeacherWithDetector

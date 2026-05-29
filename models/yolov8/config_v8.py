@@ -45,6 +45,9 @@ def load_anchor_groups(anchor_yaml_path):
 
 
 class ConfigYOLOv8Anchor:
+    # =========================================================================
+    # Common — paths, device, I/O
+    # =========================================================================
     YAML_PATH = r"data\military\data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
@@ -56,29 +59,61 @@ class ConfigYOLOv8Anchor:
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+
+    # =========================================================================
+    # Training scale
+    # =========================================================================
     IMG_SIZE = 640
     BATCH_SIZE = 16
+    STRIDES = [8, 16, 32]
+
     STAGE1_LOCATE_EPOCHS = 60
     STAGE2_TEXTURE_EPOCHS = 80
     STAGE3_BALANCE_EPOCHS = 200
     EPOCHS = STAGE1_LOCATE_EPOCHS + STAGE2_TEXTURE_EPOCHS + STAGE3_BALANCE_EPOCHS
 
-    STRIDES = [8, 16, 32]
-    TEACHER_ARCH = "convteacher_v3"
+    # =========================================================================
+    # TEACHER_ARCH = "convteacher_v2"  (deep semantic projection)
+    # =========================================================================
+    TEACHER_ARCH = "convteacher_v2"
     TEACHER_V2_BASE_CHANNELS = 24
     TEACHER_V2_C2F_BLOCKS = 2
+
+    # =========================================================================
+    # TEACHER_ARCH = "convteacher_v3"  (residual + gate)
+    # =========================================================================
     TEACHER_V3_BASE_CHANNELS = 24
     TEACHER_V3_C2F_BLOCKS = 2
     TEACHER_V3_RESIDUAL_SCALE = 0.30
-    TEACHER_V3_GUIDE_FUSION_ALPHA = 1.0
-    TEACHER_UNET_BASE_CHANNELS = 16
-    TEACHER_UNET_RESIDUAL_SCALE = 0.30
+
+    # =========================================================================
+    # TEACHER_ARCH = "convteacher"     (legacy V1, sigmoid heatmap)
+    # =========================================================================
+    # (uses its own hard-coded channels)
+
+    # =========================================================================
+    # Teacher init / freeze
+    # =========================================================================
+    TEACHER_INIT_MODE = "scratch"
+    TEACHER_INIT_CHECKPOINT = r"output/OpticalTeacherYOLO/teacher_final.pth"
+    FREEZE_TEACHER = False
+    SAVE_TEACHER_WEIGHTS = True
+
+    # =========================================================================
+    # DETECTOR_HEAD_TYPE = "light" | "yolov8_anchor"
+    # =========================================================================
+    DETECTOR_HEAD_TYPE = "light"
+
+    # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
     YOLOV8_BASE_CHANNELS = 32
     YOLOV8_C2F_BLOCKS = 3
-    DETECTOR_HEAD_TYPE = "light"  # "yolov8_anchor" or "light"
+
+    # -------- DETECTOR_HEAD_TYPE = "light" --------
     YOLO_LIGHT_BASE_CH = 16
-    ENABLE_FEATURE_DISTILL = True
-    FEATURE_DISTILL_WEIGHT = 0.12
+
+    # =========================================================================
+    # Anchors
+    # =========================================================================
     DEFAULT_ANCHORS = [
         [[26, 23], [47, 49], [100, 67]],
         [[103, 169], [203, 107], [351, 177]],
@@ -88,30 +123,90 @@ class ConfigYOLOv8Anchor:
     USE_EXTERNAL_ANCHORS = True
     ANCHORS = None
     ANCHOR_SOURCE = "default"
-    POSITIVE_ANCHOR_IOU = 0.35
-    MAX_POSITIVE_ANCHORS = 2
+
+    # =========================================================================
+    # Anchor assignment
+    # =========================================================================
+    ANCHOR_MATCH_RATIO_THRESH = 3.5   # ratio-based (max w/h ratio)
+    ASSIGN_NEIGHBOR_CELLS = True       # extra grid cells near boundaries
+    POSITIVE_ANCHOR_IOU = 0.35         # (legacy IoU threshold)
+    MAX_POSITIVE_ANCHORS = 2           # (legacy max per GT)
     NOOBJ_IGNORE_IOU = 0.68
 
-    # Anchor assignment — ratio-based (Temple-style)
-    ANCHOR_MATCH_RATIO_THRESH = 3.5
-    ASSIGN_NEIGHBOR_CELLS = True
-
-    # Hard negative mining
-    HARD_NEG_RATIO = 30
-    HARD_NEG_MIN = 512
-
-    # Box decode: sigmoid * BOX_DECODE_RANGE - (BOX_DECODE_RANGE - 1) / 2
-    #   1.0 → sigmoid       → [0, 1]      (legacy, single-cell)
-    #   2.0 → sigmoid*2-0.5 → [-0.5, 1.5] (Temple, neighbor-cell)
+    # =========================================================================
+    # Box decode
+    #   sigmoid * BOX_DECODE_RANGE - (RANGE-1)/2
+    #   1.0 → [0, 1]       (legacy, single-cell)
+    #   2.0 → [-0.5, 1.5]  (neighbor-cell compatible)
+    # =========================================================================
     BOX_DECODE_RANGE = 2.0
 
+    # =========================================================================
+    # Detection loss weights
+    # =========================================================================
     BOX_WEIGHT_BASE = 5.0
     OBJ_WEIGHT_BASE = 2.0
     NOOBJ_WEIGHT_BASE = 2.0
     CLS_WEIGHT_BASE = 1.8
+
+    # -------- Object size weighting --------
+    SMALL_OBJ_AREA = 32 * 32
+    LARGE_OBJ_AREA = 128 * 128
+    SMALL_OBJ_WEIGHT = 0.8
+    MEDIUM_OBJ_WEIGHT = 1.0
+    LARGE_OBJ_WEIGHT = 1.5
+
+    # =========================================================================
+    # Focal loss parameters
+    # =========================================================================
     FOCAL_ALPHA = 0.35
     FOCAL_GAMMA = 2.0
 
+    # =========================================================================
+    # Hard negative mining
+    # =========================================================================
+    HARD_NEG_RATIO = 30      # K = ratio × num_positives
+    HARD_NEG_MIN = 512       # minimum K per scale
+
+    # =========================================================================
+    # Teacher guidance loss — global switch
+    # =========================================================================
+    USE_TEACHER_GUIDANCE_LOSS = True  # False → pure detection-driven
+
+    # -------- TEACHER_ARCH = "convteacher_v2"  (contrast + sparsity + TV) --------
+    FEATURE_CONTRAST_WEIGHT_BASE = 0.024
+    FEATURE_SPARSITY_WEIGHT_BASE = 0.012
+    FEATURE_TV_WEIGHT_BASE = 0.004
+    FEATURE_FOREGROUND_TARGET = 0.74
+    FEATURE_BACKGROUND_TARGET = 0.05
+
+    # -------- TEACHER_ARCH = "convteacher_v3"  (bg identity + grad) --------
+    TEACHER_V3_BG_IDENTITY_WEIGHT = 0.04
+    TEACHER_V3_GRAD_CONSISTENCY_WEIGHT = 0.02
+
+    # -------- TEACHER_ARCH = "convteacher"  (legacy BCE heatmap) --------
+    FEATURE_HEATMAP_WEIGHT_BASE = 0.06
+    FEATURE_HEATMAP_SIGMA = 0.35
+    FEATURE_BOX_FILL_VALUE = 0.14
+    FEATURE_CORE_FILL_VALUE = 0.40
+    FEATURE_CORE_RATIO = 0.48
+    FEATURE_LARGE_OBJECT_AREA = 160 * 160
+    FEATURE_LARGE_BOX_FILL_BOOST = 0.05
+    FEATURE_LARGE_CORE_FILL_BOOST = 0.08
+    FEATURE_LARGE_CORE_RATIO_BOOST = 0.12
+    PHASE1_TEACHER_GUIDANCE_SCALE = 1.5
+    PHASE2_TEACHER_GUIDANCE_SCALE = 2.5
+    PHASE3_TEACHER_GUIDANCE_SCALE = 2.0
+
+    # =========================================================================
+    # Feature distillation (teacher → detector)
+    # =========================================================================
+    ENABLE_FEATURE_DISTILL = True
+    FEATURE_DISTILL_WEIGHT = 0.12
+
+    # =========================================================================
+    # Optimizer & LR schedule
+    # =========================================================================
     PHASE1_TEACHER_LR = 4e-4
     PHASE1_DETECTOR_LR = 3e-4
     PHASE2_TEACHER_LR = 2e-4
@@ -124,43 +219,12 @@ class ConfigYOLOv8Anchor:
     LR_SCHEDULER = "CosineAnnealingLR"
     ETA_MIN = 1e-6
 
-    TEACHER_INIT_MODE = "scratch"
-    TEACHER_INIT_CHECKPOINT = r"output/OpticalTeacherYOLO/teacher_final.pth"
-    FREEZE_TEACHER = False
-    SAVE_TEACHER_WEIGHTS = True
-
-    FEATURE_HEATMAP_WEIGHT_BASE = 0.06
-    FEATURE_CONTRAST_WEIGHT_BASE = 0.024
-    FEATURE_SPARSITY_WEIGHT_BASE = 0.012
-    FEATURE_TV_WEIGHT_BASE = 0.004
-    PHASE1_TEACHER_GUIDANCE_SCALE = 1.5 # 第一阶段教师指导缩放
-    PHASE2_TEACHER_GUIDANCE_SCALE = 2.5 # 第二阶段教师指导缩放
-    PHASE3_TEACHER_GUIDANCE_SCALE = 2.0 # 第三阶段教师指导缩放
-    FEATURE_FOREGROUND_TARGET = 0.74 # 前景目标阈值
-    FEATURE_BACKGROUND_TARGET = 0.05 # 背景目标阈值
-
-    # V3 guidance loss weights (residual+gate teacher)
-    TEACHER_V3_BG_IDENTITY_WEIGHT = 0.04
-    TEACHER_V3_GRAD_CONSISTENCY_WEIGHT = 0.02
-    TEACHER_V3_HEATMAP_WEIGHT = 0.03
-    FEATURE_HEATMAP_SIGMA = 0.35
-    FEATURE_BOX_FILL_VALUE = 0.14
-    FEATURE_CORE_FILL_VALUE = 0.40
-    FEATURE_CORE_RATIO = 0.48
-    FEATURE_LARGE_OBJECT_AREA = 160 * 160
-    FEATURE_LARGE_BOX_FILL_BOOST = 0.05
-    FEATURE_LARGE_CORE_FILL_BOOST = 0.08
-    FEATURE_LARGE_CORE_RATIO_BOOST = 0.12
-
-    SMALL_OBJ_AREA = 32 * 32
-    LARGE_OBJ_AREA = 128 * 128
-    SMALL_OBJ_WEIGHT = 0.8
-    MEDIUM_OBJ_WEIGHT = 1.0
-    LARGE_OBJ_WEIGHT = 1.5
-
-    CONF_THRESH = 0.35 # 置信度阈值
-    NMS_THRESH = 0.35 # NMS阈值
-    MAX_DET = 20 # 最大检测框数量
+    # =========================================================================
+    # Detection post-process
+    # =========================================================================
+    CONF_THRESH = 0.35
+    NMS_THRESH = 0.35
+    MAX_DET = 20
     AGNOSTIC_NMS = False
     ENABLE_CONTAINMENT_SUPPRESSION = True
     CONTAINMENT_SUPPRESS_RATIO = 0.90
@@ -173,23 +237,32 @@ class ConfigYOLOv8Anchor:
     WBF_CENTER_DIST_FACTOR = 0.22
     WBF_SIZE_RATIO_LIMIT = 1.8
 
+    # =========================================================================
+    # Validation
+    # =========================================================================
     VAL_INTERVAL = 2
     METRIC_IOU_THRESHOLD = 0.5
-    METRIC_CONF_THRESH = 0.001 # 验证集置信度阈值
-    METRIC_NMS_THRESH = 0.50 # 验证集NMS阈值
-    METRIC_MAX_DET = 300 # 验证集最大检测框数量
+    METRIC_CONF_THRESH = 0.001
+    METRIC_NMS_THRESH = 0.50
+    METRIC_MAX_DET = 300
 
-    VIS_INTERVAL = 5 # 可视化间隔
-    VIS_BATCH_SIZE = 4 # 可视化批量大小
-    VIS_DPI = 130 # 可视化DPI
+    # =========================================================================
+    # Visualization
+    # =========================================================================
+    VIS_INTERVAL = 5
+    VIS_BATCH_SIZE = 4
+    VIS_DPI = 130
     VIS_DATASET_SPLIT = "val"
     VIS_SEED = 20260506
-    VIS_CONF_THRESH = 0.35 # 可视化置信度阈值
-    VIS_NMS_THRESH = 0.35 # 可视化NMS阈值
-    VIS_MAX_DET = 20 # 可视化最大检测框数量
-    VIS_SHOW_BEST_MATCHED_ANCHORS = True # 是否显示最佳匹配anchor
-    VIS_MAX_GT_ANCHOR_OVERLAYS = 2 # 最大显示的GT anchor数量
+    VIS_CONF_THRESH = 0.35
+    VIS_NMS_THRESH = 0.35
+    VIS_MAX_DET = 20
+    VIS_SHOW_BEST_MATCHED_ANCHORS = True
+    VIS_MAX_GT_ANCHOR_OVERLAYS = 2
 
+    # =========================================================================
+    # Data loading
+    # =========================================================================
     USE_CLASS_BALANCED_SAMPLER = True
     CLASS_BALANCE_POWER = 0.6
     MAX_CLASS_BALANCE_GAIN = 3.0
@@ -205,6 +278,9 @@ class ConfigYOLOv8Anchor:
     ENABLE_CHANNELS_LAST = True
     ENABLE_TF32 = True
 
+    # =========================================================================
+    # Log / table formatting
+    # =========================================================================
     EPOCH_TABLE_EPOCH_WIDTH = 8
     EPOCH_TABLE_PHASE_WIDTH = 18
     EPOCH_TABLE_TRAIN_LOSS_WIDTH = 13
