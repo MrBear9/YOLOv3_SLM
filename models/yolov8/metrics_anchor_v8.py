@@ -4,7 +4,7 @@ from tqdm import tqdm
 
 from models.geometry import bbox_iou_xywh
 from models.runtime import prepare_batch
-from models.teacher_guidance import compute_teacher_guidance_loss, compute_teacher_guidance_loss_v2_deep, compute_teacher_guidance_loss_v3
+# (guidance loss removed — pure detection-driven)
 from .decode_anchor_v8 import decode_detections_anchor_v8
 
 
@@ -28,32 +28,20 @@ def compute_average_precision(detections, total_gt):
     return float(np.sum((mrec[indices + 1] - mrec[indices]) * mpre[indices + 1]))
 
 
-def evaluate_model_anchor_v8(config, model, dataloader, criterion, device, stage_settings=None, is_v3=False):
+def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
     model.eval()
     metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
-    component_totals = {key: 0.0 for key in ("total", "box", "obj", "noobj", "cls", "feature_total")}
+    component_totals = {key: 0.0 for key in ("total", "box", "obj", "noobj", "cls")}
     total_tp = total_fp = total_fn = 0
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validation", leave=False):
             batch_images, batch_targets = prepare_batch(config, batch, device)
             teacher_features, predictions = model(batch_images, return_feature=True)
             loss, loss_stats = criterion(predictions, batch_targets)
-            arch_lower = str(getattr(config, "TEACHER_ARCH", "")).strip().lower()
-            feature_loss = torch.zeros((), device=device)
-            feature_stats = {"feature_total": 0.0}
-            if getattr(config, "USE_TEACHER_GUIDANCE_LOSS", True):
-                if is_v3:
-                    feature_loss, feature_stats = compute_teacher_guidance_loss_v3(config, teacher_features, batch_images, batch_targets)
-                elif arch_lower in {"convteacher_v2", "v2"}:
-                    feature_loss, feature_stats = compute_teacher_guidance_loss_v2_deep(config, teacher_features, batch_targets)
-                else:
-                    feature_loss, feature_stats = compute_teacher_guidance_loss(config, teacher_features, batch_targets, stage_settings=stage_settings)
-                loss = loss + feature_loss
             for key in ("box", "obj", "noobj", "cls"):
                 component_totals[key] += loss_stats.get(key, 0.0)
             component_totals["total"] += float(loss.detach().item())
-            component_totals["feature_total"] += feature_stats["feature_total"]
             detections = decode_detections_anchor_v8(
                 config,
                 predictions,

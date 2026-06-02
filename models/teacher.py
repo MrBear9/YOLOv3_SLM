@@ -114,45 +114,102 @@ class TeacherSPPF(nn.Module):
 
 
 class ConvTeacher(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Sequential(nn.Conv2d(1, 16, 3, stride=2, padding=1, bias=False), nn.BatchNorm2d(16), nn.SiLU())
-        self.conv2 = nn.Sequential(nn.Conv2d(16, 32, 3, stride=2, padding=1, bias=False), nn.BatchNorm2d(32), nn.SiLU())
-        self.conv3 = nn.Sequential(nn.Conv2d(32, 64, 3, stride=2, padding=1, bias=False), nn.BatchNorm2d(64), nn.SiLU())
-        self.stage1 = nn.Sequential(TeacherResidualBlock(16), TeacherResidualBlock(16))
-        self.stage2 = nn.Sequential(TeacherResidualBlock(32), TeacherResidualBlock(32))
-        self.stage3 = nn.Sequential(TeacherResidualBlock(64), TeacherResidualBlock(64), TeacherResidualBlock(64, dilation=2))
-        self.skip1 = nn.Sequential(nn.Conv2d(16, 64, 1, bias=False), nn.BatchNorm2d(64), nn.SiLU())
-        self.skip2 = nn.Sequential(nn.Conv2d(32, 64, 1, bias=False), nn.BatchNorm2d(64), nn.SiLU())
-        self.context = nn.Sequential(
-            TeacherResidualBlock(64),
-            nn.Conv2d(64, 64, 3, padding=2, dilation=2, bias=False),
-            nn.BatchNorm2d(64),
-            nn.SiLU(),
-        )
-        self.refine = nn.Sequential(
-            nn.Conv2d(64, 64, 3, padding=1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.SiLU(),
-            nn.Conv2d(64, 32, 1, bias=False),
-            nn.BatchNorm2d(32),
-            nn.SiLU(),
-        )
-        self.project = nn.Conv2d(32, 1, 1, bias=False)
+    """Deeper semantic projection teacher.
 
-    def forward(self, x):
+    Compared to ConvTeacherV2: larger base channels (32 vs 24), more C2f
+    blocks per stage (3 vs 2), deeper context with two dilated residual
+    blocks, and higher-capacity bottleneck (128 vs 96 channels at c3).
+
+    The architecture follows the same pattern — multi-scale fusion at
+    stride-8 followed by 1ch projection and bilinear upsampling — but
+    with extra depth and width for richer feature extraction.
+    """
+
+    def __init__(self, base_channels=32, c2f_blocks=3):
+        super().__init__()
+        c1 = base_channels          # 32
+        c2 = base_channels * 2      # 64
+        c3 = base_channels * 4      # 128
+
+        # --- Backbone ---
+        self.stem = TeacherConvBNAct(1, c1, 3, 2)
+        self.stage1 = TeacherC2f(c1, c1, c2f_blocks, shortcut=True)
+        self.down2 = TeacherConvBNAct(c1, c2, 3, 2)
+        self.stage2 = TeacherC2f(c2, c2, c2f_blocks + 1, shortcut=True)
+        self.down3 = TeacherConvBNAct(c2, c3, 3, 2)
+        self.stage3 = TeacherC2f(c3, c3, c2f_blocks + 2, shortcut=True)
+        self.sppf = TeacherSPPF(c3, c3)
+
+        # Skip connections to bottleneck
+        self.skip1 = nn.Sequential(nn.Conv2d(c1, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
+        self.skip2 = nn.Sequential(nn.Conv2d(c2, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
+
+        # Deeper context: C2f + two dilated ResidualBlocks
+        self.context = nn.Sequential(
+            TeacherC2f(c3, c3, c2f_blocks + 1, shortcut=True),
+            TeacherResidualBlock(c3, dilation=2),
+            TeacherResidualBlock(c3, dilation=4),
+        )
+
+        # Multi-scale lateral connections → all to stride-8
+        self.lateral_s4 = nn.Sequential(
+            nn.Conv2d(c2, c3, 3, 2, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU(),
+        )
+        self.lateral_s2 = nn.Sequential(
+            nn.Conv2d(c1, c2, 3, 2, 1, bias=False), nn.BatchNorm2d(c2), nn.SiLU(),
+            nn.Conv2d(c2, c3, 3, 2, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU(),
+        )
+
+        # Deep fusion of all three scales at stride-8
+        self.deep_fuse = nn.Sequential(
+            TeacherConvBNAct(c3 * 3, c3),
+            TeacherC2f(c3, c3, c2f_blocks, shortcut=True),
+        )
+
+        # Refinement at stride-8
+        self.refine = nn.Sequential(
+            TeacherConvBNAct(c3, c2, 3),
+            TeacherC2f(c2, c2, c2f_blocks, shortcut=True),
+            TeacherConvBNAct(c2, c1, 1),
+        )
+
+        # 1-channel projection at stride-8
+        self.proj_out = nn.Sequential(
+            TeacherConvBNAct(c1, c1, 3),
+            nn.Conv2d(c1, 1, 1),
+        )
+
+    def forward(self, x, return_aux=False):
         if x.shape[1] > 1:
             x = x.mean(dim=1, keepdim=True)
-        x1 = self.stage1(self.conv1(x))
-        x2 = self.stage2(self.conv2(x1))
-        x3 = self.stage3(self.conv3(x2))
-        skip1 = _interpolate_preserve_layout(self.skip1(x1), size=x3.shape[-2:], mode="bilinear", align_corners=False)
-        skip2 = _interpolate_preserve_layout(self.skip2(x2), size=x3.shape[-2:], mode="bilinear", align_corners=False)
-        f = self.context(x3 + skip1 + skip2)
-        f = self.refine(f)
-        f = torch.abs(self.project(f))
-        f = _interpolate_preserve_layout(f, size=x.shape[-2:], mode="bilinear", align_corners=False)
-        return torch.sigmoid(f)
+        gray = x
+
+        x1 = self.stage1(self.stem(gray))                              # [B, c1, H/2, W/2]
+        x2 = self.stage2(self.down2(x1))                               # [B, c2, H/4, W/4]
+        x3 = self.stage3(self.down3(x2))                               # [B, c3, H/8, W/8]
+        p3 = self.sppf(x3)                                             # [B, c3, H/8, W/8]
+
+        skip1 = _interpolate_preserve_layout(self.skip1(x1), size=p3.shape[-2:], mode="bilinear", align_corners=False)
+        skip2 = _interpolate_preserve_layout(self.skip2(x2), size=p3.shape[-2:], mode="bilinear", align_corners=False)
+        f_s8 = self.context(p3 + skip1 + skip2)                        # [B, c3, H/8, W/8]
+
+        f_s4 = self.lateral_s4(x2)                                     # [B, c3, H/8, W/8]
+        f_s2 = self.lateral_s2(x1)                                     # [B, c3, H/8, W/8]
+        f_fused = self.deep_fuse(torch.cat([f_s8, f_s4, f_s2], dim=1)) # [B, c3, H/8, W/8]
+
+        f_refined = self.refine(f_fused)                               # [B, c1, H/8, W/8]
+        feat_1ch = torch.sigmoid(self.proj_out(f_refined))             # [B, 1, H/8, W/8]
+        det_feature = _interpolate_preserve_layout(feat_1ch, size=gray.shape[-2:], mode="bilinear", align_corners=False)
+
+        if return_aux:
+            return {
+                "det_feature": det_feature,
+                "gray": gray,
+                "feat_scale8": f_refined,
+                "feat_scale4": f_s4,
+                "feat_scale2": f_s2,
+            }
+        return det_feature
 
 
 class ConvTeacherV2(nn.Module):
@@ -359,15 +416,17 @@ class ConvTeacherV3(nn.Module):
 
 def build_teacher(config=None):
     arch = str(getattr(config, "TEACHER_ARCH", "convteacher_v2") if config is not None else "convteacher_v2").strip().lower()
-    if arch in {"convteacher", "convteacher_v1", "v1", "legacy"}:
-        return ConvTeacher()
+    if arch in {"convteacher", "v1"}:
+        c = int(getattr(config, "TEACHER_V1_BASE_CHANNELS", 32) if config is not None else 32)
+        b = int(getattr(config, "TEACHER_V1_C2F_BLOCKS", 3) if config is not None else 3)
+        return ConvTeacher(base_channels=c, c2f_blocks=b)
     if arch in {"convteacher_v2", "v2"}:
-        base_channels = int(getattr(config, "TEACHER_V2_BASE_CHANNELS", 24) if config is not None else 24)
-        c2f_blocks = int(getattr(config, "TEACHER_V2_C2F_BLOCKS", 2) if config is not None else 2)
-        return ConvTeacherV2(base_channels=base_channels, c2f_blocks=c2f_blocks)
+        c = int(getattr(config, "TEACHER_V2_BASE_CHANNELS", 24) if config is not None else 24)
+        b = int(getattr(config, "TEACHER_V2_C2F_BLOCKS", 2) if config is not None else 2)
+        return ConvTeacherV2(base_channels=c, c2f_blocks=b)
     if arch in {"convteacher_v3", "v3"}:
-        base_channels = int(getattr(config, "TEACHER_V3_BASE_CHANNELS", 24) if config is not None else 24)
-        c2f_blocks = int(getattr(config, "TEACHER_V3_C2F_BLOCKS", 2) if config is not None else 2)
-        residual_scale = float(getattr(config, "TEACHER_V3_RESIDUAL_SCALE", 0.30) if config is not None else 0.30)
-        return ConvTeacherV3(base_channels=base_channels, c2f_blocks=c2f_blocks, residual_scale=residual_scale)
+        c = int(getattr(config, "TEACHER_V3_BASE_CHANNELS", 24) if config is not None else 24)
+        b = int(getattr(config, "TEACHER_V3_C2F_BLOCKS", 2) if config is not None else 2)
+        s = float(getattr(config, "TEACHER_V3_RESIDUAL_SCALE", 0.30) if config is not None else 0.30)
+        return ConvTeacherV3(base_channels=c, c2f_blocks=b, residual_scale=s)
     raise ValueError(f"Unsupported TEACHER_ARCH: {arch}")

@@ -73,14 +73,20 @@ class ConfigYOLOv8Anchor:
     EPOCHS = STAGE1_LOCATE_EPOCHS + STAGE2_TEXTURE_EPOCHS + STAGE3_BALANCE_EPOCHS
 
     # =========================================================================
-    # TEACHER_ARCH = "convteacher_v2"  (deep semantic projection)
+    # TEACHER_ARCH = "convteacher" | "v1"  (deeper semantic projection)
+    # =========================================================================
+    TEACHER_V1_BASE_CHANNELS = 32
+    TEACHER_V1_C2F_BLOCKS = 3
+
+    # =========================================================================
+    # TEACHER_ARCH = "convteacher_v2" | "v2"  (deep semantic projection, default)
     # =========================================================================
     TEACHER_ARCH = "convteacher_v2"
     TEACHER_V2_BASE_CHANNELS = 24
     TEACHER_V2_C2F_BLOCKS = 2
 
     # =========================================================================
-    # TEACHER_ARCH = "convteacher_v3"  (residual + gate)
+    # TEACHER_ARCH = "convteacher_v3" | "v3"  (residual + gate)
     # =========================================================================
     TEACHER_V3_BASE_CHANNELS = 24
     TEACHER_V3_C2F_BLOCKS = 2
@@ -167,36 +173,6 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     HARD_NEG_RATIO = 30      # K = ratio × num_positives
     HARD_NEG_MIN = 512       # minimum K per scale
-
-    # =========================================================================
-    # Teacher guidance loss — global switch
-    # =========================================================================
-    USE_TEACHER_GUIDANCE_LOSS = True  # False → pure detection-driven
-
-    # -------- TEACHER_ARCH = "convteacher_v2"  (contrast + sparsity + TV) --------
-    FEATURE_CONTRAST_WEIGHT_BASE = 0.024
-    FEATURE_SPARSITY_WEIGHT_BASE = 0.012
-    FEATURE_TV_WEIGHT_BASE = 0.004
-    FEATURE_FOREGROUND_TARGET = 0.74
-    FEATURE_BACKGROUND_TARGET = 0.05
-
-    # -------- TEACHER_ARCH = "convteacher_v3"  (bg identity + grad) --------
-    TEACHER_V3_BG_IDENTITY_WEIGHT = 0.04
-    TEACHER_V3_GRAD_CONSISTENCY_WEIGHT = 0.02
-
-    # -------- TEACHER_ARCH = "convteacher"  (legacy BCE heatmap) --------
-    FEATURE_HEATMAP_WEIGHT_BASE = 0.06
-    FEATURE_HEATMAP_SIGMA = 0.35
-    FEATURE_BOX_FILL_VALUE = 0.14
-    FEATURE_CORE_FILL_VALUE = 0.40
-    FEATURE_CORE_RATIO = 0.48
-    FEATURE_LARGE_OBJECT_AREA = 160 * 160
-    FEATURE_LARGE_BOX_FILL_BOOST = 0.05
-    FEATURE_LARGE_CORE_FILL_BOOST = 0.08
-    FEATURE_LARGE_CORE_RATIO_BOOST = 0.12
-    PHASE1_TEACHER_GUIDANCE_SCALE = 1.5
-    PHASE2_TEACHER_GUIDANCE_SCALE = 2.5
-    PHASE3_TEACHER_GUIDANCE_SCALE = 2.0
 
     # =========================================================================
     # Feature distillation (teacher → detector)
@@ -373,7 +349,6 @@ class ConfigYOLOv8Anchor:
                 },
                 "teacher_lr": cls.PHASE1_TEACHER_LR,
                 "detector_lr": cls.PHASE1_DETECTOR_LR,
-                "teacher_guidance_scale": cls.PHASE1_TEACHER_GUIDANCE_SCALE,
             }
         if epoch < cls.STAGE1_LOCATE_EPOCHS + cls.STAGE2_TEXTURE_EPOCHS:
             return {
@@ -389,7 +364,6 @@ class ConfigYOLOv8Anchor:
                 },
                 "teacher_lr": cls.PHASE2_TEACHER_LR,
                 "detector_lr": cls.PHASE2_DETECTOR_LR,
-                "teacher_guidance_scale": cls.PHASE2_TEACHER_GUIDANCE_SCALE,
             }
         return {
             "phase": "balance_refine",
@@ -404,24 +378,11 @@ class ConfigYOLOv8Anchor:
             },
             "teacher_lr": cls.PHASE3_TEACHER_LR,
             "detector_lr": cls.PHASE3_DETECTOR_LR,
-            "teacher_guidance_scale": cls.PHASE3_TEACHER_GUIDANCE_SCALE,
         }
 
     @classmethod
     def get_dynamic_weights(cls, epoch):
         return cls.get_stage_settings(epoch)
-
-    @classmethod
-    def get_teacher_guidance_weights(cls, stage_settings=None):
-        if stage_settings is None:
-            stage_settings = cls.get_stage_settings(0)
-        scale = float(stage_settings["teacher_guidance_scale"])
-        return {
-            "heatmap": cls.FEATURE_HEATMAP_WEIGHT_BASE * scale,
-            "contrast": cls.FEATURE_CONTRAST_WEIGHT_BASE * scale,
-            "sparsity": cls.FEATURE_SPARSITY_WEIGHT_BASE * scale,
-            "tv": cls.FEATURE_TV_WEIGHT_BASE * scale,
-        }
 
     @classmethod
     def should_skip_file_log(cls, message):
