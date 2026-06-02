@@ -18,13 +18,23 @@ class SLMLayer(nn.Module):
         else:
             self.register_parameter("amp_raw", None)
 
+    def _phase_grid(self, resolution):
+        height, width = resolution
+        y = torch.linspace(-1.0, 1.0, height)
+        x = torch.linspace(-1.0, 1.0, width)
+        yy, xx = torch.meshgrid(y, x, indexing="ij")
+        return height, width, yy, xx
+
+    def _wrap_with_noise(self, phase, height, width):
+        noise_std = float(getattr(self.config, "SLM_INIT_NOISE_STD", 0.0))
+        if noise_std > 0:
+            phase = phase + torch.randn_like(phase) * noise_std
+        return torch.remainder(phase, 2 * np.pi).contiguous().view(1, 1, height, width)
+
     def _initial_phase(self, resolution):
         init_mode = str(getattr(self.config, "SLM_INIT_MODE", "random")).lower()
         if init_mode in {"vortex", "vortex_checkpoint"}:
-            height, width = resolution
-            y = torch.linspace(-1.0, 1.0, height)
-            x = torch.linspace(-1.0, 1.0, width)
-            yy, xx = torch.meshgrid(y, x, indexing="ij")
+            height, width, yy, xx = self._phase_grid(resolution)
             theta = torch.atan2(yy, xx)
             radius2 = xx.square() + yy.square()
             if self.layer_index == 1:
@@ -34,10 +44,43 @@ class SLMLayer(nn.Module):
                 charge = float(getattr(self.config, "SLM_VORTEX_CHARGE_2", -1.0))
                 radial_scale = float(getattr(self.config, "SLM_VORTEX_RADIAL_SCALE_2", -0.25))
             phase = charge * theta + radial_scale * np.pi * radius2
-            noise_std = float(getattr(self.config, "SLM_INIT_NOISE_STD", 0.0))
-            if noise_std > 0:
-                phase = phase + torch.randn_like(phase) * noise_std
-            return torch.remainder(phase, 2 * np.pi).contiguous().view(1, 1, height, width)
+            return self._wrap_with_noise(phase, height, width)
+        if init_mode in {"double_helix", "double_helix_psf", "dh_psf", "double_helix_checkpoint", "dh_psf_checkpoint"}:
+            height, width, yy, xx = self._phase_grid(resolution)
+            periods = max(float(getattr(self.config, "SLM_DH_PSF_PERIODS", 2.0)), 1.0)
+            separation = float(getattr(self.config, "SLM_DH_PSF_SEPARATION", 0.55))
+            charge = float(getattr(self.config, "SLM_DH_PSF_CHARGE", 1.0))
+            radial_scale = float(getattr(self.config, "SLM_DH_PSF_RADIAL_SCALE", 0.20))
+            saddle_scale = float(getattr(self.config, "SLM_DH_PSF_SADDLE_SCALE", 0.08))
+            if self.layer_index == 1:
+                rotation = float(getattr(self.config, "SLM_DH_PSF_ROTATION_1", 0.0))
+                handedness = float(getattr(self.config, "SLM_DH_PSF_HANDEDNESS_1", 1.0))
+            else:
+                rotation = float(getattr(self.config, "SLM_DH_PSF_ROTATION_2", np.pi / 2))
+                handedness = float(getattr(self.config, "SLM_DH_PSF_HANDEDNESS_2", -1.0))
+
+            cell_x = torch.remainder((xx + 1.0) * periods / 2.0, 1.0) * 2.0 - 1.0
+            cell_y = torch.remainder((yy + 1.0) * periods / 2.0, 1.0) * 2.0 - 1.0
+            cos_r = np.cos(rotation)
+            sin_r = np.sin(rotation)
+            xr = cell_x * cos_r - cell_y * sin_r
+            yr = cell_x * sin_r + cell_y * cos_r
+
+            half_sep = 0.5 * separation
+            theta_left = torch.atan2(yr, xr + half_sep)
+            theta_right = torch.atan2(yr, xr - half_sep)
+            r_left2 = (xr + half_sep).square() + yr.square()
+            r_right2 = (xr - half_sep).square() + yr.square()
+
+            # A DH-PSF-like seed: paired counter-rotating spiral centers plus a weak
+            # radial/saddle term to keep the tiled cells from starting as flat vortices.
+            phase = (
+                handedness * charge * theta_left
+                - handedness * charge * theta_right
+                + radial_scale * np.pi * (r_left2 + r_right2)
+                + saddle_scale * np.pi * (xr.square() - yr.square())
+            )
+            return self._wrap_with_noise(phase, height, width)
         return torch.rand(1, 1, *resolution) * 2 * np.pi
 
     def wrapped_phase(self):

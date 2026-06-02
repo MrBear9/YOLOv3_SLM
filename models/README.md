@@ -54,8 +54,8 @@ SLM phase training has a few hardware-facing safeguards:
 - `student_adapt_max` only tracks normalized feature adaptation quality; it does not write `optical_student_best.pth`, because that stage is not selected by detector mAP.
 - `detector_best.pth` carries both `detector_state_dict` and the paired `student_state_dict` from the same best-mAP epoch. This is the checkpoint to use for optical-student + detector inference, especially when mAP peaks around the detector-only window and later joint training does not improve.
 - `optical_student_best.pth` is refreshed from the same student snapshot whenever `detector_best.pth` is updated, so phase extraction and detector evaluation stay aligned. Its metadata still records whether the SLM phase diversity check passed.
-- `optical_layers.py` supports vortex phase initialization for both SLM layers. This gives the phase optimizer a non-flat optical pattern instead of relying only on random phase.
-- `ConfigSLM.SLM_INIT_MODE` controls initialization: `random`, `vortex`, `checkpoint`, or `vortex_checkpoint`. `checkpoint` and `vortex_checkpoint` load `ConfigSLM.SLM_INIT_CHECKPOINT` into the student but still start training from the first student-only stage.
+- `optical_layers.py` supports vortex and double-helix PSF-like phase initialization for both SLM layers. This gives the phase optimizer a non-flat optical pattern instead of relying only on random phase.
+- `ConfigSLM.SLM_INIT_MODE` controls initialization: `random`, `vortex`, `double_helix_psf`/`dh_psf`, `checkpoint`, `vortex_checkpoint`, or `double_helix_checkpoint`/`dh_psf_checkpoint`. The checkpoint modes load `ConfigSLM.SLM_INIT_CHECKPOINT` into the student but still start training from the first student-only stage.
 - Teacher `abs` is intentionally unchanged for now. If the teacher is retrained later, removing `abs` may make the target feature range more compatible with physical optical intensity, but that is a separate experiment.
 
 Useful runtime overrides:
@@ -64,6 +64,15 @@ Useful runtime overrides:
 $env:OPTICAL_SLM_INIT_MODE="vortex"
 $env:OPTICAL_SLM_STUDENT_NORM_SCHEDULE="always"
 $env:OPTICAL_SLM_STUDENT_NORM_MODE="max"
+python .\optical_slm_yolov8_head.py
+```
+
+To initialize with a tiled double-helix PSF-like phase pattern:
+
+```powershell
+$env:OPTICAL_SLM_INIT_MODE="double_helix_psf"
+$env:OPTICAL_SLM_DH_PSF_PERIODS="2"
+$env:OPTICAL_SLM_DH_PSF_SEPARATION="0.55"
 python .\optical_slm_yolov8_head.py
 ```
 

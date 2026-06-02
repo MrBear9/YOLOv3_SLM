@@ -60,12 +60,23 @@ class ConfigSLM:
     STUDENT_NORM_PERCENTILE = 0.995
 
     # -------- SLM phase init --------
-    SLM_INIT_MODE = "vortex"
+    # Options: random, vortex, dh_psf/double_helix_psf, checkpoint,
+    # vortex_checkpoint, dh_psf_checkpoint/double_helix_checkpoint.
+    SLM_INIT_MODE = "dh_psf"
     SLM_INIT_CHECKPOINT = r"output\OpticalSLM_YOLOv8Head_student\optical_student_best.pth"
     SLM_VORTEX_CHARGE_1 = 1.0
     SLM_VORTEX_CHARGE_2 = -1.0
     SLM_VORTEX_RADIAL_SCALE_1 = 0.35
     SLM_VORTEX_RADIAL_SCALE_2 = -0.25
+    SLM_DH_PSF_PERIODS = 1.0  # 1.0 ->  整张图一个双螺旋相位 2.0  ->  2 x 2 阵列 3.0  ->  3 x 3 阵列
+    SLM_DH_PSF_SEPARATION = 0.55
+    SLM_DH_PSF_CHARGE = 1.0
+    SLM_DH_PSF_RADIAL_SCALE = 0.20
+    SLM_DH_PSF_SADDLE_SCALE = 0.08
+    SLM_DH_PSF_ROTATION_1 = 0.0
+    SLM_DH_PSF_ROTATION_2 = np.pi / 2
+    SLM_DH_PSF_HANDEDNESS_1 = 1.0
+    SLM_DH_PSF_HANDEDNESS_2 = -1.0
     SLM_INIT_NOISE_STD = 0.03
 
     # =========================================================================
@@ -264,6 +275,15 @@ class ConfigSLM:
             "OPTICAL_SLM_TEACHER_DETECTOR_CHECKPOINT": ("TEACHER_DETECTOR_CHECKPOINT", str),
             "OPTICAL_SLM_INIT_MODE": ("SLM_INIT_MODE", str),
             "OPTICAL_SLM_INIT_CHECKPOINT": ("SLM_INIT_CHECKPOINT", str),
+            "OPTICAL_SLM_DH_PSF_PERIODS": ("SLM_DH_PSF_PERIODS", float),
+            "OPTICAL_SLM_DH_PSF_SEPARATION": ("SLM_DH_PSF_SEPARATION", float),
+            "OPTICAL_SLM_DH_PSF_CHARGE": ("SLM_DH_PSF_CHARGE", float),
+            "OPTICAL_SLM_DH_PSF_RADIAL_SCALE": ("SLM_DH_PSF_RADIAL_SCALE", float),
+            "OPTICAL_SLM_DH_PSF_SADDLE_SCALE": ("SLM_DH_PSF_SADDLE_SCALE", float),
+            "OPTICAL_SLM_DH_PSF_ROTATION_1": ("SLM_DH_PSF_ROTATION_1", float),
+            "OPTICAL_SLM_DH_PSF_ROTATION_2": ("SLM_DH_PSF_ROTATION_2", float),
+            "OPTICAL_SLM_DH_PSF_HANDEDNESS_1": ("SLM_DH_PSF_HANDEDNESS_1", float),
+            "OPTICAL_SLM_DH_PSF_HANDEDNESS_2": ("SLM_DH_PSF_HANDEDNESS_2", float),
             "OPTICAL_SLM_TEACHER_ARCH": ("TEACHER_ARCH", str),
             "OPTICAL_SLM_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),
             "OPTICAL_SLM_TEACHER_V2_C2F_BLOCKS": ("TEACHER_V2_C2F_BLOCKS", int),

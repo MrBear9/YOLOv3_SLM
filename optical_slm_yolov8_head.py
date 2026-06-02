@@ -157,7 +157,7 @@ def train():
 
     student = OpticalStudent(Config).to(device)
     init_mode = str(Config.SLM_INIT_MODE).strip().lower()
-    if init_mode in {"checkpoint", "vortex_checkpoint"}:
+    if init_mode in {"checkpoint", "vortex_checkpoint", "double_helix_checkpoint", "dh_psf_checkpoint"}:
         student_info = load_student_checkpoint(student, Config.SLM_INIT_CHECKPOINT, device)
         log_to_file(Config, f"Initialized SLM student from checkpoint: {student_info}")
         if student_info["loaded"] == 0:
