@@ -1,3 +1,11 @@
+'''
+@File    :   teacher.py
+@Time    :   2026/05/29 11:47:43
+@Author  :   Mr.Bear9 
+@Github  :   https://github.com/MrBear9
+'''
+
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

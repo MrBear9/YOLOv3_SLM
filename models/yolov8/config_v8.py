@@ -48,10 +48,10 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Common — paths, device, I/O
     # =========================================================================
-    YAML_PATH = r"data\military\data.yaml"
+    YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output\OpticalTeacherYOLO_YOLOv8Head"
+    TEACHER_OUTPUT_DIR = r"output/OpticalTeacherYOLO_YOLOv8Head"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
