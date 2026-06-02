@@ -8,8 +8,10 @@ from tqdm import tqdm
 from models.dataset import YOLODataset, build_class_balanced_train_sampler, identity_collate
 from models.runtime import (
     append_plain_log,
+    cleanup_distributed,
     get_dataloader_kwargs,
     get_runtime_device,
+    init_distributed_mode,
     init_epoch_log_table,
     init_log_file,
     log_epoch_table_row,
@@ -79,6 +81,9 @@ def log_all_parameters():
 
 
 def train():
+    local_rank, use_ddp = init_distributed_mode(Config)
+    is_main = local_rank == 0
+
     bootstrap_runtime()
     log_all_parameters()
     device = get_runtime_device(Config)
@@ -89,7 +94,7 @@ def train():
         if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
             torch.backends.cuda.matmul.allow_tf32 = Config.ENABLE_TF32
 
-    log_to_file(Config, f"Using device: {device}")
+    log_to_file(Config, f"Using device: {device} (local_rank={local_rank}, use_ddp={use_ddp})")
     teacher = build_teacher(Config)
     loaded_teacher, teacher_message = initialize_teacher_weights(Config, teacher, device)
     log_to_file(Config, teacher_message)
@@ -113,7 +118,11 @@ def train():
 
     train_dataset = YOLODataset(Config, split="train")
     train_sampler = None
-    if Config.USE_CLASS_BALANCED_SAMPLER:
+    if use_ddp:
+        from torch.utils.data.distributed import DistributedSampler
+        train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=True)
+        log_to_file(Config, f"Using DistributedSampler for DDP training")
+    elif Config.USE_CLASS_BALANCED_SAMPLER:
         train_sampler, sampler_summary = build_class_balanced_train_sampler(Config, train_dataset)
         log_to_file(Config, f"Class balanced sampler: {sampler_summary}")
     train_loader = DataLoader(
@@ -159,6 +168,8 @@ def train():
     init_epoch_log_table(Config)
 
     for epoch in range(Config.EPOCHS):
+        if use_ddp and train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         model.train()
         train_component_sums = {"total": 0.0, "box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
         stage_settings = Config.get_stage_settings(epoch)
@@ -224,24 +235,25 @@ def train():
         if is_best:
             if val_metrics is None:
                 best_loss = avg_train["total"]
-            model_core = unwrap_module(model)
-            torch.save(model_core.detector.state_dict(), os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_best.pth"))
-            if Config.SAVE_TEACHER_WEIGHTS:
-                torch.save(model_core.teacher.state_dict(), teacher_best_path)
-                torch.save(
-                    {
-                        "teacher_state_dict": model_core.teacher.state_dict(),
-                        "detector_state_dict": model_core.detector.state_dict(),
-                        "epoch": epoch,
-                        "loss": avg_train["total"],
-                        "val_map50": best_map50 if val_metrics is not None else None,
-                        "teacher_arch": Config.TEACHER_ARCH,
-                        "head_type": "yolov8_style_head_yolov3_anchor_loss",
-                    },
-                    joint_best_path,
-                )
+            if is_main:
+                model_core = unwrap_module(model)
+                torch.save(model_core.detector.state_dict(), os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_best.pth"))
+                if Config.SAVE_TEACHER_WEIGHTS:
+                    torch.save(model_core.teacher.state_dict(), teacher_best_path)
+                    torch.save(
+                        {
+                            "teacher_state_dict": model_core.teacher.state_dict(),
+                            "detector_state_dict": model_core.detector.state_dict(),
+                            "epoch": epoch,
+                            "loss": avg_train["total"],
+                            "val_map50": best_map50 if val_metrics is not None else None,
+                            "teacher_arch": Config.TEACHER_ARCH,
+                            "head_type": "yolov8_style_head_yolov3_anchor_loss",
+                        },
+                        joint_best_path,
+                    )
 
-        if epoch % Config.VIS_INTERVAL == 0:
+        if is_main and epoch % Config.VIS_INTERVAL == 0:
             save_detection_visualization_anchor_v8(Config, epoch, model, vis_dataset, vis_dir, prefix=vis_prefix, device=device)
 
         log_epoch_table_row(
@@ -259,23 +271,26 @@ def train():
         )
         save_training_curves(history, Config.TEACHER_OUTPUT_DIR)
 
-    model_core = unwrap_module(model)
-    model_save_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_final.pth")
-    torch.save(model_core.detector.state_dict(), model_save_path)
-    if Config.SAVE_TEACHER_WEIGHTS:
-        torch.save(model_core.teacher.state_dict(), teacher_final_path)
-        torch.save(
-            {
-                "teacher_state_dict": model_core.teacher.state_dict(),
-                "detector_state_dict": model_core.detector.state_dict(),
-                "epoch": Config.EPOCHS - 1,
-                "loss": history["train_total"][-1] if history["train_total"] else None,
-                "val_map50": best_map50 if best_map50 >= 0 else None,
-                "teacher_arch": Config.TEACHER_ARCH,
-                "head_type": "yolov8_style_head_yolov3_anchor_loss",
-            },
-            joint_final_path,
-        )
+    if is_main:
+        model_core = unwrap_module(model)
+        model_save_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_final.pth")
+        torch.save(model_core.detector.state_dict(), model_save_path)
+        if Config.SAVE_TEACHER_WEIGHTS:
+            torch.save(model_core.teacher.state_dict(), teacher_final_path)
+            torch.save(
+                {
+                    "teacher_state_dict": model_core.teacher.state_dict(),
+                    "detector_state_dict": model_core.detector.state_dict(),
+                    "epoch": Config.EPOCHS - 1,
+                    "loss": history["train_total"][-1] if history["train_total"] else None,
+                    "val_map50": best_map50 if best_map50 >= 0 else None,
+                    "teacher_arch": Config.TEACHER_ARCH,
+                    "head_type": "yolov8_style_head_yolov3_anchor_loss",
+                },
+                joint_final_path,
+            )
+    else:
+        model_save_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_final.pth")
 
     append_plain_log(Config, Config.get_epoch_table_separator())
     log_to_file(Config, "=" * 60)
@@ -285,6 +300,27 @@ def train():
     log_to_file(Config, f"Teacher output directory: {Config.TEACHER_OUTPUT_DIR}")
     log_to_file(Config, "=" * 60)
 
+    if use_ddp:
+        cleanup_distributed()
+
+
+def _worker(local_rank, world_size):
+    """Worker function for mp.spawn."""
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = "29500"
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    os.environ["RANK"] = str(local_rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    try:
+        train()
+    finally:
+        cleanup_distributed()
+
 
 if __name__ == "__main__":
-    train()
+    gpu_ids = Config.GPU_IDS
+    if len(gpu_ids) > 1:
+        import torch.multiprocessing as mp
+        mp.spawn(_worker, nprocs=len(gpu_ids), args=(len(gpu_ids),))
+    else:
+        train()

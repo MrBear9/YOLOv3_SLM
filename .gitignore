@@ -1,3 +1,5 @@
+.gitignore
+
 # User-specific stuff:
 .idea
 .idea/*
@@ -82,3 +84,5 @@ models/SLM/*
 !models/SLM/*.py
 
 temple/*
+
+tools/

@@ -6,6 +6,13 @@ import numpy as np
 import torch
 
 
+def _unwrap(model):
+    """Unwrap model from DataParallel or DistributedDataParallel."""
+    if isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)):
+        return model.module
+    return model
+
+
 def extract_state_dict(checkpoint):
     if not isinstance(checkpoint, dict):
         return checkpoint
@@ -48,7 +55,7 @@ def initialize_teacher_weights(config, teacher, device):
 
 
 def build_optimizer_from_model(config, model, teacher_lr=None, detector_lr=None):
-    model_core = model.module if isinstance(model, torch.nn.DataParallel) else model
+    model_core = _unwrap(model)
     teacher_lr = config.LEARNING_RATE if teacher_lr is None else teacher_lr
     detector_lr = config.LEARNING_RATE if detector_lr is None else detector_lr
     param_groups = []
@@ -64,7 +71,7 @@ def build_optimizer_from_model(config, model, teacher_lr=None, detector_lr=None)
 
 
 def set_detector_trainable(model, trainable):
-    model_core = model.module if isinstance(model, torch.nn.DataParallel) else model
+    model_core = _unwrap(model)
     for p in model_core.detector.parameters():
         p.requires_grad = trainable
 
