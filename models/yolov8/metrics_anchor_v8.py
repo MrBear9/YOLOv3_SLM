@@ -34,8 +34,9 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
     gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
     component_totals = {key: 0.0 for key in ("total", "box", "obj", "noobj", "cls")}
     total_tp = total_fp = total_fn = 0
+    is_main = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Validation", leave=False):
+        for batch in tqdm(dataloader, desc="Validation", leave=False, disable=not is_main):
             batch_images, batch_targets = prepare_batch(config, batch, device)
             teacher_features, predictions = model(batch_images, return_feature=True)
             loss, loss_stats = criterion(predictions, batch_targets)

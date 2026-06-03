@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import torch
@@ -13,10 +13,13 @@ def init_distributed_mode(config):
         return 0, False
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
+    # 增加 NCCL 超时到 30 分钟，避免长 epoch 后误超时
+    timeout_ms = int(os.environ.get("NCCL_TIMEOUT_MS", 30 * 60 * 1000))
     torch.distributed.init_process_group(
         backend="nccl",
         init_method="env://",
         device_id=torch.device(f"cuda:{local_rank}"),
+        timeout=timedelta(milliseconds=timeout_ms),
     )
     config.GPU_IDS = [local_rank]
     config.DEVICE = f"cuda:{local_rank}"
@@ -84,18 +87,30 @@ def prepare_conv_tensor(config, tensor):
     return tensor.contiguous() if tensor.is_floating_point() else tensor
 
 
+def _make_params_contiguous(module):
+    """确保所有参数在内存中连续排列，避免 DDP 的 Grad strides 警告。"""
+    for name, param in module.named_parameters():
+        if not param.is_contiguous():
+            param.data = param.data.contiguous()
+    for name, buf in module.named_buffers():
+        if buf.is_floating_point() and not buf.is_contiguous():
+            buf.data = buf.data.contiguous()
+
+
 def wrap_data_parallel(config, module, module_name="module"):
     device = get_runtime_device(config)
     module = module.to(device)
     if should_use_channels_last(config):
         module = module.to(memory_format=torch.channels_last)
     if torch.distributed.is_initialized():
+        _make_params_contiguous(module)
         module = nn.parallel.DistributedDataParallel(
             module, device_ids=[device.index], output_device=device.index,
             find_unused_parameters=False,
-            gradient_as_bucket_view=True,  # 解决 Grad strides 警告
+            gradient_as_bucket_view=True,
         )
-        log_to_file(config, f"{module_name} wrapped with DDP on GPU {device.index}")
+        world_size = torch.distributed.get_world_size()
+        log_to_file(config, f"{module_name} wrapped with DDP on GPU {device.index} (world_size={world_size})")
     elif len(config.GPU_IDS) > 1:
         module = nn.DataParallel(module, device_ids=config.GPU_IDS, output_device=config.GPU_IDS[0])
         log_to_file(config, f"{module_name} wrapped with DataParallel on GPUs: {config.GPU_IDS}")

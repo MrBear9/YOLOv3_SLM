@@ -94,7 +94,11 @@ def train():
         if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
             torch.backends.cuda.matmul.allow_tf32 = Config.ENABLE_TF32
 
-    log_to_file(Config, f"Using device: {device} (local_rank={local_rank}, use_ddp={use_ddp})")
+    if use_ddp:
+        world_size = torch.distributed.get_world_size()
+        log_to_file(Config, f"Using device: {device} (local_rank={local_rank}, world_size={world_size}, use_ddp={use_ddp})")
+    else:
+        log_to_file(Config, f"Using device: {device} (local_rank={local_rank}, use_ddp={use_ddp})")
     teacher = build_teacher(Config)
     loaded_teacher, teacher_message = initialize_teacher_weights(Config, teacher, device)
     log_to_file(Config, teacher_message)
@@ -109,7 +113,7 @@ def train():
     detector = build_detector_head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
     model = wrap_data_parallel(Config, TeacherWithDetector(Config, teacher=teacher, detector=detector), module_name="TeacherWithDetector")
     set_detector_trainable(model, True)
-
+ 
     distill_loss_fn = None
     enable_distill = bool(getattr(Config, "ENABLE_FEATURE_DISTILL", False))
     if enable_distill and is_v3:
@@ -186,7 +190,7 @@ def train():
             scheduler = CosineAnnealingLR(optimizer, T_max=phase_epochs, eta_min=Config.ETA_MIN)
             log_to_file(Config, f"Epoch {epoch}: phase={phase}, teacher_lr={stage_settings['teacher_lr']:.6g}, detector_lr={stage_settings['detector_lr']:.6g}, cosine_T_max={phase_epochs}")
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True):
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True, disable=not is_main):
             batch_images, batch_targets = prepare_batch(Config, batch, device)
             optimizer.zero_grad()
             if enable_distill and distill_loss_fn is not None:
@@ -224,6 +228,10 @@ def train():
         else:
             for key in ("val_total", "precision", "recall", "f1", "map50"):
                 history[key].append(np.nan)
+
+        # 验证后同步所有 rank，避免一个 rank 先进入下一个 epoch 导致 NCCL 超时
+        if use_ddp:
+            torch.distributed.barrier()
 
         is_best = False
         if val_metrics is not None and val_metrics["map50"] > best_map50:
@@ -269,7 +277,12 @@ def train():
             lr=current_lr,
             best_status=Config.EPOCH_TABLE_BEST_MARK if is_best else "",
         )
-        save_training_curves(history, Config.TEACHER_OUTPUT_DIR)
+        if is_main:
+            save_training_curves(history, Config.TEACHER_OUTPUT_DIR)
+
+        # 每个 epoch 结束后同步所有 rank
+        if use_ddp:
+            torch.distributed.barrier()
 
     if is_main:
         model_core = unwrap_module(model)
