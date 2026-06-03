@@ -179,6 +179,11 @@ class ConvTeacher(nn.Module):
             nn.Conv2d(c1, 1, 1),
         )
 
+        # Learnable output affine — lets the teacher adapt its output
+        # distribution to the detector's needs (feature stabilization)
+        self.out_scale = nn.Parameter(torch.ones(1))
+        self.out_bias = nn.Parameter(torch.zeros(1))
+
     def forward(self, x, return_aux=False):
         if x.shape[1] > 1:
             x = x.mean(dim=1, keepdim=True)
@@ -199,6 +204,7 @@ class ConvTeacher(nn.Module):
 
         f_refined = self.refine(f_fused)                               # [B, c1, H/8, W/8]
         feat_1ch = torch.sigmoid(self.proj_out(f_refined))             # [B, 1, H/8, W/8]
+        feat_1ch = feat_1ch * self.out_scale + self.out_bias           # learnable affine
         det_feature = _interpolate_preserve_layout(feat_1ch, size=gray.shape[-2:], mode="bilinear", align_corners=False)
 
         if return_aux:
@@ -278,6 +284,10 @@ class ConvTeacherV2(nn.Module):
             nn.Conv2d(c1, 1, 1),
         )
 
+        # Learnable output affine (feature stabilization)
+        self.out_scale = nn.Parameter(torch.ones(1))
+        self.out_bias = nn.Parameter(torch.zeros(1))
+
     def forward(self, x, return_aux=False):
         if x.shape[1] > 1:
             x = x.mean(dim=1, keepdim=True)
@@ -302,6 +312,7 @@ class ConvTeacherV2(nn.Module):
         # Refine at stride-8, then project to 1ch
         f_refined = self.refine(f_fused)                               # [B, c1, H/8, W/8]
         feat_1ch = torch.sigmoid(self.proj_out(f_refined))             # [B,  1, H/8, W/8]
+        feat_1ch = feat_1ch * self.out_scale + self.out_bias           # learnable affine
 
         # Upsample to output resolution
         det_feature = _interpolate_preserve_layout(feat_1ch, size=gray.shape[-2:], mode="bilinear", align_corners=False)

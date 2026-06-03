@@ -123,8 +123,6 @@ class ConfigSLM:
     # =========================================================================
     ANCHOR_MATCH_RATIO_THRESH = 3.5
     ASSIGN_NEIGHBOR_CELLS = True
-    POSITIVE_ANCHOR_IOU = 0.35
-    MAX_POSITIVE_ANCHORS = 1
     NOOBJ_IGNORE_IOU = 0.68
 
     # =========================================================================

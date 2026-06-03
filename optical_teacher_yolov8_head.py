@@ -1,4 +1,5 @@
 import os
+import warnings
 
 import numpy as np
 import torch
@@ -34,6 +35,9 @@ from models.yolov8.head_v8 import TeacherWithDetector, build_detector_head
 from models.yolov8.loss_anchor_v8 import YOLOv3AnchorLossForV8Head
 from models.yolov8.metrics_anchor_v8 import evaluate_model_anchor_v8
 from models.yolov8.visualization_anchor_v8 import save_detection_visualization_anchor_v8
+
+# 过滤 DDP 梯度 stride 警告（DDP 内部桶布局与梯度布局的已知差异，不影响正确性和性能）
+warnings.filterwarnings("ignore", message="Grad strides do not match bucket view strides")
 
 
 def bootstrap_runtime():
@@ -193,18 +197,28 @@ def train():
         for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True, disable=not is_main):
             batch_images, batch_targets = prepare_batch(Config, batch, device)
             optimizer.zero_grad()
-            if enable_distill and distill_loss_fn is not None:
+            use_distill = enable_distill and distill_loss_fn is not None
+            if use_distill:
                 teacher_features, predictions, teacher_aux, det_features = model(
                     batch_images, return_feature=True, return_teacher_aux=True, return_det_features=True
                 )
+            elif is_v3:
+                teacher_features, predictions, teacher_aux = model(
+                    batch_images, return_feature=True, return_teacher_aux=True
+                )
             else:
                 teacher_features, predictions = model(batch_images, return_feature=True)
+                teacher_aux = None
 
             loss, loss_stats = criterion(predictions, batch_targets)
 
-            if enable_distill and distill_loss_fn is not None:
+            if use_distill:
                 distill_loss, _ = distill_loss_fn(teacher_aux, det_features)
                 loss = loss + distill_loss * Config.FEATURE_DISTILL_WEIGHT
+
+            if is_v3 and teacher_aux is not None:
+                gate_sparsity = teacher_aux["gate"].mean()
+                loss = loss + 0.005 * gate_sparsity
 
             loss.backward()
             optimizer.step()

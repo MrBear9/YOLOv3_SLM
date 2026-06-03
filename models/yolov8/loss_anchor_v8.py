@@ -50,22 +50,36 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
         self.anchors = torch.tensor(config.ANCHORS, dtype=torch.float32)
         self.num_classes = config.NUM_CLASSES
         self.strides = config.STRIDES
-        self.box_weight = config.BOX_WEIGHT_BASE
-        self.obj_weight = config.OBJ_WEIGHT_BASE
         self.noobj_weight = config.NOOBJ_WEIGHT_BASE
-        self.cls_weight = config.CLS_WEIGHT_BASE
         self.focal_alpha = config.FOCAL_ALPHA
         self.focal_gamma = config.FOCAL_GAMMA
         self.focal_loss = SigmoidFocalLoss(alpha=self.focal_alpha, gamma=self.focal_gamma, reduction="mean")
         self.size_weights = {"small": 1.0, "medium": 1.0, "large": 1.0}
         self.last_components = {"total": 0.0, "box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
 
+        # Uncertainty-weighted multi-task loss (learnable task precisions)
+        # Initialised to match static weights so training starts identically.
+        if getattr(config, "LOSS_UNCERTAINTY_WEIGHTING", True):
+            import math
+            bw = float(getattr(config, "BOX_WEIGHT_BASE", 5.0))
+            ow = float(getattr(config, "OBJ_WEIGHT_BASE", 2.0))
+            cw = float(getattr(config, "CLS_WEIGHT_BASE", 1.8))
+            self.log_var_box = nn.Parameter(torch.tensor(-math.log(max(bw, 1e-3))))
+            self.log_var_obj = nn.Parameter(torch.tensor(-math.log(max(ow, 1e-3))))
+            self.log_var_cls = nn.Parameter(torch.tensor(-math.log(max(cw, 1e-3))))
+        else:
+            self.box_weight = float(getattr(config, "BOX_WEIGHT_BASE", 5.0))
+            self.obj_weight = float(getattr(config, "OBJ_WEIGHT_BASE", 2.0))
+            self.cls_weight = float(getattr(config, "CLS_WEIGHT_BASE", 1.8))
+            self.log_var_box = self.log_var_obj = self.log_var_cls = None
+
     def set_epoch_weights(self, epoch):
         weights = self.config.get_dynamic_weights(epoch)
-        self.box_weight = weights["box_weight"]
-        self.obj_weight = weights["obj_weight"]
         self.noobj_weight = weights["noobj_weight"]
-        self.cls_weight = weights["cls_weight"]
+        if self.log_var_box is None:
+            self.box_weight = weights["box_weight"]
+            self.obj_weight = weights["obj_weight"]
+            self.cls_weight = weights["cls_weight"]
         self.size_weights = weights.get("size_weights", self.size_weights)
         return weights["phase"]
 
@@ -230,7 +244,15 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
             else:
                 noobj_loss = torch.zeros((), device=device)
 
-            scale_loss = self.box_weight * box_loss + self.obj_weight * obj_loss + self.noobj_weight * noobj_loss + self.cls_weight * cls_loss
+            if self.log_var_box is not None:
+                prec_box = torch.exp(-self.log_var_box)
+                prec_obj = torch.exp(-self.log_var_obj)
+                prec_cls = torch.exp(-self.log_var_cls)
+                scale_loss = (prec_box * box_loss + prec_obj * obj_loss + prec_cls * cls_loss
+                              + self.noobj_weight * noobj_loss
+                              + self.log_var_box + self.log_var_obj + self.log_var_cls)
+            else:
+                scale_loss = self.box_weight * box_loss + self.obj_weight * obj_loss + self.noobj_weight * noobj_loss + self.cls_weight * cls_loss
             if torch.isfinite(scale_loss):
                 total_loss = total_loss + scale_loss
                 component_sums["box"] = component_sums["box"] + box_loss.detach()

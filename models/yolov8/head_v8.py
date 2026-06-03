@@ -146,7 +146,7 @@ class YOLOv8AnchorHead(nn.Module):
             return x.contiguous(memory_format=torch.channels_last)
         return x.contiguous() if x.is_floating_point() else x
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         x = self.stem(x)
         x320 = self.c2f1(self.down1(x))
         x160 = self.c2f2(self.down2(x320))
@@ -159,7 +159,10 @@ class YOLOv8AnchorHead(nn.Module):
         p3 = self.fuse_p3(torch.cat([p4_up, x80], dim=1))
         p4 = self.pan_p4(torch.cat([self.down_p3(p3), p4], dim=1))
         p5 = self.pan_p5(torch.cat([self.down_p4(p4), p5], dim=1))
-        return self.head_p3(p3), self.head_p4(p4), self.head_p5(p5)
+        preds = (self.head_p3(p3), self.head_p4(p4), self.head_p5(p5))
+        if return_features:
+            return preds, {"s8": x80, "s16": x40, "s32": p5}
+        return preds
 
 
 class YOLOLightHead(nn.Module):
@@ -171,7 +174,9 @@ class YOLOLightHead(nn.Module):
       - No multi-branch detection heads → 1×1 Conv direct output
       - ECA attention for lightweight channel reweighting
 
-    Output format is identical to YOLOv8AnchorHead (anchor-based).
+    Pure conv + decoupled heads — no residual blocks, no skip connections
+    in the detection head.  Residual is only needed for deep networks.
+    A shallow detection head benefits from clean gradient paths.
     """
 
     def __init__(self, config, in_channels=1, out_channels=None, base_ch=None):
@@ -181,46 +186,66 @@ class YOLOLightHead(nn.Module):
         c = base_ch if base_ch is not None else int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
         c2, c4, c8 = c * 2, c * 4, c * 8
 
-        # Stem: 1 → c → c2 → c4 → c8  (down to stride 8)
+        # Stem: pure conv chain 1 → c → c2 → c4 → c8  (no residual)
         self.stem = nn.Sequential(
             ConvBNAct(in_channels, c),
-            ResBlock(c),
             ConvBNAct(c, c2, 3, 2),
-            ResBlock(c2),
             ConvBNAct(c2, c4, 3, 2),
-            ResBlock(c4),
             ConvBNAct(c4, c8, 3, 2),
-            ResBlock(c8),
         )
 
-        # P3 / P4 / P5 paths
-        self.p4_path = nn.Sequential(ConvBNAct(c8, c8, 3, 2), ResBlock(c8))
-        self.p5_path = nn.Sequential(ConvBNAct(c8, c8, 3, 2), ResBlock(c8), SPPF(c8, c8))
+        # P4 / P5: pure stride-2 conv (no residual)
+        self.p4_path = ConvBNAct(c8, c8, 3, 2)
+        self.p5_path = nn.Sequential(ConvBNAct(c8, c8, 3, 2), SPPF(c8, c8))
 
-        # Top-down FPN with ECA
-        self.fuse_p4 = nn.Sequential(ConvBNAct(c8 * 2, c4), ResBlock(c4), ECABlock(c4))
-        self.fuse_p3 = nn.Sequential(ConvBNAct(c4 + c8, c2), ResBlock(c2), ECABlock(c2))
+        # Top-down FPN: simple 1×1 fusion conv (no residual, no ECA)
+        self.fuse_p4 = ConvBNAct(c8 * 2, c4, 1)
+        self.fuse_p3 = ConvBNAct(c4 + c8, c2, 1)
 
-        # 1×1 Conv detection heads
-        self.head_p3 = nn.Conv2d(c2, out_channels, 1)
-        self.head_p4 = nn.Conv2d(c4, out_channels, 1)
-        self.head_p5 = nn.Conv2d(c8, out_channels, 1)
+        # Decoupled detection heads: [shared 3×3 → 3× branch 1×1] per scale
+        hc = c2
+        self.head_p3_shared = ConvBNAct(c2, hc, 3)
+        self.head_p3_box = nn.Conv2d(hc, 3 * 4, 1)
+        self.head_p3_obj = nn.Conv2d(hc, 3 * 1, 1)
+        self.head_p3_cls = nn.Conv2d(hc, out_channels - 3 * 5, 1)
+
+        self.head_p4_shared = ConvBNAct(c4, hc, 3)
+        self.head_p4_box = nn.Conv2d(hc, 3 * 4, 1)
+        self.head_p4_obj = nn.Conv2d(hc, 3 * 1, 1)
+        self.head_p4_cls = nn.Conv2d(hc, out_channels - 3 * 5, 1)
+
+        self.head_p5_shared = ConvBNAct(c8, hc, 3)
+        self.head_p5_box = nn.Conv2d(hc, 3 * 4, 1)
+        self.head_p5_obj = nn.Conv2d(hc, 3 * 1, 1)
+        self.head_p5_cls = nn.Conv2d(hc, out_channels - 3 * 5, 1)
+
+    @staticmethod
+    def _decode_head(shared, box, obj, cls_conv, feat):
+        b, _, h, w = feat.shape
+        f = shared(feat)
+        box_out = box(f).contiguous().view(b, 3, 4, h, w)
+        obj_out = obj(f).contiguous().view(b, 3, 1, h, w)
+        cls_out = cls_conv(f).contiguous().view(b, 3, -1, h, w)
+        return torch.cat([box_out, obj_out, cls_out], dim=2).contiguous().view(b, -1, h, w)
 
     def forward(self, x, return_features=False):
-        p3_feat = self.stem(x)                                           # [B, c8, 80, 80]
-        p4_feat = self.p4_path(p3_feat)                                  # [B, c8, 40, 40]
-        p5_feat = self.p5_path(p4_feat)                                  # [B, c8, 20, 20]
+        p3_feat = self.stem(x)
+        p4_feat = self.p4_path(p3_feat)
+        p5_feat = self.p5_path(p4_feat)
 
         p5_up = F.interpolate(p5_feat, size=p4_feat.shape[-2:], mode="nearest")
-        p4_fused = self.fuse_p4(torch.cat([p5_up, p4_feat], dim=1))      # [B, c4, 40, 40]
+        p4_fused = self.fuse_p4(torch.cat([p5_up, p4_feat], dim=1))
 
         p4_up = F.interpolate(p4_fused, size=p3_feat.shape[-2:], mode="nearest")
-        p3_fused = self.fuse_p3(torch.cat([p4_up, p3_feat], dim=1))      # [B, c2, 80, 80]
+        p3_fused = self.fuse_p3(torch.cat([p4_up, p3_feat], dim=1))
 
-        preds = (self.head_p3(p3_fused), self.head_p4(p4_fused), self.head_p5(p5_feat))
+        pred_p3 = self._decode_head(self.head_p3_shared, self.head_p3_box, self.head_p3_obj, self.head_p3_cls, p3_fused)
+        pred_p4 = self._decode_head(self.head_p4_shared, self.head_p4_box, self.head_p4_obj, self.head_p4_cls, p4_fused)
+        pred_p5 = self._decode_head(self.head_p5_shared, self.head_p5_box, self.head_p5_obj, self.head_p5_cls, p5_feat)
+
         if return_features:
-            return preds, {"s8": p3_feat, "s16": p4_feat, "s32": p5_feat}
-        return preds
+            return (pred_p3, pred_p4, pred_p5), {"s8": p3_feat, "s16": p4_feat, "s32": p5_feat}
+        return (pred_p3, pred_p4, pred_p5)
 
 
 def build_detector_head(config, in_channels=1, out_channels=None):

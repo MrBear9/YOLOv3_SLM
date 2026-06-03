@@ -135,8 +135,6 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     ANCHOR_MATCH_RATIO_THRESH = 3.5   # ratio-based (max w/h ratio)
     ASSIGN_NEIGHBOR_CELLS = True       # extra grid cells near boundaries
-    POSITIVE_ANCHOR_IOU = 0.35         # (legacy IoU threshold)
-    MAX_POSITIVE_ANCHORS = 2           # (legacy max per GT)
     NOOBJ_IGNORE_IOU = 0.68
 
     # =========================================================================
@@ -178,7 +176,7 @@ class ConfigYOLOv8Anchor:
     # Feature distillation (teacher → detector)
     # =========================================================================
     ENABLE_FEATURE_DISTILL = True
-    FEATURE_DISTILL_WEIGHT = 0.12
+    FEATURE_DISTILL_WEIGHT = 0.18
 
     # =========================================================================
     # Optimizer & LR schedule
