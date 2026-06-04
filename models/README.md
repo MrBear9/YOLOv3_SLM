@@ -72,7 +72,8 @@ To initialize with a tiled double-helix PSF-like phase pattern:
 ```powershell
 $env:OPTICAL_SLM_INIT_MODE="double_helix_psf"
 $env:OPTICAL_SLM_DH_PSF_PERIODS="2"
-$env:OPTICAL_SLM_DH_PSF_SEPARATION="0.55"
+$env:OPTICAL_SLM_DH_PSF_RADIAL_SCALE="12"
+$env:OPTICAL_SLM_DH_PSF_SPIRAL_OFFSET="0.22"
 python .\optical_slm_yolov8_head.py
 ```
 

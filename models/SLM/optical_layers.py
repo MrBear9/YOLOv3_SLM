@@ -48,10 +48,11 @@ class SLMLayer(nn.Module):
         if init_mode in {"double_helix", "double_helix_psf", "dh_psf", "double_helix_checkpoint", "dh_psf_checkpoint"}:
             height, width, yy, xx = self._phase_grid(resolution)
             periods = max(float(getattr(self.config, "SLM_DH_PSF_PERIODS", 2.0)), 1.0)
-            separation = float(getattr(self.config, "SLM_DH_PSF_SEPARATION", 0.55))
             charge = float(getattr(self.config, "SLM_DH_PSF_CHARGE", 1.0))
             radial_scale = float(getattr(self.config, "SLM_DH_PSF_RADIAL_SCALE", 0.20))
             saddle_scale = float(getattr(self.config, "SLM_DH_PSF_SADDLE_SCALE", 0.08))
+            spiral_offset = float(getattr(self.config, "SLM_DH_PSF_SPIRAL_OFFSET", 0.0))
+            aperture_radius = float(getattr(self.config, "SLM_DH_PSF_APERTURE_RADIUS", 2.0))
             if self.layer_index == 1:
                 rotation = float(getattr(self.config, "SLM_DH_PSF_ROTATION_1", 0.0))
                 handedness = float(getattr(self.config, "SLM_DH_PSF_HANDEDNESS_1", 1.0))
@@ -66,20 +67,24 @@ class SLMLayer(nn.Module):
             xr = cell_x * cos_r - cell_y * sin_r
             yr = cell_x * sin_r + cell_y * cos_r
 
-            half_sep = 0.5 * separation
-            theta_left = torch.atan2(yr, xr + half_sep)
-            theta_right = torch.atan2(yr, xr - half_sep)
-            r_left2 = (xr + half_sep).square() + yr.square()
-            r_right2 = (xr - half_sep).square() + yr.square()
+            shifted_x = xr - spiral_offset
+            shifted_y = yr
+            theta = torch.atan2(shifted_y, shifted_x)
+            radius2 = shifted_x.square() + shifted_y.square()
+            radius = torch.sqrt(radius2 + 1e-8)
 
-            # A DH-PSF-like seed: paired counter-rotating spiral centers plus a weak
-            # radial/saddle term to keep the tiled cells from starting as flat vortices.
+            # DH-PSF-like seed: a single spiral phase term plus dense quadratic
+            # radial rings. This produces the visible spiral-ring phase cell used
+            # as an initialization prior; periods > 1 tiles that cell into an array.
             phase = (
-                handedness * charge * theta_left
-                - handedness * charge * theta_right
-                + radial_scale * np.pi * (r_left2 + r_right2)
+                handedness * charge * theta
+                + radial_scale * np.pi * radius2
                 + saddle_scale * np.pi * (xr.square() - yr.square())
             )
+            aperture = radius <= aperture_radius
+            if aperture.any():
+                outside_fill = phase[aperture].mean()
+                phase = torch.where(aperture, phase, outside_fill + 0.15 * np.pi * (xr.square() + yr.square()))
             return self._wrap_with_noise(phase, height, width)
         return torch.rand(1, 1, *resolution) * 2 * np.pi
 
@@ -158,3 +163,51 @@ class OpticalStudentWithDetector(nn.Module):
         if return_feature:
             return feature, preds
         return preds
+
+
+if __name__ == "__main__":
+    from pathlib import Path
+    import sys
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    project_root = Path(__file__).resolve().parents[2]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+    from models.SLM.config_slm import ConfigSLM as Config
+
+    output_dir = Path("output/figures")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    original_values = {
+        "RESOLUTION": Config.RESOLUTION,
+        "IMG_SIZE": Config.IMG_SIZE,
+        "SLM_INIT_MODE": Config.SLM_INIT_MODE,
+        "SLM_INIT_NOISE_STD": Config.SLM_INIT_NOISE_STD,
+        "SLM_DH_PSF_PERIODS": Config.SLM_DH_PSF_PERIODS,
+    }
+
+    Config.RESOLUTION = (512, 512)
+    Config.IMG_SIZE = 512
+    Config.SLM_INIT_MODE = "dh_psf"
+    Config.SLM_INIT_NOISE_STD = 0.0
+
+    fig, axes = plt.subplots(2, 2, figsize=(8.2, 8.0))
+    for row, periods in enumerate((1.0, 2.0)):
+        Config.SLM_DH_PSF_PERIODS = periods
+        student = OpticalStudent(Config)
+        for col, layer_name in enumerate(("slm1", "slm2")):
+            phase = getattr(student, layer_name).wrapped_phase().detach().squeeze().cpu().numpy()
+            ax = axes[row, col]
+            im = ax.imshow(phase, cmap="turbo", vmin=0.0, vmax=2 * np.pi)
+            ax.set_title(f"{layer_name} dh_psf periods={periods:g}")
+            ax.axis("off")
+    fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.046, pad=0.04, label="phase [0, 2pi]")
+    fig.savefig(output_dir / "slm_dh_psf_initial_phase_test_2.png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+    for key, value in original_values.items():
+        setattr(Config, key, value)
+    print(f"Saved DH-PSF initialization preview to: {output_dir / 'slm_dh_psf_initial_phase_test_2.png'}")

@@ -11,17 +11,17 @@ class ConfigSLM:
     # =========================================================================
     # Common — paths, device, I/O
     # =========================================================================
-    YAML_PATH = r"data\military\data.yaml"
+    YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    OUTPUT_DIR = r"output\OpticalSLM_YOLOv8Head_student"
+    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_student"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output\OpticalTeacherYOLO_YOLOv8Head\teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/OpticalTeacherYOLO_YOLOv8Head/teacher_detector_best.pth"
     DETECTOR_INIT_MODE = "checkpoint"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -63,16 +63,19 @@ class ConfigSLM:
     # Options: random, vortex, dh_psf/double_helix_psf, checkpoint,
     # vortex_checkpoint, dh_psf_checkpoint/double_helix_checkpoint.
     SLM_INIT_MODE = "dh_psf"
-    SLM_INIT_CHECKPOINT = r"output\OpticalSLM_YOLOv8Head_student\optical_student_best.pth"
+    SLM_INIT_CHECKPOINT = r"output/OpticalSLM_YOLOv8Head_student/optical_student_best.pth"
     SLM_VORTEX_CHARGE_1 = 1.0
     SLM_VORTEX_CHARGE_2 = -1.0
     SLM_VORTEX_RADIAL_SCALE_1 = 0.35
     SLM_VORTEX_RADIAL_SCALE_2 = -0.25
-    SLM_DH_PSF_PERIODS = 1.0  # 1.0 ->  整张图一个双螺旋相位 2.0  ->  2 x 2 阵列 3.0  ->  3 x 3 阵列
-    SLM_DH_PSF_SEPARATION = 0.55
-    SLM_DH_PSF_CHARGE = 1.0
-    SLM_DH_PSF_RADIAL_SCALE = 0.20
+    # Number of tiled DH-PSF phase cells: 1.0 -> single cell, 2.0 -> 2 x 2 array, 3.0 -> 3 x 3 array.
+    SLM_DH_PSF_PERIODS = 1.0
+    # Spiral topological charge inside each DH-PSF cell; this is not the array count.
+    SLM_DH_PSF_CHARGE = 2.0
+    SLM_DH_PSF_RADIAL_SCALE = 12.0
     SLM_DH_PSF_SADDLE_SCALE = 0.08
+    SLM_DH_PSF_SPIRAL_OFFSET = 0.0
+    SLM_DH_PSF_APERTURE_RADIUS = 2.0
     SLM_DH_PSF_ROTATION_1 = 0.0
     SLM_DH_PSF_ROTATION_2 = np.pi / 2
     SLM_DH_PSF_HANDEDNESS_1 = 1.0
@@ -82,7 +85,7 @@ class ConfigSLM:
     # =========================================================================
     # TEACHER_ARCH  (must match teacher-training checkpoint)
     # =========================================================================
-    TEACHER_ARCH = "convteacher_v2"
+    TEACHER_ARCH = "convteacher"
 
     # -------- TEACHER_ARCH = "convteacher_v2" --------
     TEACHER_V2_BASE_CHANNELS = 24
@@ -113,7 +116,7 @@ class ConfigSLM:
         [[103, 169], [203, 107], [351, 177]],
         [[241, 354], [534, 299], [568, 528]],
     ]
-    ANCHOR_CONFIG_PATH = r"output\anchor_clustering\yolo_anchors.yaml"
+    ANCHOR_CONFIG_PATH = r"output/anchor_clustering/yolo_anchors.yaml"
     USE_EXTERNAL_ANCHORS = True
     ANCHORS = None
     ANCHOR_SOURCE = "default"
@@ -275,10 +278,11 @@ class ConfigSLM:
             "OPTICAL_SLM_INIT_MODE": ("SLM_INIT_MODE", str),
             "OPTICAL_SLM_INIT_CHECKPOINT": ("SLM_INIT_CHECKPOINT", str),
             "OPTICAL_SLM_DH_PSF_PERIODS": ("SLM_DH_PSF_PERIODS", float),
-            "OPTICAL_SLM_DH_PSF_SEPARATION": ("SLM_DH_PSF_SEPARATION", float),
             "OPTICAL_SLM_DH_PSF_CHARGE": ("SLM_DH_PSF_CHARGE", float),
             "OPTICAL_SLM_DH_PSF_RADIAL_SCALE": ("SLM_DH_PSF_RADIAL_SCALE", float),
             "OPTICAL_SLM_DH_PSF_SADDLE_SCALE": ("SLM_DH_PSF_SADDLE_SCALE", float),
+            "OPTICAL_SLM_DH_PSF_SPIRAL_OFFSET": ("SLM_DH_PSF_SPIRAL_OFFSET", float),
+            "OPTICAL_SLM_DH_PSF_APERTURE_RADIUS": ("SLM_DH_PSF_APERTURE_RADIUS", float),
             "OPTICAL_SLM_DH_PSF_ROTATION_1": ("SLM_DH_PSF_ROTATION_1", float),
             "OPTICAL_SLM_DH_PSF_ROTATION_2": ("SLM_DH_PSF_ROTATION_2", float),
             "OPTICAL_SLM_DH_PSF_HANDEDNESS_1": ("SLM_DH_PSF_HANDEDNESS_1", float),
