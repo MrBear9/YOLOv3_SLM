@@ -194,7 +194,10 @@ def train():
             scheduler = CosineAnnealingLR(optimizer, T_max=phase_epochs, eta_min=Config.ETA_MIN)
             log_to_file(Config, f"Epoch {epoch}: phase={phase}, teacher_lr={stage_settings['teacher_lr']:.6g}, detector_lr={stage_settings['detector_lr']:.6g}, cosine_T_max={phase_epochs}")
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True, disable=not is_main):
+        # ---- 训练循环（带诊断日志）----
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True, disable=not is_main)):
+            if use_ddp and batch_idx == 0:
+                print(f"[rank {local_rank}] Epoch {epoch}: first batch loaded", flush=True)
             batch_images, batch_targets = prepare_batch(Config, batch, device)
             optimizer.zero_grad()
             use_distill = enable_distill and distill_loss_fn is not None
@@ -210,6 +213,9 @@ def train():
                 teacher_features, predictions = model(batch_images, return_feature=True)
                 teacher_aux = None
 
+            if use_ddp and batch_idx == 0:
+                print(f"[rank {local_rank}] Epoch {epoch}: first forward done", flush=True)
+
             loss, loss_stats = criterion(predictions, batch_targets)
 
             if use_distill:
@@ -221,10 +227,19 @@ def train():
                 loss = loss + 0.005 * gate_sparsity
 
             loss.backward()
+
+            if use_ddp and batch_idx == 0:
+                print(f"[rank {local_rank}] Epoch {epoch}: first backward done", flush=True)
+
             optimizer.step()
             train_component_sums["total"] += float(loss.detach().item())
             for key in ("box", "obj", "noobj", "cls"):
                 train_component_sums[key] += loss_stats.get(key, 0.0)
+
+        if use_ddp:
+            print(f"[rank {local_rank}] Epoch {epoch}: training loop done, hitting barrier", flush=True)
+            torch.distributed.barrier()
+            print(f"[rank {local_rank}] Epoch {epoch}: barrier passed", flush=True)
 
         avg_train = {key: value / max(len(train_loader), 1) for key, value in train_component_sums.items()}
         history["train_total"].append(avg_train["total"])
@@ -233,7 +248,9 @@ def train():
         val_losses = None
         val_metrics = None
         if val_loader is not None and ((epoch + 1) % Config.VAL_INTERVAL == 0):
+            print(f"[rank {local_rank}] Epoch {epoch}: starting validation", flush=True)
             val_losses, val_metrics = evaluate_model_anchor_v8(Config, model, val_loader, criterion, device)
+            print(f"[rank {local_rank}] Epoch {epoch}: validation done", flush=True)
             history["val_total"].append(val_losses["total"])
             history["precision"].append(val_metrics["precision"])
             history["recall"].append(val_metrics["recall"])
@@ -243,7 +260,7 @@ def train():
             for key in ("val_total", "precision", "recall", "f1", "map50"):
                 history[key].append(np.nan)
 
-        # 验证后同步所有 rank，避免一个 rank 先进入下一个 epoch 导致 NCCL 超时
+        # 验证后同步所有 rank
         if use_ddp:
             torch.distributed.barrier()
 
@@ -331,23 +348,5 @@ def train():
         cleanup_distributed()
 
 
-def _worker(local_rank, world_size):
-    """Worker function for mp.spawn."""
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = "29500"
-    os.environ["LOCAL_RANK"] = str(local_rank)
-    os.environ["RANK"] = str(local_rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    try:
-        train()
-    finally:
-        cleanup_distributed()
-
-
 if __name__ == "__main__":
-    gpu_ids = Config.GPU_IDS
-    if len(gpu_ids) > 1:
-        import torch.multiprocessing as mp
-        mp.spawn(_worker, nprocs=len(gpu_ids), args=(len(gpu_ids),))
-    else:
-        train()
+    train()

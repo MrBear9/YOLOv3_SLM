@@ -70,7 +70,7 @@ def save_detection_visualization_anchor_v8(config, epoch, model, dataset, save_d
         for row, sample_idx in enumerate(sample_indices):
             image, targets = dataset[int(sample_idx)]
             input_tensor = image.unsqueeze(0).to(device)
-            teacher_feature, predictions = model(input_tensor, return_feature=True)
+            teacher_feature, predictions = model_core(input_tensor, return_feature=True)
             detections = decode_detections_anchor_v8(
                 config,
                 predictions,

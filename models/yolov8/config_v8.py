@@ -152,6 +152,7 @@ class ConfigYOLOv8Anchor:
     OBJ_WEIGHT_BASE = 2.0
     NOOBJ_WEIGHT_BASE = 2.0
     CLS_WEIGHT_BASE = 1.8
+    LOSS_UNCERTAINTY_WEIGHTING = False
 
     # -------- Object size weighting --------
     SMALL_OBJ_AREA = 32 * 32
