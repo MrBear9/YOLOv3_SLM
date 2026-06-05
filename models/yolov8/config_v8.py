@@ -81,7 +81,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v2" | "v2"  (deep semantic projection, default)
     # =========================================================================
-    TEACHER_ARCH = "convteacher_v2"
+    TEACHER_ARCH = "convteacher"
     TEACHER_V2_BASE_CHANNELS = 24
     TEACHER_V2_C2F_BLOCKS = 2
 

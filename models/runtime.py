@@ -97,7 +97,7 @@ def _make_params_contiguous(module):
             buf.data = buf.data.contiguous()
 
 
-def wrap_data_parallel(config, module, module_name="module"):
+def wrap_data_parallel(config, module, module_name="module", find_unused_parameters=False):
     device = get_runtime_device(config)
     module = module.to(device)
     if should_use_channels_last(config):
@@ -106,7 +106,7 @@ def wrap_data_parallel(config, module, module_name="module"):
         _make_params_contiguous(module)
         module = nn.parallel.DistributedDataParallel(
             module, device_ids=[device.index], output_device=device.index,
-            find_unused_parameters=False,
+            find_unused_parameters=find_unused_parameters,
             gradient_as_bucket_view=True,
         )
         world_size = torch.distributed.get_world_size()
