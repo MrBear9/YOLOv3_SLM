@@ -168,6 +168,11 @@ def clip_phase_grad_norm(student, max_norm):
     return float(torch.nn.utils.clip_grad_norm_(params, max_norm).detach().item())
 
 
+def zero_model_grads(*modules):
+    for module in modules:
+        module.zero_grad(set_to_none=True)
+
+
 def collect_phase_update_norm(student, snapshot):
     update_sq = 0.0
     param_sq = 0.0
@@ -289,8 +294,8 @@ def train():
     detector_raw = detector
 
     # DDP 包装可训练模型
-    student = wrap_data_parallel(Config, student, module_name="OpticalStudent", find_unused_parameters=True)
-    detector = wrap_data_parallel(Config, detector, module_name="Detector", find_unused_parameters=True)
+    student = wrap_data_parallel(Config, student, module_name="OpticalStudent", find_unused_parameters=False)
+    detector = wrap_data_parallel(Config, detector, module_name="Detector", find_unused_parameters=False)
 
     train_dataset = SLMFeatureDataset(Config, split="train")
     train_sampler = None
@@ -393,7 +398,8 @@ def train():
 
             for batch in tqdm(train_loader, desc=f"Epoch {global_epoch + 1}/{Config.EPOCHS} [{stage_name}]", leave=True, disable=not is_main):
                 gray, rgb, targets = prepare_batch(batch, device)
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
+                zero_model_grads(student_raw, detector_raw)
                 with torch.no_grad():
                     teacher_feature = teacher(rgb)
                 student_feature = student(gray)
