@@ -13,6 +13,56 @@ def _interpolate_preserve_layout(x, *args, **kwargs):
     return out.contiguous()
 
 
+def _max_normalize(x, eps):
+    return x / (x.amax(dim=(2, 3), keepdim=True) + eps)
+
+
+def _pearson_abs(a, b, eps):
+    batch_size = a.shape[0]
+    a_flat = a.reshape(batch_size, -1)
+    b_flat = b.reshape(batch_size, -1)
+    a_centered = a_flat - a_flat.mean(dim=1, keepdim=True)
+    b_centered = b_flat - b_flat.mean(dim=1, keepdim=True)
+    a_std = a_centered.std(dim=1, keepdim=True, unbiased=False)
+    b_std = b_centered.std(dim=1, keepdim=True, unbiased=False)
+    corr = (a_centered * b_centered).mean(dim=1, keepdim=True) / (a_std * b_std + eps)
+    return corr.abs().mean()
+
+
+def _ssim_similarity(a, b, eps):
+    avg_pool = F.avg_pool2d
+    c1 = 0.01 ** 2
+    c2 = 0.03 ** 2
+    mu_a = avg_pool(a, 3, 1, 1)
+    mu_b = avg_pool(b, 3, 1, 1)
+    sigma_a = avg_pool(a * a, 3, 1, 1) - mu_a * mu_a
+    sigma_b = avg_pool(b * b, 3, 1, 1) - mu_b * mu_b
+    sigma_ab = avg_pool(a * b, 3, 1, 1) - mu_a * mu_b
+    ssim_map = ((2 * mu_a * mu_b + c1) * (2 * sigma_ab + c2)) / (
+        (mu_a * mu_a + mu_b * mu_b + c1) * (sigma_a + sigma_b + c2) + eps
+    )
+    return torch.clamp(ssim_map.mean(), min=0.0, max=1.0)
+
+
+def input_privacy_loss(config, student_feature, input_gray):
+    weight = float(getattr(config, "PRIVACY_LOSS_WEIGHT", 0.0))
+    if weight <= 0:
+        zero = torch.zeros((), device=student_feature.device, dtype=student_feature.dtype)
+        return zero, {"privacy": 0.0, "privacy_corr": 0.0, "privacy_ssim": 0.0}
+    student_view = _max_normalize(student_feature.float(), config.OPTICAL_NORM_EPS)
+    gray_view = _max_normalize(input_gray.float().clamp(min=0), config.OPTICAL_NORM_EPS)
+    corr_abs = _pearson_abs(student_view, gray_view, config.OPTICAL_FIELD_EPS)
+    ssim_sim = _ssim_similarity(student_view, gray_view, config.OPTICAL_FIELD_EPS)
+    corr_target = float(getattr(config, "PRIVACY_CORR_TARGET", 0.15))
+    ssim_target = float(getattr(config, "PRIVACY_SSIM_TARGET", 0.20))
+    raw = F.relu(corr_abs - corr_target) + F.relu(ssim_sim - ssim_target)
+    return raw * weight, {
+        "privacy": float(raw.detach().item()),
+        "privacy_corr": float(corr_abs.detach().item()),
+        "privacy_ssim": float(ssim_sim.detach().item()),
+    }
+
+
 class CompositeOpticalFeatureLoss(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -59,6 +109,25 @@ class CompositeOpticalFeatureLoss(nn.Module):
         )
         return torch.clamp((1.0 - corr.mean()) * 0.5, min=0.0)
 
+    def domain_align(self, student_feature, teacher_feature):
+        if not bool(getattr(self.config, "ENABLE_FEATURE_DOMAIN_ALIGNMENT", False)):
+            return student_feature, teacher_feature
+        mode = str(getattr(self.config, "FEATURE_DOMAIN_ALIGN_MODE", "mean_std")).strip().lower()
+        if mode in {"none", "off", "false"}:
+            return student_feature, teacher_feature
+        eps = self.config.OPTICAL_NORM_EPS
+        if mode in {"minmax", "min_max"}:
+            s_min = student_feature.amin(dim=(2, 3), keepdim=True)
+            t_min = teacher_feature.amin(dim=(2, 3), keepdim=True)
+            s_span = student_feature.amax(dim=(2, 3), keepdim=True) - s_min
+            t_span = teacher_feature.amax(dim=(2, 3), keepdim=True) - t_min
+            return (student_feature - s_min) / (s_span + eps), (teacher_feature - t_min) / (t_span + eps)
+        s_mean = student_feature.mean(dim=(2, 3), keepdim=True)
+        t_mean = teacher_feature.mean(dim=(2, 3), keepdim=True)
+        s_std = student_feature.std(dim=(2, 3), keepdim=True, unbiased=False)
+        t_std = teacher_feature.std(dim=(2, 3), keepdim=True, unbiased=False)
+        return (student_feature - s_mean) / (s_std + eps), (teacher_feature - t_mean) / (t_std + eps)
+
     def phase_smoothness_loss(self, student):
         terms = []
         for slm_layer in (student.slm1, student.slm2):
@@ -104,12 +173,13 @@ class CompositeOpticalFeatureLoss(nn.Module):
         )
 
     def forward(self, student_feature, teacher_feature, student):
-        loss_full = F.mse_loss(student_feature, teacher_feature)
-        loss_low1 = F.mse_loss(self.pool1(student_feature), self.pool1(teacher_feature))
-        loss_low2 = F.mse_loss(self.pool2(student_feature), self.pool2(teacher_feature))
-        loss_ssim = self.ssim_loss(student_feature, teacher_feature)
-        loss_grad = self.gradient_loss(student_feature, teacher_feature)
-        loss_freq = self.frequency_loss(student_feature, teacher_feature)
+        aligned_student, aligned_teacher = self.domain_align(student_feature, teacher_feature)
+        loss_full = F.mse_loss(aligned_student, aligned_teacher)
+        loss_low1 = F.mse_loss(self.pool1(aligned_student), self.pool1(aligned_teacher))
+        loss_low2 = F.mse_loss(self.pool2(aligned_student), self.pool2(aligned_teacher))
+        loss_ssim = self.ssim_loss(aligned_student, aligned_teacher)
+        loss_grad = self.gradient_loss(aligned_student, aligned_teacher)
+        loss_freq = self.frequency_loss(aligned_student, aligned_teacher)
         loss_pearson = self.pearson_loss(student_feature, teacher_feature)
         loss_smooth = self.phase_smoothness_loss(student)
         loss_div, std, span, circular_std, near_boundary = self.phase_diversity_loss(student)

@@ -248,10 +248,93 @@ class YOLOLightHead(nn.Module):
         return (pred_p3, pred_p4, pred_p5)
 
 
+class YOLOBranchLightHead(nn.Module):
+    """Lightweight branched head for encrypted optical features.
+
+    Unlike YOLOLightHead, P3 is not only the end of a serial stem. Shallow and
+    mid-level optical texture paths are projected into P3, then a small top-down
+    FPN builds P4/P5 predictions. Branch projections stay narrow so the detector
+    does not absorb the whole task from the optical phase layers.
+    """
+
+    def __init__(self, config, in_channels=1, out_channels=None, base_ch=None):
+        super().__init__()
+        self.config = config
+        out_channels = config.get_detector_output_channels() if out_channels is None else out_channels
+        c = base_ch if base_ch is not None else int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
+        c2, c4, c8 = c * 2, c * 4, c * 8
+
+        self.stem0 = ConvBNAct(in_channels, c, 3)
+        self.down1 = ConvBNAct(c, c2, 3, 2)
+        self.down2 = ConvBNAct(c2, c4, 3, 2)
+        self.down3 = ConvBNAct(c4, c8, 3, 2)
+
+        self.p3_main = ConvBNAct(c8, c4, 1)
+        self.p3_from_s4 = ConvBNAct(c4, c4, 3, 2)
+        self.p3_from_s2 = nn.Sequential(ConvBNAct(c2, c2, 3, 2), ConvBNAct(c2, c4, 3, 2))
+        self.p3_fuse = ConvBNAct(c4 * 3, c8, 1)
+
+        self.p4_path = ConvBNAct(c8, c8, 3, 2)
+        self.p5_path = nn.Sequential(ConvBNAct(c8, c8, 3, 2), SPPF(c8, c8))
+        self.fuse_p4 = ConvBNAct(c8 * 2, c4, 1)
+        self.fuse_p3 = ConvBNAct(c4 + c8, c2, 1)
+
+        hc = c2
+        self.head_p3_shared = ConvBNAct(c2, hc, 3)
+        self.head_p3_box = nn.Conv2d(hc, 3 * 4, 1)
+        self.head_p3_obj = nn.Conv2d(hc, 3 * 1, 1)
+        self.head_p3_cls = nn.Conv2d(hc, out_channels - 3 * 5, 1)
+
+        self.head_p4_shared = ConvBNAct(c4, hc, 3)
+        self.head_p4_box = nn.Conv2d(hc, 3 * 4, 1)
+        self.head_p4_obj = nn.Conv2d(hc, 3 * 1, 1)
+        self.head_p4_cls = nn.Conv2d(hc, out_channels - 3 * 5, 1)
+
+        self.head_p5_shared = ConvBNAct(c8, hc, 3)
+        self.head_p5_box = nn.Conv2d(hc, 3 * 4, 1)
+        self.head_p5_obj = nn.Conv2d(hc, 3 * 1, 1)
+        self.head_p5_cls = nn.Conv2d(hc, out_channels - 3 * 5, 1)
+
+    @staticmethod
+    def _decode_head(shared, box, obj, cls_conv, feat):
+        b, _, h, w = feat.shape
+        f = shared(feat)
+        box_out = box(f).contiguous().view(b, 3, 4, h, w)
+        obj_out = obj(f).contiguous().view(b, 3, 1, h, w)
+        cls_out = cls_conv(f).contiguous().view(b, 3, -1, h, w)
+        return torch.cat([box_out, obj_out, cls_out], dim=2).contiguous().view(b, -1, h, w)
+
+    def forward(self, x, return_features=False):
+        s1 = self.stem0(x)
+        s2 = self.down1(s1)
+        s4 = self.down2(s2)
+        s8 = self.down3(s4)
+
+        p3_base = self.p3_fuse(torch.cat([self.p3_main(s8), self.p3_from_s4(s4), self.p3_from_s2(s2)], dim=1))
+        p4_base = self.p4_path(p3_base)
+        p5_feat = self.p5_path(p4_base)
+
+        p5_up = F.interpolate(p5_feat, size=p4_base.shape[-2:], mode="nearest")
+        p4_fused = self.fuse_p4(torch.cat([p5_up, p4_base], dim=1))
+        p4_up = F.interpolate(p4_fused, size=p3_base.shape[-2:], mode="nearest")
+        p3_fused = self.fuse_p3(torch.cat([p4_up, p3_base], dim=1))
+
+        pred_p3 = self._decode_head(self.head_p3_shared, self.head_p3_box, self.head_p3_obj, self.head_p3_cls, p3_fused)
+        pred_p4 = self._decode_head(self.head_p4_shared, self.head_p4_box, self.head_p4_obj, self.head_p4_cls, p4_fused)
+        pred_p5 = self._decode_head(self.head_p5_shared, self.head_p5_box, self.head_p5_obj, self.head_p5_cls, p5_feat)
+
+        if return_features:
+            return (pred_p3, pred_p4, pred_p5), {"s8": p3_base, "s16": p4_base, "s32": p5_feat}
+        return (pred_p3, pred_p4, pred_p5)
+
+
 def build_detector_head(config, in_channels=1, out_channels=None):
     """Factory: build the configured detector head type."""
     head_type = str(getattr(config, "DETECTOR_HEAD_TYPE", "yolov8_anchor")).strip().lower()
     out_channels = config.get_detector_output_channels() if out_channels is None else out_channels
+    if head_type in {"light_branch", "branch_light", "yolo_light_branch"}:
+        base_ch = int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
+        return YOLOBranchLightHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch)
     if head_type in {"light", "yolo_light"}:
         base_ch = int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
         return YOLOLightHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch)

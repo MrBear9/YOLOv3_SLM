@@ -8,7 +8,7 @@ import torch
 from tqdm import tqdm
 
 from models.geometry import bbox_iou_xywh
-from models.SLM.losses_slm import detection_response_loss
+from models.SLM.losses_slm import detection_response_loss, input_privacy_loss
 from models.runtime import unwrap_module
 from models.teacher_guidance import enhance_feature_for_display
 from models.yolov8.decode_anchor_v8 import decode_detections_anchor_v8
@@ -39,7 +39,7 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
 
     metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
-    totals = {key: 0.0 for key in ("total", "feature", "detection", "response", "box", "obj", "noobj", "cls")}
+    totals = {key: 0.0 for key in ("total", "feature", "detection", "response", "privacy", "box", "obj", "noobj", "cls")}
     total_tp = total_fp = total_fn = 0
 
     with torch.no_grad():
@@ -49,6 +49,7 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
             student_feature = student_core(gray)
             feature_loss, _ = feature_criterion(student_feature, teacher_feature, student_core)
             response_loss, _ = detection_response_loss(config, response_detector_core, student_feature, teacher_feature)
+            privacy_loss, _ = input_privacy_loss(config, student_feature, gray)
 
             evaluate_detector = stage_name not in {"student_only", "student_adapt_max"}
             if evaluate_detector:
@@ -64,9 +65,10 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
                     feature_loss * config.FEATURE_LOSS_WEIGHT_STUDENT
                     + detection_loss * config.DETECTION_LOSS_WEIGHT_STUDENT
                     + response_loss
+                    + privacy_loss
                 )
             elif stage_name == "student_adapt_max":
-                total_loss = feature_loss * config.FEATURE_LOSS_WEIGHT_ADAPT + response_loss
+                total_loss = feature_loss * config.FEATURE_LOSS_WEIGHT_ADAPT + response_loss + privacy_loss
             elif stage_name == "detector_only":
                 total_loss = detection_loss * config.DETECTION_LOSS_WEIGHT_DETECTOR
             else:
@@ -74,12 +76,14 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
                     feature_loss * config.FEATURE_LOSS_WEIGHT_JOINT
                     + detection_loss * config.DETECTION_LOSS_WEIGHT_JOINT
                     + response_loss
+                    + privacy_loss
                 )
 
             totals["total"] += float(total_loss.detach().item())
             totals["feature"] += float(feature_loss.detach().item())
             totals["detection"] += float(detection_loss.detach().item())
             totals["response"] += float(response_loss.detach().item())
+            totals["privacy"] += float(privacy_loss.detach().item())
             for key in ("box", "obj", "noobj", "cls"):
                 totals[key] += loss_stats.get(key, 0.0)
 

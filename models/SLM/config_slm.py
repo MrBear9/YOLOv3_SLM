@@ -14,14 +14,14 @@ class ConfigSLM:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_student"
+    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_Tv1_light_branch_slim_align_privacy_student_max"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/OpticalTeacherYOLO_YOLOv8Head/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_privacy/teacher_detector_best.pth"
     DETECTOR_INIT_MODE = "checkpoint"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -35,8 +35,8 @@ class ConfigSLM:
     STRIDES = [8, 16, 32]
 
     STUDENT_ONLY_EPOCHS = 60
-    STUDENT_ADAPT_MAX_EPOCHS = 15
-    DETECTOR_ONLY_EPOCHS = 20
+    STUDENT_ADAPT_MAX_EPOCHS = 0
+    DETECTOR_ONLY_EPOCHS = 5
     JOINT_EPOCHS = 60
     EPOCHS = STUDENT_ONLY_EPOCHS + STUDENT_ADAPT_MAX_EPOCHS + DETECTOR_ONLY_EPOCHS + JOINT_EPOCHS
 
@@ -99,7 +99,7 @@ class ConfigSLM:
     # =========================================================================
     # DETECTOR_HEAD_TYPE  (must match teacher-training checkpoint)
     # =========================================================================
-    DETECTOR_HEAD_TYPE = "light"
+    DETECTOR_HEAD_TYPE = "light_branch"
 
     # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
     YOLOV8_BASE_CHANNELS = 32
@@ -164,15 +164,22 @@ class ConfigSLM:
     # =========================================================================
     # SLM feature loss (student → teacher matching)
     # =========================================================================
-    LOSS_FULL_WEIGHT = 0.15
-    LOSS_LOW1_WEIGHT = 0.35
-    LOSS_LOW2_WEIGHT = 0.20
-    LOSS_SSIM_WEIGHT = 0.40
-    LOSS_GRAD_WEIGHT = 0.20
-    LOSS_FREQ_WEIGHT = 0.10
-    LOSS_PEARSON_WEIGHT = 0.50
+    LOSS_FULL_WEIGHT = 0.05
+    LOSS_LOW1_WEIGHT = 0.20
+    LOSS_LOW2_WEIGHT = 0.10
+    LOSS_SSIM_WEIGHT = 0.20
+    LOSS_GRAD_WEIGHT = 0.15
+    LOSS_FREQ_WEIGHT = 0.05
+    LOSS_PEARSON_WEIGHT = 0.70
     LOSS_PHASE_SMOOTH_WEIGHT = 0.001
     LOSS_PHASE_DIVERSITY_WEIGHT = 0.15
+    ENABLE_FEATURE_DOMAIN_ALIGNMENT = True
+    FEATURE_DOMAIN_ALIGN_MODE = "mean_std"
+
+    # -------- Privacy / optical obfuscation loss --------
+    PRIVACY_LOSS_WEIGHT = 0.10
+    PRIVACY_CORR_TARGET = 0.15
+    PRIVACY_SSIM_TARGET = 0.20
 
     # -------- Phase quality constraints --------
     PHASE_STD_TARGET = 0.60
@@ -188,13 +195,13 @@ class ConfigSLM:
     # =========================================================================
     # Stage loss weights
     # =========================================================================
-    FEATURE_LOSS_WEIGHT_STUDENT = 1.0
-    DETECTION_LOSS_WEIGHT_STUDENT = 0.0
+    FEATURE_LOSS_WEIGHT_STUDENT = 0.55
+    DETECTION_LOSS_WEIGHT_STUDENT = 0.25
     DETECTION_LOSS_WEIGHT_DETECTOR = 1.0
-    FEATURE_LOSS_WEIGHT_ADAPT = 1.0
-    FEATURE_LOSS_WEIGHT_JOINT = 0.70
-    DETECTION_LOSS_WEIGHT_JOINT = 0.80
-    RESPONSE_LOSS_WEIGHT = 0.05
+    FEATURE_LOSS_WEIGHT_ADAPT = 0.55
+    FEATURE_LOSS_WEIGHT_JOINT = 0.35
+    DETECTION_LOSS_WEIGHT_JOINT = 1.00
+    RESPONSE_LOSS_WEIGHT = 0.10
 
     # =========================================================================
     # Optimizer & LR schedule
@@ -205,9 +212,9 @@ class ConfigSLM:
     ADAPT_PHASE_PARAM_LR = 5e-4
     DETECTOR_LR = 2e-4
     JOINT_STUDENT_LR = 5e-5
-    JOINT_PHASE_PARAM_LR = 1e-4
+    JOINT_PHASE_PARAM_LR = 2e-4
     JOINT_DETECTOR_LR = 5e-5
-    PHASE_GRAD_CLIP_NORM = 1.0
+    PHASE_GRAD_CLIP_NORM = 2.0
     WEIGHT_DECAY = 3e-5
     PHASE_WEIGHT_DECAY = 0.0
     LR_SCHEDULER = "CosineAnnealingLR"
@@ -276,6 +283,7 @@ class ConfigSLM:
             "OPTICAL_SLM_YAML_PATH": ("YAML_PATH", str),
             "OPTICAL_SLM_OUTPUT_DIR": ("OUTPUT_DIR", str),
             "OPTICAL_SLM_TEACHER_DETECTOR_CHECKPOINT": ("TEACHER_DETECTOR_CHECKPOINT", str),
+            "OPTICAL_SLM_DETECTOR_HEAD_TYPE": ("DETECTOR_HEAD_TYPE", str),
             "OPTICAL_SLM_INIT_MODE": ("SLM_INIT_MODE", str),
             "OPTICAL_SLM_INIT_CHECKPOINT": ("SLM_INIT_CHECKPOINT", str),
             "OPTICAL_SLM_DH_PSF_PERIODS": ("SLM_DH_PSF_PERIODS", float),
@@ -291,6 +299,9 @@ class ConfigSLM:
             "OPTICAL_SLM_TEACHER_ARCH": ("TEACHER_ARCH", str),
             "OPTICAL_SLM_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),
             "OPTICAL_SLM_TEACHER_V2_C2F_BLOCKS": ("TEACHER_V2_C2F_BLOCKS", int),
+            "OPTICAL_SLM_TEACHER_V3_BASE_CHANNELS": ("TEACHER_V3_BASE_CHANNELS", int),
+            "OPTICAL_SLM_TEACHER_V3_C2F_BLOCKS": ("TEACHER_V3_C2F_BLOCKS", int),
+            "OPTICAL_SLM_TEACHER_V3_RESIDUAL_SCALE": ("TEACHER_V3_RESIDUAL_SCALE", float),
             "OPTICAL_SLM_STUDENT_NORM_SCHEDULE": ("STUDENT_NORM_SCHEDULE", str),
             "OPTICAL_SLM_STUDENT_NORM_EARLY_MODE": ("STUDENT_NORM_EARLY_MODE", str),
             "OPTICAL_SLM_STUDENT_NORM_MODE": ("STUDENT_NORM_MODE", str),
@@ -302,6 +313,12 @@ class ConfigSLM:
             "OPTICAL_SLM_PHASE_GRAD_CLIP_NORM": ("PHASE_GRAD_CLIP_NORM", float),
             "OPTICAL_SLM_FEATURE_LOSS_WEIGHT_JOINT": ("FEATURE_LOSS_WEIGHT_JOINT", float),
             "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_JOINT": ("DETECTION_LOSS_WEIGHT_JOINT", float),
+            "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_STUDENT": ("DETECTION_LOSS_WEIGHT_STUDENT", float),
+            "OPTICAL_SLM_FEATURE_DOMAIN_ALIGN_MODE": ("FEATURE_DOMAIN_ALIGN_MODE", str),
+            "OPTICAL_SLM_PRIVACY_LOSS_WEIGHT": ("PRIVACY_LOSS_WEIGHT", float),
+            "OPTICAL_SLM_PRIVACY_CORR_TARGET": ("PRIVACY_CORR_TARGET", float),
+            "OPTICAL_SLM_PRIVACY_SSIM_TARGET": ("PRIVACY_SSIM_TARGET", float),
+            "OPTICAL_SLM_RESPONSE_LOSS_WEIGHT": ("RESPONSE_LOSS_WEIGHT", float),
             "OPTICAL_SLM_DETECTOR_EARLY_STOP_PATIENCE": ("DETECTOR_EARLY_STOP_PATIENCE", int),
             "OPTICAL_SLM_DETECTOR_EARLY_STOP_MIN_DELTA": ("DETECTOR_EARLY_STOP_MIN_DELTA", float),
             "OPTICAL_SLM_LR_SCHEDULER": ("LR_SCHEDULER", str),
@@ -318,6 +335,10 @@ class ConfigSLM:
             value = os.environ.get(env_name)
             if value:
                 setattr(cls, attr, caster(value))
+
+        align = os.environ.get("OPTICAL_SLM_ENABLE_FEATURE_DOMAIN_ALIGNMENT")
+        if align:
+            cls.ENABLE_FEATURE_DOMAIN_ALIGNMENT = align.strip().lower() in {"1", "true", "yes", "on"}
 
     @classmethod
     def initialize(cls):

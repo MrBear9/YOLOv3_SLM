@@ -22,7 +22,7 @@ from models.runtime import (
     wrap_data_parallel,
 )
 from models.teacher import build_teacher
-from models.teacher_guidance import build_feature_distillation_loss
+from models.teacher_guidance import build_feature_distillation_loss, teacher_cipher_loss
 from models.training_utils import (
     build_optimizer_from_model,
     initialize_teacher_weights,
@@ -56,7 +56,11 @@ def log_all_parameters():
     log_to_file(Config, f"Dataset: {Config.YAML_PATH}")
     log_to_file(Config, f"Classes: {Config.CLASS_NAMES}")
     log_to_file(Config, f"Image size / batch / epochs: {Config.IMG_SIZE} / {Config.BATCH_SIZE} / {Config.EPOCHS}")
-    log_to_file(Config, f"Head: YOLOv8 style C2f/PAN, anchor-formatted output, base_ch={Config.YOLOV8_BASE_CHANNELS}, c2f_blocks={Config.YOLOV8_C2F_BLOCKS}")
+    log_to_file(
+        Config,
+        f"Head factory: type={Config.DETECTOR_HEAD_TYPE}, light_base_ch={Config.YOLO_LIGHT_BASE_CH}, "
+        f"yolov8_base_ch={Config.YOLOV8_BASE_CHANNELS}, c2f_blocks={Config.YOLOV8_C2F_BLOCKS}",
+    )
     log_to_file(Config, f"Strides: {Config.STRIDES}")
     log_to_file(Config, f"Anchor source: {Config.ANCHOR_SOURCE}")
     log_to_file(Config, f"Anchors: {Config.ANCHORS}")
@@ -79,8 +83,22 @@ def log_all_parameters():
     arch_lower = str(Config.TEACHER_ARCH).strip().lower()
     if arch_lower in {"convteacher_v3", "v3"}:
         log_to_file(Config, f"V3 residual_scale={Config.TEACHER_V3_RESIDUAL_SCALE}")
+        log_to_file(
+            Config,
+            f"V3 physical regularization gate/residual/output: "
+            f"{Config.TEACHER_V3_GATE_SPARSITY_WEIGHT}/"
+            f"{Config.TEACHER_V3_RESIDUAL_L1_WEIGHT}/"
+            f"{Config.TEACHER_V3_OUTPUT_DEVIATION_WEIGHT}",
+        )
     if getattr(Config, "ENABLE_FEATURE_DISTILL", False):
         log_to_file(Config, f"Feature distillation: weight={Config.FEATURE_DISTILL_WEIGHT}")
+    log_to_file(
+        Config,
+        f"Teacher cipher loss: weight={Config.TEACHER_CIPHER_LOSS_WEIGHT}, "
+        f"corr_target={Config.TEACHER_CIPHER_CORR_TARGET}, "
+        f"ssim_target={Config.TEACHER_CIPHER_SSIM_TARGET}, "
+        f"structure_weight={Config.TEACHER_CIPHER_STRUCTURE_WEIGHT}",
+    )
     log_to_file(Config, "=" * 80)
 
 
@@ -166,6 +184,8 @@ def train():
     history = {"train_total": [], "val_total": [], "precision": [], "recall": [], "f1": [], "map50": []}
     best_loss = float("inf")
     best_map50 = -1.0
+    no_improve_epochs = 0
+    last_epoch = -1
     current_phase = None
     optimizer = None
     scheduler = None
@@ -176,6 +196,7 @@ def train():
     init_epoch_log_table(Config)
 
     for epoch in range(Config.EPOCHS):
+        last_epoch = epoch
         if use_ddp and train_sampler is not None:
             train_sampler.set_epoch(epoch)
         model.train()
@@ -201,11 +222,12 @@ def train():
             batch_images, batch_targets = prepare_batch(Config, batch, device)
             optimizer.zero_grad()
             use_distill = enable_distill and distill_loss_fn is not None
+            use_cipher = Config.TEACHER_CIPHER_LOSS_WEIGHT > 0
             if use_distill:
                 teacher_features, predictions, teacher_aux, det_features = model(
                     batch_images, return_feature=True, return_teacher_aux=True, return_det_features=True
                 )
-            elif is_v3:
+            elif is_v3 or use_cipher:
                 teacher_features, predictions, teacher_aux = model(
                     batch_images, return_feature=True, return_teacher_aux=True
                 )
@@ -222,9 +244,20 @@ def train():
                 distill_loss, _ = distill_loss_fn(teacher_aux, det_features)
                 loss = loss + distill_loss * Config.FEATURE_DISTILL_WEIGHT
 
+            if use_cipher:
+                cipher_loss, _ = teacher_cipher_loss(Config, teacher_aux)
+                loss = loss + cipher_loss
+
             if is_v3 and teacher_aux is not None:
                 gate_sparsity = teacher_aux["gate"].mean()
-                loss = loss + 0.005 * gate_sparsity
+                residual_l1 = teacher_aux["residual"].abs().mean()
+                output_deviation = (teacher_aux["det_feature"] - teacher_aux["gray"]).abs().mean()
+                loss = (
+                    loss
+                    + Config.TEACHER_V3_GATE_SPARSITY_WEIGHT * gate_sparsity
+                    + Config.TEACHER_V3_RESIDUAL_L1_WEIGHT * residual_l1
+                    + Config.TEACHER_V3_OUTPUT_DEVIATION_WEIGHT * output_deviation
+                )
 
             loss.backward()
 
@@ -265,7 +298,7 @@ def train():
             torch.distributed.barrier()
 
         is_best = False
-        if val_metrics is not None and val_metrics["map50"] > best_map50:
+        if val_metrics is not None and val_metrics["map50"] > best_map50 + Config.TEACHER_EARLY_STOP_MIN_DELTA:
             best_map50 = val_metrics["map50"]
             is_best = True
         elif val_loader is None and avg_train["total"] < best_loss:
@@ -291,6 +324,9 @@ def train():
                         },
                         joint_best_path,
                     )
+            no_improve_epochs = 0
+        elif val_metrics is not None:
+            no_improve_epochs += Config.VAL_INTERVAL
 
         if is_main and epoch % Config.VIS_INTERVAL == 0:
             save_detection_visualization_anchor_v8(Config, epoch, model, vis_dataset, vis_dir, prefix=vis_prefix, device=device)
@@ -311,6 +347,18 @@ def train():
         if is_main:
             save_training_curves(history, Config.TEACHER_OUTPUT_DIR)
 
+        if (
+            val_metrics is not None
+            and Config.TEACHER_EARLY_STOP_PATIENCE > 0
+            and no_improve_epochs >= Config.TEACHER_EARLY_STOP_PATIENCE
+        ):
+            log_to_file(
+                Config,
+                f"Early stopping teacher after {no_improve_epochs} epochs without mAP50 improvement. "
+                f"Best mAP50={best_map50:.4f}.",
+            )
+            break
+
         # 每个 epoch 结束后同步所有 rank
         if use_ddp:
             torch.distributed.barrier()
@@ -325,7 +373,7 @@ def train():
                 {
                     "teacher_state_dict": model_core.teacher.state_dict(),
                     "detector_state_dict": model_core.detector.state_dict(),
-                    "epoch": Config.EPOCHS - 1,
+                    "epoch": last_epoch,
                     "loss": history["train_total"][-1] if history["train_total"] else None,
                     "val_map50": best_map50 if best_map50 >= 0 else None,
                     "teacher_arch": Config.TEACHER_ARCH,

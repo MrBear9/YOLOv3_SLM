@@ -51,7 +51,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/OpticalTeacherYOLO_YOLOv8Head"
+    TEACHER_OUTPUT_DIR = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_privacy"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -91,6 +91,9 @@ class ConfigYOLOv8Anchor:
     TEACHER_V3_BASE_CHANNELS = 24
     TEACHER_V3_C2F_BLOCKS = 2
     TEACHER_V3_RESIDUAL_SCALE = 0.30
+    TEACHER_V3_GATE_SPARSITY_WEIGHT = 0.003
+    TEACHER_V3_RESIDUAL_L1_WEIGHT = 0.001
+    TEACHER_V3_OUTPUT_DEVIATION_WEIGHT = 0.02
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher"     (legacy V1, sigmoid heatmap)
@@ -108,7 +111,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # DETECTOR_HEAD_TYPE = "light" | "yolov8_anchor"
     # =========================================================================
-    DETECTOR_HEAD_TYPE = "light"
+    DETECTOR_HEAD_TYPE = "light_branch"
 
     # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
     YOLOV8_BASE_CHANNELS = 32
@@ -180,6 +183,18 @@ class ConfigYOLOv8Anchor:
     FEATURE_DISTILL_WEIGHT = 0.18
 
     # =========================================================================
+    # Teacher ciphertext regularization
+    # =========================================================================
+    TEACHER_CIPHER_LOSS_WEIGHT = 0.08
+    TEACHER_CIPHER_CORR_TARGET = 0.18
+    TEACHER_CIPHER_SSIM_TARGET = 0.24
+    TEACHER_CIPHER_STRUCTURE_WEIGHT = 0.25
+    TEACHER_CIPHER_STD_FLOOR = 0.08
+    TEACHER_CIPHER_GRAD_FLOOR = 0.015
+    OPTICAL_FIELD_EPS = 1e-8
+    OPTICAL_NORM_EPS = 1e-6
+
+    # =========================================================================
     # Optimizer & LR schedule
     # =========================================================================
     PHASE1_TEACHER_LR = 4e-4
@@ -216,6 +231,8 @@ class ConfigYOLOv8Anchor:
     # Validation
     # =========================================================================
     VAL_INTERVAL = 2
+    TEACHER_EARLY_STOP_PATIENCE = 30
+    TEACHER_EARLY_STOP_MIN_DELTA = 0.002
     METRIC_IOU_THRESHOLD = 0.5
     METRIC_CONF_THRESH = 0.001
     METRIC_NMS_THRESH = 0.50
@@ -274,10 +291,25 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_INIT_MODE": ("TEACHER_INIT_MODE", str),
             "OPTICAL_TEACHER_INIT_CHECKPOINT": ("TEACHER_INIT_CHECKPOINT", str),
             "OPTICAL_TEACHER_ARCH": ("TEACHER_ARCH", str),
+            "OPTICAL_TEACHER_DETECTOR_HEAD_TYPE": ("DETECTOR_HEAD_TYPE", str),
             "OPTICAL_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),
             "OPTICAL_TEACHER_V2_C2F_BLOCKS": ("TEACHER_V2_C2F_BLOCKS", int),
+            "OPTICAL_TEACHER_V3_BASE_CHANNELS": ("TEACHER_V3_BASE_CHANNELS", int),
+            "OPTICAL_TEACHER_V3_C2F_BLOCKS": ("TEACHER_V3_C2F_BLOCKS", int),
+            "OPTICAL_TEACHER_V3_RESIDUAL_SCALE": ("TEACHER_V3_RESIDUAL_SCALE", float),
+            "OPTICAL_TEACHER_V3_GATE_SPARSITY_WEIGHT": ("TEACHER_V3_GATE_SPARSITY_WEIGHT", float),
+            "OPTICAL_TEACHER_V3_RESIDUAL_L1_WEIGHT": ("TEACHER_V3_RESIDUAL_L1_WEIGHT", float),
+            "OPTICAL_TEACHER_V3_OUTPUT_DEVIATION_WEIGHT": ("TEACHER_V3_OUTPUT_DEVIATION_WEIGHT", float),
             "OPTICAL_TEACHER_BATCH_SIZE": ("BATCH_SIZE", int),
             "OPTICAL_TEACHER_EPOCHS": ("EPOCHS", int),
+            "OPTICAL_TEACHER_EARLY_STOP_PATIENCE": ("TEACHER_EARLY_STOP_PATIENCE", int),
+            "OPTICAL_TEACHER_EARLY_STOP_MIN_DELTA": ("TEACHER_EARLY_STOP_MIN_DELTA", float),
+            "OPTICAL_TEACHER_CIPHER_LOSS_WEIGHT": ("TEACHER_CIPHER_LOSS_WEIGHT", float),
+            "OPTICAL_TEACHER_CIPHER_CORR_TARGET": ("TEACHER_CIPHER_CORR_TARGET", float),
+            "OPTICAL_TEACHER_CIPHER_SSIM_TARGET": ("TEACHER_CIPHER_SSIM_TARGET", float),
+            "OPTICAL_TEACHER_CIPHER_STRUCTURE_WEIGHT": ("TEACHER_CIPHER_STRUCTURE_WEIGHT", float),
+            "OPTICAL_TEACHER_CIPHER_STD_FLOOR": ("TEACHER_CIPHER_STD_FLOOR", float),
+            "OPTICAL_TEACHER_CIPHER_GRAD_FLOOR": ("TEACHER_CIPHER_GRAD_FLOOR", float),
             "OPTICAL_TEACHER_NUM_WORKERS": ("NUM_WORKERS", int),
         }
         for env_name, (attr, caster) in overrides.items():

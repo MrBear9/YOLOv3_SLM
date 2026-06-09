@@ -13,7 +13,7 @@ from tqdm import tqdm
 from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.dataset_slm import SLMFeatureDataset, slm_collate_fn
 from models.SLM.evaluation_slm import evaluate_slm_detector, save_slm_detection_visualization
-from models.SLM.losses_slm import CompositeOpticalFeatureLoss, detection_response_loss
+from models.SLM.losses_slm import CompositeOpticalFeatureLoss, detection_response_loss, input_privacy_loss
 from models.SLM.optical_layers import OpticalStudent
 from models.SLM.utils_slm import (
     build_stage_optimizer,
@@ -104,7 +104,7 @@ def valid_history_points(values):
 
 def save_slm_component_curves(history, output_dir):
     os.makedirs(output_dir, exist_ok=True)
-    fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(17, 8))
     axes = axes.ravel()
 
     for key in ("train_feature", "val_feature"):
@@ -125,11 +125,19 @@ def save_slm_component_curves(history, output_dir):
     axes[2].set_title("Response distillation loss")
     axes[2].legend()
 
-    for key in ("train_total", "val_total"):
+    for key in ("train_privacy", "val_privacy"):
         xs, ys = valid_history_points(history.get(key, []))
         axes[3].plot(xs, ys, label=key)
-    axes[3].set_title("Total loss")
+    axes[3].set_title("Privacy obfuscation loss")
     axes[3].legend()
+
+    for key in ("train_total", "val_total"):
+        xs, ys = valid_history_points(history.get(key, []))
+        axes[4].plot(xs, ys, label=key)
+    axes[4].set_title("Total loss")
+    axes[4].legend()
+
+    axes[5].axis("off")
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "training_curves_components.png"), dpi=130)
@@ -236,11 +244,21 @@ def log_config():
     )
     log_to_file(
         Config,
+        f"Feature domain alignment: enabled={Config.ENABLE_FEATURE_DOMAIN_ALIGNMENT}, "
+        f"mode={Config.FEATURE_DOMAIN_ALIGN_MODE}",
+    )
+    log_to_file(
+        Config,
         f"Stage loss weights student/adapt/joint_feature/joint_detection: "
         f"{Config.FEATURE_LOSS_WEIGHT_STUDENT}/{Config.FEATURE_LOSS_WEIGHT_ADAPT}/"
         f"{Config.FEATURE_LOSS_WEIGHT_JOINT}/{Config.DETECTION_LOSS_WEIGHT_JOINT}",
     )
     log_to_file(Config, f"Response distillation loss weight: {Config.RESPONSE_LOSS_WEIGHT}")
+    log_to_file(
+        Config,
+        f"Privacy loss weight/corr_target/ssim_target: "
+        f"{Config.PRIVACY_LOSS_WEIGHT}/{Config.PRIVACY_CORR_TARGET}/{Config.PRIVACY_SSIM_TARGET}",
+    )
     log_to_file(
         Config,
         f"Detector early stop: patience={Config.DETECTOR_EARLY_STOP_PATIENCE}, "
@@ -348,10 +366,12 @@ def train():
         "train_feature": [],
         "train_detection": [],
         "train_response": [],
+        "train_privacy": [],
         "val_total": [],
         "val_feature": [],
         "val_detection": [],
         "val_response": [],
+        "val_privacy": [],
         "precision": [],
         "recall": [],
         "f1": [],
@@ -393,6 +413,7 @@ def train():
             epoch_feature = 0.0
             epoch_detection = 0.0
             epoch_response = 0.0
+            epoch_privacy = 0.0
             phase_snapshot = collect_phase_snapshot(student_raw)
             epoch_phase_grad_norm = 0.0
 
@@ -406,6 +427,7 @@ def train():
 
                 feature_loss, _ = feature_criterion(student_feature, teacher_feature.detach(), student_raw)
                 response_loss, _ = detection_response_loss(Config, reference_detector, student_feature, teacher_feature.detach())
+                privacy_loss, _ = input_privacy_loss(Config, student_feature, gray)
                 if stage_name in {"student_only", "student_adapt_max"} and Config.DETECTION_LOSS_WEIGHT_STUDENT <= 0:
                     detection_loss = torch.zeros((), device=device)
                 else:
@@ -417,9 +439,10 @@ def train():
                         feature_loss * Config.FEATURE_LOSS_WEIGHT_STUDENT
                         + detection_loss * Config.DETECTION_LOSS_WEIGHT_STUDENT
                         + response_loss
+                        + privacy_loss
                     )
                 elif stage_name == "student_adapt_max":
-                    total_loss = feature_loss * Config.FEATURE_LOSS_WEIGHT_ADAPT + response_loss
+                    total_loss = feature_loss * Config.FEATURE_LOSS_WEIGHT_ADAPT + response_loss + privacy_loss
                 elif stage_name == "detector_only":
                     total_loss = detection_loss * Config.DETECTION_LOSS_WEIGHT_DETECTOR
                 else:
@@ -427,6 +450,7 @@ def train():
                         feature_loss * Config.FEATURE_LOSS_WEIGHT_JOINT
                         + detection_loss * Config.DETECTION_LOSS_WEIGHT_JOINT
                         + response_loss
+                        + privacy_loss
                     )
 
                 total_loss.backward()
@@ -441,6 +465,7 @@ def train():
                 epoch_feature += float(feature_loss.detach().item())
                 epoch_detection += float(detection_loss.detach().item())
                 epoch_response += float(response_loss.detach().item())
+                epoch_privacy += float(privacy_loss.detach().item())
 
             if scheduler is not None:
                 scheduler.step()
@@ -454,12 +479,14 @@ def train():
             avg_feature = epoch_feature / num_batches
             avg_detection = epoch_detection / num_batches
             avg_response = epoch_response / num_batches
+            avg_privacy = epoch_privacy / num_batches
             avg_phase_grad_norm = epoch_phase_grad_norm / num_batches
             phase_update_norm, phase_update_rel = collect_phase_update_norm(student_raw, phase_snapshot)
             history["train_total"].append(avg_total)
             history["train_feature"].append(avg_feature)
             history["train_detection"].append(avg_detection)
             history["train_response"].append(avg_response)
+            history["train_privacy"].append(avg_privacy)
             display_epoch = global_epoch + 1
             slm_stats = collect_slm_statistics(student_raw)
             slm_ok = (
@@ -491,12 +518,13 @@ def train():
                 history["val_feature"].append(val_losses["feature"])
                 history["val_detection"].append(val_losses["detection"])
                 history["val_response"].append(val_losses["response"])
+                history["val_privacy"].append(val_losses["privacy"])
                 history["precision"].append(val_metrics["precision"])
                 history["recall"].append(val_metrics["recall"])
                 history["f1"].append(val_metrics["f1"])
                 history["map50"].append(val_metrics["map50"])
             else:
-                for key in ("val_total", "val_feature", "val_detection", "val_response", "precision", "recall", "f1", "map50"):
+                for key in ("val_total", "val_feature", "val_detection", "val_response", "val_privacy", "precision", "recall", "f1", "map50"):
                     history[key].append(np.nan)
 
             # 验证后同步所有 rank
@@ -609,7 +637,8 @@ def train():
             log_to_file(
                 Config,
                 f"Epoch {display_epoch:03d} [{stage_name}] total={avg_total:.6f} "
-                f"feature={avg_feature:.6f} detection={avg_detection:.6f} response={avg_response:.6f} "
+                f"feature={avg_feature:.6f} detection={avg_detection:.6f} "
+                f"response={avg_response:.6f} privacy={avg_privacy:.6f} "
                 f"phase_grad={avg_phase_grad_norm:.6e} phase_update={phase_update_norm:.6e} "
                 f"phase_update_rel={phase_update_rel:.6e} "
                 f"slm_std={slm_stats['slm1_wrapped_std']:.3f}/{slm_stats['slm2_wrapped_std']:.3f} "
