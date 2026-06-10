@@ -470,10 +470,6 @@ def train():
             if scheduler is not None:
                 scheduler.step()
 
-            # 训练结束后同步所有 rank
-            if use_ddp:
-                torch.distributed.barrier()
-
             num_batches = max(len(train_loader), 1)
             avg_total = epoch_total / num_batches
             avg_feature = epoch_feature / num_batches
@@ -526,10 +522,6 @@ def train():
             else:
                 for key in ("val_total", "val_feature", "val_detection", "val_response", "val_privacy", "precision", "recall", "f1", "map50"):
                     history[key].append(np.nan)
-
-            # 验证后同步所有 rank
-            if use_ddp:
-                torch.distributed.barrier()
 
             student_score_is_best = False
             if norm_is_deployment_ready and slm_ok and stage_name == "student_adapt_max":

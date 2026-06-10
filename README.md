@@ -33,17 +33,18 @@ pip install torch torchvision opencv-python matplotlib tqdm numpy pillow scipy p
 ## 使用方法
 
 ### 训练模型
+
 ```bash
-python optical_slm_yolov8_head.py    # 光学SLM模型训练
-python optical_teacher_yolov8_head.py # 光学教师模型训练
+# 光学教师模型训练
+python optical_teacher_yolov8_head.py                          # 单卡
+torchrun --nproc_per_node=2 optical_teacher_yolov8_head.py     # 多卡
 
-# 单卡
-python optical_teacher_yolov8_head.py
-
-# 多卡
-torchrun --nproc_per_node=2 optical_teacher_yolov8_head.py
-torchrun 是 PyTorch 官方推荐的 DDP 启动方式，使用 spawn 而非 fork，不会继承 NCCL 状态，自动设置所有环境变量。
+# 光学SLM模型训练
+python optical_slm_yolov8_head.py                              # 单卡
+torchrun --nproc_per_node=2 optical_slm_yolov8_head.py         # 多卡
 ```
+
+> `torchrun` 是 PyTorch 官方推荐的 DDP 启动方式，自动设置环境变量，支持多卡训练。
 
 ### 目标检测
 ```bash

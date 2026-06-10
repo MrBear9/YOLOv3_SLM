@@ -215,10 +215,7 @@ def train():
             scheduler = CosineAnnealingLR(optimizer, T_max=phase_epochs, eta_min=Config.ETA_MIN)
             log_to_file(Config, f"Epoch {epoch}: phase={phase}, teacher_lr={stage_settings['teacher_lr']:.6g}, detector_lr={stage_settings['detector_lr']:.6g}, cosine_T_max={phase_epochs}")
 
-        # ---- 训练循环（带诊断日志）----
-        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True, disable=not is_main)):
-            if use_ddp and batch_idx == 0:
-                print(f"[rank {local_rank}] Epoch {epoch}: first batch loaded", flush=True)
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True, disable=not is_main):
             batch_images, batch_targets = prepare_batch(Config, batch, device)
             optimizer.zero_grad()
             use_distill = enable_distill and distill_loss_fn is not None
@@ -234,9 +231,6 @@ def train():
             else:
                 teacher_features, predictions = model(batch_images, return_feature=True)
                 teacher_aux = None
-
-            if use_ddp and batch_idx == 0:
-                print(f"[rank {local_rank}] Epoch {epoch}: first forward done", flush=True)
 
             loss, loss_stats = criterion(predictions, batch_targets)
 
@@ -260,19 +254,10 @@ def train():
                 )
 
             loss.backward()
-
-            if use_ddp and batch_idx == 0:
-                print(f"[rank {local_rank}] Epoch {epoch}: first backward done", flush=True)
-
             optimizer.step()
             train_component_sums["total"] += float(loss.detach().item())
             for key in ("box", "obj", "noobj", "cls"):
                 train_component_sums[key] += loss_stats.get(key, 0.0)
-
-        if use_ddp:
-            print(f"[rank {local_rank}] Epoch {epoch}: training loop done, hitting barrier", flush=True)
-            torch.distributed.barrier()
-            print(f"[rank {local_rank}] Epoch {epoch}: barrier passed", flush=True)
 
         avg_train = {key: value / max(len(train_loader), 1) for key, value in train_component_sums.items()}
         history["train_total"].append(avg_train["total"])
@@ -281,9 +266,7 @@ def train():
         val_losses = None
         val_metrics = None
         if val_loader is not None and ((epoch + 1) % Config.VAL_INTERVAL == 0):
-            print(f"[rank {local_rank}] Epoch {epoch}: starting validation", flush=True)
             val_losses, val_metrics = evaluate_model_anchor_v8(Config, model, val_loader, criterion, device)
-            print(f"[rank {local_rank}] Epoch {epoch}: validation done", flush=True)
             history["val_total"].append(val_losses["total"])
             history["precision"].append(val_metrics["precision"])
             history["recall"].append(val_metrics["recall"])
@@ -292,10 +275,6 @@ def train():
         else:
             for key in ("val_total", "precision", "recall", "f1", "map50"):
                 history[key].append(np.nan)
-
-        # 验证后同步所有 rank
-        if use_ddp:
-            torch.distributed.barrier()
 
         is_best = False
         if val_metrics is not None and val_metrics["map50"] > best_map50 + Config.TEACHER_EARLY_STOP_MIN_DELTA:
@@ -329,7 +308,7 @@ def train():
             no_improve_epochs += Config.VAL_INTERVAL
 
         if is_main and epoch % Config.VIS_INTERVAL == 0:
-            save_detection_visualization_anchor_v8(Config, epoch, model, vis_dataset, vis_dir, prefix=vis_prefix, device=device)
+            save_detection_visualization_anchor_v8(Config, epoch, unwrap_module(model), vis_dataset, vis_dir, prefix=vis_prefix, device=device)
 
         log_epoch_table_row(
             Config,
@@ -347,6 +326,10 @@ def train():
         if is_main:
             save_training_curves(history, Config.TEACHER_OUTPUT_DIR)
 
+        # 每个 epoch 结束后同步所有 rank（唯一 barrier，确保所有 rank 完成本 epoch 的全部工作后再进入下一 epoch）
+        if use_ddp:
+            torch.distributed.barrier()
+
         if (
             val_metrics is not None
             and Config.TEACHER_EARLY_STOP_PATIENCE > 0
@@ -358,10 +341,6 @@ def train():
                 f"Best mAP50={best_map50:.4f}.",
             )
             break
-
-        # 每个 epoch 结束后同步所有 rank
-        if use_ddp:
-            torch.distributed.barrier()
 
     if is_main:
         model_core = unwrap_module(model)
