@@ -62,6 +62,10 @@ def load_student_checkpoint(student, checkpoint_path, device):
     loaded, total = load_matching_state(student, state_dict, prefixes=("student.",))
     if isinstance(checkpoint, dict) and "student_enable_norm" in checkpoint:
         student.enable_norm = bool(checkpoint["student_enable_norm"])
+    if isinstance(checkpoint, dict) and "student_norm_mode" in checkpoint:
+        student.config.STUDENT_NORM_MODE = checkpoint["student_norm_mode"]
+    if isinstance(checkpoint, dict) and "student_norm_schedule" in checkpoint:
+        student.config.STUDENT_NORM_SCHEDULE = checkpoint["student_norm_schedule"]
     return {
         "loaded": loaded,
         "total": total,
@@ -86,25 +90,27 @@ def split_student_param_groups(student):
 
 
 def build_stage_optimizer(config, student, detector, stage_name):
-    if stage_name in {"student_only", "student_adapt_max"}:
+    if stage_name == "phase_focus":
         slm_params, other_params = split_student_param_groups(student)
-        phase_lr = config.ADAPT_PHASE_PARAM_LR if stage_name == "student_adapt_max" else config.PHASE_PARAM_LR
-        student_lr = config.ADAPT_STUDENT_LR if stage_name == "student_adapt_max" else config.STUDENT_LR
         groups = []
         if slm_params:
-            groups.append({"params": slm_params, "lr": phase_lr, "weight_decay": config.PHASE_WEIGHT_DECAY})
+            groups.append({"params": slm_params, "lr": config.PHASE_FOCUS_PHASE_PARAM_LR, "weight_decay": config.PHASE_WEIGHT_DECAY})
         if other_params:
-            groups.append({"params": other_params, "lr": student_lr, "weight_decay": config.WEIGHT_DECAY})
+            groups.append({"params": other_params, "lr": config.PHASE_FOCUS_PHASE_PARAM_LR, "weight_decay": config.WEIGHT_DECAY})
         return torch.optim.Adam(groups, weight_decay=0.0)
-    if stage_name == "detector_only":
+    if stage_name == "detector_focus":
         return torch.optim.Adam([p for p in detector.parameters() if p.requires_grad], lr=config.DETECTOR_LR, weight_decay=config.WEIGHT_DECAY)
     slm_params, other_params = split_student_param_groups(student)
+    phase_lr = config.NORM_JOINT_PHASE_PARAM_LR if stage_name == "norm_joint" else config.JOINT_PHASE_PARAM_LR
+    detector_lr = config.NORM_JOINT_DETECTOR_LR if stage_name == "norm_joint" else config.JOINT_DETECTOR_LR
     groups = []
     if slm_params:
-        groups.append({"params": slm_params, "lr": config.JOINT_PHASE_PARAM_LR, "weight_decay": config.PHASE_WEIGHT_DECAY})
+        groups.append({"params": slm_params, "lr": phase_lr, "weight_decay": config.PHASE_WEIGHT_DECAY})
     if other_params:
-        groups.append({"params": other_params, "lr": config.JOINT_STUDENT_LR, "weight_decay": config.WEIGHT_DECAY})
-    groups.append({"params": [p for p in detector.parameters() if p.requires_grad], "lr": config.JOINT_DETECTOR_LR, "weight_decay": config.WEIGHT_DECAY})
+        groups.append({"params": other_params, "lr": phase_lr, "weight_decay": config.WEIGHT_DECAY})
+    detector_params = [p for p in detector.parameters() if p.requires_grad]
+    if detector_params:
+        groups.append({"params": detector_params, "lr": detector_lr, "weight_decay": config.WEIGHT_DECAY})
     return torch.optim.Adam(groups, weight_decay=0.0)
 
 

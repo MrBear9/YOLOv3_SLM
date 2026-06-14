@@ -14,7 +14,7 @@ class ConfigSLM:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_Tv1_light_branch_slim_align_privacy_student_max"
+    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_Tv1_light_branch_slim_4stage_phase_privacy"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
@@ -22,7 +22,6 @@ class ConfigSLM:
     TRAIN_START_TIME = None
 
     TEACHER_DETECTOR_CHECKPOINT = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_privacy/teacher_detector_best.pth"
-    DETECTOR_INIT_MODE = "checkpoint"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -34,11 +33,11 @@ class ConfigSLM:
     BATCH_SIZE = 16
     STRIDES = [8, 16, 32]
 
-    STUDENT_ONLY_EPOCHS = 60
-    STUDENT_ADAPT_MAX_EPOCHS = 0
-    DETECTOR_ONLY_EPOCHS = 5
-    JOINT_EPOCHS = 60
-    EPOCHS = STUDENT_ONLY_EPOCHS + STUDENT_ADAPT_MAX_EPOCHS + DETECTOR_ONLY_EPOCHS + JOINT_EPOCHS
+    PHASE_FOCUS_EPOCHS = 45
+    DETECTOR_FOCUS_EPOCHS = 35
+    JOINT_FIT_EPOCHS = 40
+    NORM_JOINT_EPOCHS = 30
+    EPOCHS = PHASE_FOCUS_EPOCHS + DETECTOR_FOCUS_EPOCHS + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
 
     # =========================================================================
     # SLM optical parameters
@@ -47,6 +46,7 @@ class ConfigSLM:
     PIXEL_SIZE = 6.4e-6
     PROP_DISTANCE_1 = 0.01
     PROP_DISTANCE_2 = 0.02
+    # Options: "phase", "amp_phase".
     SLM_MODE = "phase"
     RESOLUTION = (640, 640)
     OPTICAL_FIELD_EPS = 1e-8
@@ -54,8 +54,9 @@ class ConfigSLM:
 
     # -------- Student normalization --------
     ENABLE_STUDENT_NORM = True
-    STUDENT_NORM_SCHEDULE = "always"
-    STUDENT_NORM_EARLY_MODE = "max"
+    # Options: "norm_joint_only", "always", "none".
+    STUDENT_NORM_SCHEDULE = "norm_joint_only"
+    # Options: "max", "percentile", "mean", "none".
     STUDENT_NORM_MODE = "max"
     STUDENT_NORM_PERCENTILE = 0.995
 
@@ -84,6 +85,7 @@ class ConfigSLM:
 
     # =========================================================================
     # TEACHER_ARCH  (must match teacher-training checkpoint)
+    # Options: "convteacher"/"v1", "convteacher_v2"/"v2", "convteacher_v3"/"v3".
     # =========================================================================
     TEACHER_ARCH = "convteacher"
 
@@ -98,6 +100,7 @@ class ConfigSLM:
 
     # =========================================================================
     # DETECTOR_HEAD_TYPE  (must match teacher-training checkpoint)
+    # Options: "light_branch", "light", "yolov8_anchor".
     # =========================================================================
     DETECTOR_HEAD_TYPE = "light_branch"
 
@@ -174,10 +177,10 @@ class ConfigSLM:
     LOSS_PHASE_SMOOTH_WEIGHT = 0.001
     LOSS_PHASE_DIVERSITY_WEIGHT = 0.15
     ENABLE_FEATURE_DOMAIN_ALIGNMENT = True
+    # Options: "mean_std", "minmax"/"min_max", "none".
     FEATURE_DOMAIN_ALIGN_MODE = "mean_std"
 
     # -------- Privacy / optical obfuscation loss --------
-    PRIVACY_LOSS_WEIGHT = 0.10
     PRIVACY_CORR_TARGET = 0.15
     PRIVACY_SSIM_TARGET = 0.20
 
@@ -195,33 +198,45 @@ class ConfigSLM:
     # =========================================================================
     # Stage loss weights
     # =========================================================================
-    FEATURE_LOSS_WEIGHT_STUDENT = 0.55
-    DETECTION_LOSS_WEIGHT_STUDENT = 0.25
-    DETECTION_LOSS_WEIGHT_DETECTOR = 1.0
-    FEATURE_LOSS_WEIGHT_ADAPT = 0.55
-    FEATURE_LOSS_WEIGHT_JOINT = 0.35
+    FEATURE_LOSS_WEIGHT_PHASE_FOCUS = 0.18
+    DETECTION_LOSS_WEIGHT_PHASE_FOCUS = 0.55
+    RESPONSE_LOSS_WEIGHT_PHASE_FOCUS = 0.03
+    PRIVACY_LOSS_WEIGHT_PHASE_FOCUS = 0.01
+
+    FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
+    DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS = 1.0
+    RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
+    PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
+
+    FEATURE_LOSS_WEIGHT_JOINT = 0.04
     DETECTION_LOSS_WEIGHT_JOINT = 1.00
-    RESPONSE_LOSS_WEIGHT = 0.10
+    RESPONSE_LOSS_WEIGHT_JOINT = 0.02
+    PRIVACY_LOSS_WEIGHT_JOINT = 0.04
+
+    FEATURE_LOSS_WEIGHT_NORM_JOINT = 0.02
+    DETECTION_LOSS_WEIGHT_NORM_JOINT = 1.00
+    RESPONSE_LOSS_WEIGHT_NORM_JOINT = 0.01
+    PRIVACY_LOSS_WEIGHT_NORM_JOINT = 0.08
 
     # =========================================================================
     # Optimizer & LR schedule
     # =========================================================================
-    STUDENT_LR = 1e-3
-    PHASE_PARAM_LR = 2e-3
-    ADAPT_STUDENT_LR = 2e-4
-    ADAPT_PHASE_PARAM_LR = 5e-4
-    DETECTOR_LR = 2e-4
-    JOINT_STUDENT_LR = 5e-5
-    JOINT_PHASE_PARAM_LR = 2e-4
+    PHASE_FOCUS_PHASE_PARAM_LR = 3e-3
+    DETECTOR_LR = 3e-4
+    JOINT_PHASE_PARAM_LR = 5e-4
     JOINT_DETECTOR_LR = 5e-5
+    NORM_JOINT_PHASE_PARAM_LR = 4e-4
+    NORM_JOINT_DETECTOR_LR = 5e-5
     PHASE_GRAD_CLIP_NORM = 2.0
     WEIGHT_DECAY = 3e-5
     PHASE_WEIGHT_DECAY = 0.0
+    # Options: "CosineAnnealingLR", "none".
     LR_SCHEDULER = "CosineAnnealingLR"
     ETA_MIN = 1e-6
 
-    DETECTOR_EARLY_STOP_PATIENCE = 8
-    DETECTOR_EARLY_STOP_MIN_DELTA = 0.002
+    ENABLE_DETECTOR_FOCUS_EARLY_STOP = True
+    DETECTOR_FOCUS_EARLY_STOP_PATIENCE = 8
+    DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA = 0.002
 
     # =========================================================================
     # Detection post-process
@@ -245,6 +260,7 @@ class ConfigSLM:
     VIS_INTERVAL = 5
     VIS_BATCH_SIZE = 4
     VIS_DPI = 130
+    # Options: "val", "train".
     VIS_DATASET_SPLIT = "val"
     VIS_SEED = 20260504
     VIS_CONF_THRESH = 0.5
@@ -303,32 +319,43 @@ class ConfigSLM:
             "OPTICAL_SLM_TEACHER_V3_C2F_BLOCKS": ("TEACHER_V3_C2F_BLOCKS", int),
             "OPTICAL_SLM_TEACHER_V3_RESIDUAL_SCALE": ("TEACHER_V3_RESIDUAL_SCALE", float),
             "OPTICAL_SLM_STUDENT_NORM_SCHEDULE": ("STUDENT_NORM_SCHEDULE", str),
-            "OPTICAL_SLM_STUDENT_NORM_EARLY_MODE": ("STUDENT_NORM_EARLY_MODE", str),
             "OPTICAL_SLM_STUDENT_NORM_MODE": ("STUDENT_NORM_MODE", str),
             "OPTICAL_SLM_STUDENT_NORM_PERCENTILE": ("STUDENT_NORM_PERCENTILE", float),
-            "OPTICAL_SLM_ADAPT_STUDENT_LR": ("ADAPT_STUDENT_LR", float),
-            "OPTICAL_SLM_ADAPT_PHASE_PARAM_LR": ("ADAPT_PHASE_PARAM_LR", float),
+            "OPTICAL_SLM_PHASE_FOCUS_PHASE_PARAM_LR": ("PHASE_FOCUS_PHASE_PARAM_LR", float),
             "OPTICAL_SLM_DETECTOR_LR": ("DETECTOR_LR", float),
+            "OPTICAL_SLM_JOINT_PHASE_PARAM_LR": ("JOINT_PHASE_PARAM_LR", float),
             "OPTICAL_SLM_JOINT_DETECTOR_LR": ("JOINT_DETECTOR_LR", float),
+            "OPTICAL_SLM_NORM_JOINT_PHASE_PARAM_LR": ("NORM_JOINT_PHASE_PARAM_LR", float),
+            "OPTICAL_SLM_NORM_JOINT_DETECTOR_LR": ("NORM_JOINT_DETECTOR_LR", float),
             "OPTICAL_SLM_PHASE_GRAD_CLIP_NORM": ("PHASE_GRAD_CLIP_NORM", float),
+            "OPTICAL_SLM_FEATURE_LOSS_WEIGHT_PHASE_FOCUS": ("FEATURE_LOSS_WEIGHT_PHASE_FOCUS", float),
+            "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_PHASE_FOCUS": ("DETECTION_LOSS_WEIGHT_PHASE_FOCUS", float),
+            "OPTICAL_SLM_RESPONSE_LOSS_WEIGHT_PHASE_FOCUS": ("RESPONSE_LOSS_WEIGHT_PHASE_FOCUS", float),
+            "OPTICAL_SLM_PRIVACY_LOSS_WEIGHT_PHASE_FOCUS": ("PRIVACY_LOSS_WEIGHT_PHASE_FOCUS", float),
+            "OPTICAL_SLM_FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS": ("FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS", float),
+            "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS": ("DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS", float),
+            "OPTICAL_SLM_RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS": ("RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS", float),
+            "OPTICAL_SLM_PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS": ("PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS", float),
             "OPTICAL_SLM_FEATURE_LOSS_WEIGHT_JOINT": ("FEATURE_LOSS_WEIGHT_JOINT", float),
             "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_JOINT": ("DETECTION_LOSS_WEIGHT_JOINT", float),
-            "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_STUDENT": ("DETECTION_LOSS_WEIGHT_STUDENT", float),
+            "OPTICAL_SLM_RESPONSE_LOSS_WEIGHT_JOINT": ("RESPONSE_LOSS_WEIGHT_JOINT", float),
+            "OPTICAL_SLM_PRIVACY_LOSS_WEIGHT_JOINT": ("PRIVACY_LOSS_WEIGHT_JOINT", float),
+            "OPTICAL_SLM_FEATURE_LOSS_WEIGHT_NORM_JOINT": ("FEATURE_LOSS_WEIGHT_NORM_JOINT", float),
+            "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_NORM_JOINT": ("DETECTION_LOSS_WEIGHT_NORM_JOINT", float),
+            "OPTICAL_SLM_RESPONSE_LOSS_WEIGHT_NORM_JOINT": ("RESPONSE_LOSS_WEIGHT_NORM_JOINT", float),
+            "OPTICAL_SLM_PRIVACY_LOSS_WEIGHT_NORM_JOINT": ("PRIVACY_LOSS_WEIGHT_NORM_JOINT", float),
             "OPTICAL_SLM_FEATURE_DOMAIN_ALIGN_MODE": ("FEATURE_DOMAIN_ALIGN_MODE", str),
-            "OPTICAL_SLM_PRIVACY_LOSS_WEIGHT": ("PRIVACY_LOSS_WEIGHT", float),
             "OPTICAL_SLM_PRIVACY_CORR_TARGET": ("PRIVACY_CORR_TARGET", float),
             "OPTICAL_SLM_PRIVACY_SSIM_TARGET": ("PRIVACY_SSIM_TARGET", float),
-            "OPTICAL_SLM_RESPONSE_LOSS_WEIGHT": ("RESPONSE_LOSS_WEIGHT", float),
-            "OPTICAL_SLM_DETECTOR_EARLY_STOP_PATIENCE": ("DETECTOR_EARLY_STOP_PATIENCE", int),
-            "OPTICAL_SLM_DETECTOR_EARLY_STOP_MIN_DELTA": ("DETECTOR_EARLY_STOP_MIN_DELTA", float),
+            "OPTICAL_SLM_DETECTOR_FOCUS_EARLY_STOP_PATIENCE": ("DETECTOR_FOCUS_EARLY_STOP_PATIENCE", int),
+            "OPTICAL_SLM_DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA": ("DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA", float),
             "OPTICAL_SLM_LR_SCHEDULER": ("LR_SCHEDULER", str),
             "OPTICAL_SLM_ETA_MIN": ("ETA_MIN", float),
             "OPTICAL_SLM_BATCH_SIZE": ("BATCH_SIZE", int),
-            "OPTICAL_SLM_EPOCHS": ("EPOCHS", int),
-            "OPTICAL_SLM_STUDENT_ONLY_EPOCHS": ("STUDENT_ONLY_EPOCHS", int),
-            "OPTICAL_SLM_STUDENT_ADAPT_MAX_EPOCHS": ("STUDENT_ADAPT_MAX_EPOCHS", int),
-            "OPTICAL_SLM_DETECTOR_ONLY_EPOCHS": ("DETECTOR_ONLY_EPOCHS", int),
-            "OPTICAL_SLM_JOINT_EPOCHS": ("JOINT_EPOCHS", int),
+            "OPTICAL_SLM_PHASE_FOCUS_EPOCHS": ("PHASE_FOCUS_EPOCHS", int),
+            "OPTICAL_SLM_DETECTOR_FOCUS_EPOCHS": ("DETECTOR_FOCUS_EPOCHS", int),
+            "OPTICAL_SLM_JOINT_FIT_EPOCHS": ("JOINT_FIT_EPOCHS", int),
+            "OPTICAL_SLM_NORM_JOINT_EPOCHS": ("NORM_JOINT_EPOCHS", int),
             "OPTICAL_SLM_NUM_WORKERS": ("NUM_WORKERS", int),
         }
         for env_name, (attr, caster) in overrides.items():
@@ -339,11 +366,14 @@ class ConfigSLM:
         align = os.environ.get("OPTICAL_SLM_ENABLE_FEATURE_DOMAIN_ALIGNMENT")
         if align:
             cls.ENABLE_FEATURE_DOMAIN_ALIGNMENT = align.strip().lower() in {"1", "true", "yes", "on"}
+        early_stop = os.environ.get("OPTICAL_SLM_ENABLE_DETECTOR_FOCUS_EARLY_STOP")
+        if early_stop:
+            cls.ENABLE_DETECTOR_FOCUS_EARLY_STOP = early_stop.strip().lower() in {"1", "true", "yes", "on"}
 
     @classmethod
     def initialize(cls):
         cls.apply_runtime_overrides()
-        cls.EPOCHS = cls.STUDENT_ONLY_EPOCHS + cls.STUDENT_ADAPT_MAX_EPOCHS + cls.DETECTOR_ONLY_EPOCHS + cls.JOINT_EPOCHS
+        cls.EPOCHS = cls.PHASE_FOCUS_EPOCHS + cls.DETECTOR_FOCUS_EPOCHS + cls.JOINT_FIT_EPOCHS + cls.NORM_JOINT_EPOCHS
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
         cls.OUTPUT_DIR = resolve_project_path(cls.OUTPUT_DIR)
         cls.TEACHER_DETECTOR_CHECKPOINT = resolve_project_path(cls.TEACHER_DETECTOR_CHECKPOINT)
@@ -370,6 +400,36 @@ class ConfigSLM:
     @classmethod
     def get_detector_output_channels(cls):
         return 3 * (5 + cls.NUM_CLASSES)
+
+    @classmethod
+    def get_stage_loss_weights(cls, stage_name):
+        if stage_name == "phase_focus":
+            return {
+                "feature": cls.FEATURE_LOSS_WEIGHT_PHASE_FOCUS,
+                "detection": cls.DETECTION_LOSS_WEIGHT_PHASE_FOCUS,
+                "response": cls.RESPONSE_LOSS_WEIGHT_PHASE_FOCUS,
+                "privacy": cls.PRIVACY_LOSS_WEIGHT_PHASE_FOCUS,
+            }
+        if stage_name == "detector_focus":
+            return {
+                "feature": cls.FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS,
+                "detection": cls.DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS,
+                "response": cls.RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS,
+                "privacy": cls.PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS,
+            }
+        if stage_name == "norm_joint":
+            return {
+                "feature": cls.FEATURE_LOSS_WEIGHT_NORM_JOINT,
+                "detection": cls.DETECTION_LOSS_WEIGHT_NORM_JOINT,
+                "response": cls.RESPONSE_LOSS_WEIGHT_NORM_JOINT,
+                "privacy": cls.PRIVACY_LOSS_WEIGHT_NORM_JOINT,
+            }
+        return {
+            "feature": cls.FEATURE_LOSS_WEIGHT_JOINT,
+            "detection": cls.DETECTION_LOSS_WEIGHT_JOINT,
+            "response": cls.RESPONSE_LOSS_WEIGHT_JOINT,
+            "privacy": cls.PRIVACY_LOSS_WEIGHT_JOINT,
+        }
 
     @classmethod
     def get_student_best_path(cls):

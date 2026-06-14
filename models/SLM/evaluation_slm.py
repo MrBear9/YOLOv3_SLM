@@ -43,41 +43,42 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
     total_tp = total_fp = total_fn = 0
 
     with torch.no_grad():
+        stage_weights = config.get_stage_loss_weights(stage_name)
         for batch in tqdm(dataloader, desc="SLM validation", leave=False):
             gray, teacher_input, targets = _move_batch_to_device(config, batch, device)
-            teacher_feature = teacher_core(teacher_input)
+            teacher_feature = None
+            if stage_weights["feature"] > 0 or stage_weights["response"] > 0:
+                teacher_feature = teacher_core(teacher_input)
             student_feature = student_core(gray)
-            feature_loss, _ = feature_criterion(student_feature, teacher_feature, student_core)
-            response_loss, _ = detection_response_loss(config, response_detector_core, student_feature, teacher_feature)
-            privacy_loss, _ = input_privacy_loss(config, student_feature, gray)
+            zero = torch.zeros((), device=device, dtype=student_feature.dtype)
+            if stage_weights["feature"] > 0:
+                feature_loss, _ = feature_criterion(student_feature, teacher_feature, student_core)
+            else:
+                feature_loss = zero
+            if stage_weights["response"] > 0:
+                response_loss, _ = detection_response_loss(config, response_detector_core, student_feature, teacher_feature)
+            else:
+                response_loss = zero
+            if stage_weights["privacy"] > 0:
+                privacy_loss, _ = input_privacy_loss(config, student_feature, gray)
+            else:
+                privacy_loss = zero
 
-            evaluate_detector = stage_name not in {"student_only", "student_adapt_max"}
+            evaluate_detector = stage_weights["detection"] > 0
             if evaluate_detector:
                 predictions = detector_core(student_feature)
                 detection_loss, loss_stats = detection_criterion(predictions, targets)
             else:
                 predictions = None
-                detection_loss = torch.zeros((), device=device)
+                detection_loss = zero
                 loss_stats = {"box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
 
-            if stage_name == "student_only":
-                total_loss = (
-                    feature_loss * config.FEATURE_LOSS_WEIGHT_STUDENT
-                    + detection_loss * config.DETECTION_LOSS_WEIGHT_STUDENT
-                    + response_loss
-                    + privacy_loss
-                )
-            elif stage_name == "student_adapt_max":
-                total_loss = feature_loss * config.FEATURE_LOSS_WEIGHT_ADAPT + response_loss + privacy_loss
-            elif stage_name == "detector_only":
-                total_loss = detection_loss * config.DETECTION_LOSS_WEIGHT_DETECTOR
-            else:
-                total_loss = (
-                    feature_loss * config.FEATURE_LOSS_WEIGHT_JOINT
-                    + detection_loss * config.DETECTION_LOSS_WEIGHT_JOINT
-                    + response_loss
-                    + privacy_loss
-                )
+            total_loss = (
+                feature_loss * stage_weights["feature"]
+                + detection_loss * stage_weights["detection"]
+                + response_loss * stage_weights["response"]
+                + privacy_loss * stage_weights["privacy"]
+            )
 
             totals["total"] += float(total_loss.detach().item())
             totals["feature"] += float(feature_loss.detach().item())

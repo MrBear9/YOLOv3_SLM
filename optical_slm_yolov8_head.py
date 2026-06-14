@@ -53,10 +53,10 @@ def configure_backends():
 
 def stage_schedule():
     return [
-        ("student_only", Config.STUDENT_ONLY_EPOCHS),
-        ("student_adapt_max", Config.STUDENT_ADAPT_MAX_EPOCHS),
-        ("detector_only", Config.DETECTOR_ONLY_EPOCHS),
-        ("joint_balance", Config.JOINT_EPOCHS),
+        ("phase_focus", Config.PHASE_FOCUS_EPOCHS),
+        ("detector_focus", Config.DETECTOR_FOCUS_EPOCHS),
+        ("joint_fit", Config.JOINT_FIT_EPOCHS),
+        ("norm_joint", Config.NORM_JOINT_EPOCHS),
     ]
 
 
@@ -70,11 +70,11 @@ def prepare_batch(batch, device):
 
 
 def configure_student_norm_for_stage(stage_name, deployment_norm_mode):
-    schedule = str(getattr(Config, "STUDENT_NORM_SCHEDULE", "always")).lower()
-    if schedule == "none":
+    schedule = str(getattr(Config, "STUDENT_NORM_SCHEDULE", "norm_joint_only")).lower()
+    if not getattr(Config, "ENABLE_STUDENT_NORM", True) or schedule in {"none", "off", "false"}:
         stage_norm_mode = "none"
-    elif schedule == "late" and stage_name == "student_only":
-        stage_norm_mode = Config.STUDENT_NORM_EARLY_MODE
+    elif schedule in {"norm_joint_only", "norm_joint"}:
+        stage_norm_mode = deployment_norm_mode if stage_name == "norm_joint" else "none"
     else:
         stage_norm_mode = deployment_norm_mode
     Config.STUDENT_NORM_MODE = stage_norm_mode
@@ -208,8 +208,9 @@ def log_config():
     log_to_file(Config, f"Classes: {Config.CLASS_NAMES}")
     log_to_file(
         Config,
-        f"Epochs student/adapt/detector/joint: "
-        f"{Config.STUDENT_ONLY_EPOCHS}/{Config.STUDENT_ADAPT_MAX_EPOCHS}/{Config.DETECTOR_ONLY_EPOCHS}/{Config.JOINT_EPOCHS}",
+        f"Epochs phase_focus/detector_focus/joint_fit/norm_joint: "
+        f"{Config.PHASE_FOCUS_EPOCHS}/{Config.DETECTOR_FOCUS_EPOCHS}/"
+        f"{Config.JOINT_FIT_EPOCHS}/{Config.NORM_JOINT_EPOCHS}",
     )
     log_to_file(Config, f"Save paired detector best: {Config.get_detector_best_path()}")
     log_to_file(Config, f"Save paired student mirror: {Config.get_student_best_path()}")
@@ -220,9 +221,10 @@ def log_config():
     )
     log_to_file(
         Config,
-        f"LR student/phase/adapt_student/adapt_phase/detector/joint_detector: "
-        f"{Config.STUDENT_LR}/{Config.PHASE_PARAM_LR}/{Config.ADAPT_STUDENT_LR}/"
-        f"{Config.ADAPT_PHASE_PARAM_LR}/{Config.DETECTOR_LR}/{Config.JOINT_DETECTOR_LR}",
+        f"LR phase_focus_phase/detector/joint_phase/joint_detector/norm_joint_phase/norm_joint_detector: "
+        f"{Config.PHASE_FOCUS_PHASE_PARAM_LR}/{Config.DETECTOR_LR}/"
+        f"{Config.JOINT_PHASE_PARAM_LR}/{Config.JOINT_DETECTOR_LR}/"
+        f"{Config.NORM_JOINT_PHASE_PARAM_LR}/{Config.NORM_JOINT_DETECTOR_LR}",
     )
     log_to_file(Config, f"Phase gradient clip norm: {Config.PHASE_GRAD_CLIP_NORM}")
     log_to_file(Config, f"LR scheduler: {Config.LR_SCHEDULER}, eta_min={Config.ETA_MIN}")
@@ -233,7 +235,7 @@ def log_config():
     log_to_file(
         Config,
         f"Student normalization: enabled={Config.ENABLE_STUDENT_NORM}, schedule={Config.STUDENT_NORM_SCHEDULE}, "
-        f"early_mode={Config.STUDENT_NORM_EARLY_MODE}, deployment_mode={Config.STUDENT_NORM_MODE}, "
+        f"deployment_mode={Config.STUDENT_NORM_MODE}, "
         f"percentile={Config.STUDENT_NORM_PERCENTILE}",
     )
     log_to_file(
@@ -249,20 +251,20 @@ def log_config():
     )
     log_to_file(
         Config,
-        f"Stage loss weights student/adapt/joint_feature/joint_detection: "
-        f"{Config.FEATURE_LOSS_WEIGHT_STUDENT}/{Config.FEATURE_LOSS_WEIGHT_ADAPT}/"
-        f"{Config.FEATURE_LOSS_WEIGHT_JOINT}/{Config.DETECTION_LOSS_WEIGHT_JOINT}",
-    )
-    log_to_file(Config, f"Response distillation loss weight: {Config.RESPONSE_LOSS_WEIGHT}")
-    log_to_file(
-        Config,
-        f"Privacy loss weight/corr_target/ssim_target: "
-        f"{Config.PRIVACY_LOSS_WEIGHT}/{Config.PRIVACY_CORR_TARGET}/{Config.PRIVACY_SSIM_TARGET}",
+        f"Stage loss weights: phase_focus={Config.get_stage_loss_weights('phase_focus')}, "
+        f"detector_focus={Config.get_stage_loss_weights('detector_focus')}, "
+        f"joint_fit={Config.get_stage_loss_weights('joint_fit')}, "
+        f"norm_joint={Config.get_stage_loss_weights('norm_joint')}",
     )
     log_to_file(
         Config,
-        f"Detector early stop: patience={Config.DETECTOR_EARLY_STOP_PATIENCE}, "
-        f"min_delta={Config.DETECTOR_EARLY_STOP_MIN_DELTA}",
+        f"Privacy targets corr/ssim: {Config.PRIVACY_CORR_TARGET}/{Config.PRIVACY_SSIM_TARGET}",
+    )
+    log_to_file(
+        Config,
+        f"Detector-focus early stop: enabled={Config.ENABLE_DETECTOR_FOCUS_EARLY_STOP}, "
+        f"patience={Config.DETECTOR_FOCUS_EARLY_STOP_PATIENCE}, "
+        f"min_delta={Config.DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA}",
     )
     log_to_file(
         Config,
@@ -385,10 +387,12 @@ def train():
         if stage_epochs <= 0:
             continue
         stage_norm_mode = configure_student_norm_for_stage(stage_name, deployment_norm_mode)
-        if stage_name in {"student_only", "student_adapt_max"}:
+        stage_weights = Config.get_stage_loss_weights(stage_name)
+        student_raw.enable_norm = bool(Config.ENABLE_STUDENT_NORM and stage_norm_mode != "none")
+        if stage_name == "phase_focus":
             set_trainable(student, True)
             set_trainable(detector, False)
-        elif stage_name == "detector_only":
+        elif stage_name == "detector_focus":
             set_trainable(student, False)
             set_trainable(detector, True)
         else:
@@ -400,6 +404,7 @@ def train():
         log_to_file(
             Config,
             f"Start stage={stage_name}, epochs={stage_epochs}, student_norm_mode={stage_norm_mode}, "
+            f"student_enable_norm={student_raw.enable_norm}, "
             f"scheduler={Config.LR_SCHEDULER if scheduler is not None else 'none'}",
         )
         detector_no_improve = 0
@@ -407,8 +412,8 @@ def train():
         for _ in range(stage_epochs):
             if use_ddp and train_sampler is not None:
                 train_sampler.set_epoch(global_epoch)
-            student.train(stage_name != "detector_only")
-            detector.train(stage_name not in {"student_only", "student_adapt_max"})
+            student.train(stage_name != "detector_focus")
+            detector.train(stage_name != "phase_focus")
             epoch_total = 0.0
             epoch_feature = 0.0
             epoch_detection = 0.0
@@ -421,41 +426,41 @@ def train():
                 gray, rgb, targets = prepare_batch(batch, device)
                 optimizer.zero_grad(set_to_none=True)
                 zero_model_grads(student_raw, detector_raw)
-                with torch.no_grad():
-                    teacher_feature = teacher(rgb)
+                teacher_feature = None
+                if stage_weights["feature"] > 0 or stage_weights["response"] > 0:
+                    with torch.no_grad():
+                        teacher_feature = teacher(rgb)
                 student_feature = student(gray)
 
-                feature_loss, _ = feature_criterion(student_feature, teacher_feature.detach(), student_raw)
-                response_loss, _ = detection_response_loss(Config, reference_detector, student_feature, teacher_feature.detach())
-                privacy_loss, _ = input_privacy_loss(Config, student_feature, gray)
-                if stage_name in {"student_only", "student_adapt_max"} and Config.DETECTION_LOSS_WEIGHT_STUDENT <= 0:
-                    detection_loss = torch.zeros((), device=device)
+                zero = torch.zeros((), device=device, dtype=student_feature.dtype)
+                if stage_weights["feature"] > 0:
+                    feature_loss, _ = feature_criterion(student_feature, teacher_feature.detach(), student_raw)
                 else:
+                    feature_loss = zero
+                if stage_weights["response"] > 0:
+                    response_loss, _ = detection_response_loss(Config, reference_detector, student_feature, teacher_feature.detach())
+                else:
+                    response_loss = zero
+                if stage_weights["privacy"] > 0:
+                    privacy_loss, _ = input_privacy_loss(Config, student_feature, gray)
+                else:
+                    privacy_loss = zero
+                if stage_weights["detection"] > 0:
                     predictions = detector(student_feature)
                     detection_loss, _ = detection_criterion(predictions, targets)
-
-                if stage_name == "student_only":
-                    total_loss = (
-                        feature_loss * Config.FEATURE_LOSS_WEIGHT_STUDENT
-                        + detection_loss * Config.DETECTION_LOSS_WEIGHT_STUDENT
-                        + response_loss
-                        + privacy_loss
-                    )
-                elif stage_name == "student_adapt_max":
-                    total_loss = feature_loss * Config.FEATURE_LOSS_WEIGHT_ADAPT + response_loss + privacy_loss
-                elif stage_name == "detector_only":
-                    total_loss = detection_loss * Config.DETECTION_LOSS_WEIGHT_DETECTOR
                 else:
-                    total_loss = (
-                        feature_loss * Config.FEATURE_LOSS_WEIGHT_JOINT
-                        + detection_loss * Config.DETECTION_LOSS_WEIGHT_JOINT
-                        + response_loss
-                        + privacy_loss
-                    )
+                    detection_loss = zero
+
+                total_loss = (
+                    feature_loss * stage_weights["feature"]
+                    + detection_loss * stage_weights["detection"]
+                    + response_loss * stage_weights["response"]
+                    + privacy_loss * stage_weights["privacy"]
+                )
 
                 total_loss.backward()
                 phase_grad_norm = collect_phase_grad_norm(student_raw)
-                if stage_name == "joint_balance":
+                if stage_name in {"joint_fit", "norm_joint"}:
                     clipped_norm = clip_phase_grad_norm(student_raw, Config.PHASE_GRAD_CLIP_NORM)
                     if clipped_norm is not None:
                         phase_grad_norm = min(clipped_norm, Config.PHASE_GRAD_CLIP_NORM)
@@ -524,11 +529,9 @@ def train():
                     history[key].append(np.nan)
 
             student_score_is_best = False
-            if norm_is_deployment_ready and slm_ok and stage_name == "student_adapt_max":
-                student_score_is_best = avg_feature < best_student_loss
-            elif norm_is_deployment_ready and slm_ok and stage_name == "joint_balance":
+            if norm_is_deployment_ready and slm_ok and stage_name == "norm_joint":
                 if val_metrics is not None:
-                    student_score_is_best = val_metrics["map50"] > best_student_map50 + Config.DETECTOR_EARLY_STOP_MIN_DELTA
+                    student_score_is_best = val_metrics["map50"] > best_student_map50 + Config.DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA
                 else:
                     student_score_is_best = avg_total < best_student_loss
             if student_score_is_best:
@@ -540,23 +543,24 @@ def train():
                     f"Tracked best normalized SLM student candidate: epoch={display_epoch}, train_loss={avg_total:.6f}, "
                     f"val_loss={val_losses['total']:.6f}, map50={best_student_map50:.4f}" if val_metrics is not None else f"Tracked best normalized SLM student candidate: epoch={display_epoch}, train_loss={avg_total:.6f}",
                 )
-            elif stage_name == "student_only" and not norm_is_deployment_ready:
+            elif stage_name == "phase_focus" and not norm_is_deployment_ready:
                 log_to_file(
                     Config,
-                    "Student-only phase was trained without deployment normalization; standalone "
+                    "Phase-focus stage was trained without deployment normalization; standalone "
                     "optical_student_best.pth is deferred until normalized detector/joint training.",
                 )
 
             detector_score_is_best = False
-            if stage_name in {"detector_only", "joint_balance"} and val_metrics is not None and val_metrics["map50"] > best_map50 + Config.DETECTOR_EARLY_STOP_MIN_DELTA:
+            detector_stages = {"detector_focus", "joint_fit", "norm_joint"}
+            if stage_name in detector_stages and val_metrics is not None and val_metrics["map50"] > best_map50 + Config.DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA:
                 best_map50 = val_metrics["map50"]
                 detector_score_is_best = True
                 detector_no_improve = 0
-            elif val_metrics is not None and stage_name == "detector_only":
+            elif val_metrics is not None and stage_name == "detector_focus":
                 detector_no_improve += 1
-            elif val_metrics is None and avg_total < best_detector_loss:
+            elif stage_name in detector_stages and val_metrics is None and avg_total < best_detector_loss:
                 detector_score_is_best = True
-            if stage_name in {"detector_only", "joint_balance"} and detector_score_is_best:
+            if stage_name in detector_stages and detector_score_is_best:
                 best_detector_loss = avg_total
                 if is_main:
                     save_detector_best(
@@ -656,13 +660,14 @@ def train():
                 torch.distributed.barrier()
             global_epoch += 1
             if (
-                stage_name == "detector_only"
-                and Config.DETECTOR_EARLY_STOP_PATIENCE > 0
-                and detector_no_improve >= Config.DETECTOR_EARLY_STOP_PATIENCE
+                stage_name == "detector_focus"
+                and Config.ENABLE_DETECTOR_FOCUS_EARLY_STOP
+                and Config.DETECTOR_FOCUS_EARLY_STOP_PATIENCE > 0
+                and detector_no_improve >= Config.DETECTOR_FOCUS_EARLY_STOP_PATIENCE
             ):
                 log_to_file(
                     Config,
-                    f"Early stopping detector_only after {detector_no_improve} epochs without mAP50 improvement. "
+                    f"Early stopping detector_focus after {detector_no_improve} epochs without mAP50 improvement. "
                     f"Best mAP50={best_map50:.4f}.",
                 )
                 break

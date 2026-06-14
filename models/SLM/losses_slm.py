@@ -45,10 +45,6 @@ def _ssim_similarity(a, b, eps):
 
 
 def input_privacy_loss(config, student_feature, input_gray):
-    weight = float(getattr(config, "PRIVACY_LOSS_WEIGHT", 0.0))
-    if weight <= 0:
-        zero = torch.zeros((), device=student_feature.device, dtype=student_feature.dtype)
-        return zero, {"privacy": 0.0, "privacy_corr": 0.0, "privacy_ssim": 0.0}
     student_view = _max_normalize(student_feature.float(), config.OPTICAL_NORM_EPS)
     gray_view = _max_normalize(input_gray.float().clamp(min=0), config.OPTICAL_NORM_EPS)
     corr_abs = _pearson_abs(student_view, gray_view, config.OPTICAL_FIELD_EPS)
@@ -56,7 +52,7 @@ def input_privacy_loss(config, student_feature, input_gray):
     corr_target = float(getattr(config, "PRIVACY_CORR_TARGET", 0.15))
     ssim_target = float(getattr(config, "PRIVACY_SSIM_TARGET", 0.20))
     raw = F.relu(corr_abs - corr_target) + F.relu(ssim_sim - ssim_target)
-    return raw * weight, {
+    return raw, {
         "privacy": float(raw.detach().item()),
         "privacy_corr": float(corr_abs.detach().item()),
         "privacy_ssim": float(ssim_sim.detach().item()),
@@ -227,7 +223,7 @@ def prediction_response_tensor(config, preds):
 
 
 def detection_response_loss(config, detector, student_feature, teacher_feature):
-    if detector is None or config.RESPONSE_LOSS_WEIGHT <= 0:
+    if detector is None:
         zero = torch.zeros((), device=student_feature.device, dtype=student_feature.dtype)
         return zero, {"response": 0.0}
     student_response = prediction_response_tensor(config, detector(student_feature))
@@ -236,4 +232,4 @@ def detection_response_loss(config, detector, student_feature, teacher_feature):
     student_response = student_response / (student_response.amax(dim=(2, 3), keepdim=True) + config.OPTICAL_NORM_EPS)
     teacher_response = teacher_response / (teacher_response.amax(dim=(2, 3), keepdim=True) + config.OPTICAL_NORM_EPS)
     raw = F.mse_loss(student_response, teacher_response)
-    return raw * config.RESPONSE_LOSS_WEIGHT, {"response": float(raw.detach().item())}
+    return raw, {"response": float(raw.detach().item())}

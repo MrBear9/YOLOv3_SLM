@@ -7,11 +7,17 @@ import torch.nn as nn
 
 
 def init_distributed_mode(config):
-    """Initialize DDP if multiple GPUs are available. Returns (local_rank, use_ddp)."""
+    """Initialize DDP only when launched by torchrun. Returns (local_rank, use_ddp)."""
     gpu_ids = getattr(config, "GPU_IDS", [])
-    if len(gpu_ids) <= 1:
+    if len(gpu_ids) <= 1 or not torch.cuda.is_available():
         return 0, False
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    required_env = ("RANK", "WORLD_SIZE", "LOCAL_RANK")
+    if not all(name in os.environ for name in required_env):
+        return 0, False
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return 0, False
+    local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     # 增加 NCCL 超时到 30 分钟，避免长 epoch 后误超时
     timeout_ms = int(os.environ.get("NCCL_TIMEOUT_MS", 30 * 60 * 1000))
