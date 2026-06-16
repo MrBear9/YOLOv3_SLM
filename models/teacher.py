@@ -428,6 +428,146 @@ class ConvTeacherV3(nn.Module):
         return det_feature
 
 
+class SyntheticWavelengthComplexConv(nn.Module):
+    """Trainable complex convolution bank with non-coherent intensity fusion."""
+
+    def __init__(self, channels, kernel_size=5, num_wavelengths=3):
+        super().__init__()
+        padding = kernel_size // 2
+        self.num_wavelengths = max(int(num_wavelengths), 1)
+        self.real_filters = nn.ModuleList(
+            nn.Conv2d(channels, channels, kernel_size, padding=padding, groups=channels, bias=False)
+            for _ in range(self.num_wavelengths)
+        )
+        self.imag_filters = nn.ModuleList(
+            nn.Conv2d(channels, channels, kernel_size, padding=padding, groups=channels, bias=False)
+            for _ in range(self.num_wavelengths)
+        )
+        self.phase_offsets = nn.Parameter(torch.linspace(0.0, 3.141592653589793, self.num_wavelengths))
+        self.branch_logits = nn.Parameter(torch.zeros(self.num_wavelengths))
+        self.mix = nn.Sequential(
+            nn.Conv2d(channels * self.num_wavelengths, channels, 1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.SiLU(),
+        )
+
+    def forward(self, real, imag):
+        intensities = []
+        branch_weights = torch.softmax(self.branch_logits, dim=0)
+        for idx, (real_filter, imag_filter) in enumerate(zip(self.real_filters, self.imag_filters)):
+            phase = self.phase_offsets[idx]
+            cos_p = torch.cos(phase)
+            sin_p = torch.sin(phase)
+            real_rot = real * cos_p - imag * sin_p
+            imag_rot = real * sin_p + imag * cos_p
+            out_real = real_filter(real_rot) - imag_filter(imag_rot)
+            out_imag = real_filter(imag_rot) + imag_filter(real_rot)
+            intensities.append(branch_weights[idx] * (out_real.square() + out_imag.square()))
+        return self.mix(torch.cat(intensities, dim=1))
+
+
+class CVOCAConvTeacherV2(nn.Module):
+    """CVOCA-style v2 teacher that still emits a single CCD-like channel."""
+
+    def __init__(self, base_channels=24, c2f_blocks=2, synthetic_wavelengths=3, complex_kernel_size=5):
+        super().__init__()
+        c1 = base_channels
+        c2 = base_channels * 2
+        c3 = base_channels * 4
+
+        self.stem = TeacherConvBNAct(1, c1, 3, 2)
+        self.stage1 = TeacherC2f(c1, c1, c2f_blocks, shortcut=True)
+        self.down2 = TeacherConvBNAct(c1, c2, 3, 2)
+        self.stage2 = TeacherC2f(c2, c2, c2f_blocks + 1, shortcut=True)
+        self.down3 = TeacherConvBNAct(c2, c3, 3, 2)
+        self.stage3 = TeacherC2f(c3, c3, c2f_blocks + 1, shortcut=True)
+        self.sppf = TeacherSPPF(c3, c3)
+
+        self.skip1 = nn.Sequential(nn.Conv2d(c1, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
+        self.skip2 = nn.Sequential(nn.Conv2d(c2, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
+        self.context = nn.Sequential(
+            TeacherC2f(c3, c3, c2f_blocks, shortcut=True),
+            TeacherResidualBlock(c3, dilation=2),
+        )
+        self.lateral_s4 = nn.Sequential(
+            nn.Conv2d(c2, c3, 3, 2, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU(),
+        )
+        self.lateral_s2 = nn.Sequential(
+            nn.Conv2d(c1, c2, 3, 2, 1, bias=False), nn.BatchNorm2d(c2), nn.SiLU(),
+            nn.Conv2d(c2, c3, 3, 2, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU(),
+        )
+        self.deep_fuse = nn.Sequential(
+            TeacherConvBNAct(c3 * 3, c3),
+            TeacherC2f(c3, c3, c2f_blocks, shortcut=True),
+        )
+        self.refine = nn.Sequential(
+            TeacherConvBNAct(c3, c2, 3),
+            TeacherC2f(c2, c2, max(c2f_blocks, 1), shortcut=True),
+            TeacherConvBNAct(c2, c1, 1),
+        )
+
+        self.complex_seed = nn.Conv2d(c1, c1 * 2, 1)
+        self.semantic_phase = nn.Sequential(TeacherConvBNAct(c1, c1, 3), nn.Conv2d(c1, c1, 1), nn.Tanh())
+        self.optical_conv = SyntheticWavelengthComplexConv(
+            c1,
+            kernel_size=complex_kernel_size,
+            num_wavelengths=synthetic_wavelengths,
+        )
+        self.semantic_gain = nn.Sequential(nn.Conv2d(c1, 1, 1), nn.Sigmoid())
+        self.proj_out = nn.Sequential(TeacherConvBNAct(c1, c1, 3), nn.Conv2d(c1, 1, 1))
+        self.out_scale = nn.Parameter(torch.ones(1))
+        self.out_bias = nn.Parameter(torch.zeros(1))
+
+    @staticmethod
+    def _normalize_intensity(x):
+        low = x.amin(dim=(2, 3), keepdim=True)
+        high = x.amax(dim=(2, 3), keepdim=True)
+        return (x - low) / (high - low + 1e-6)
+
+    def forward(self, x, return_aux=False):
+        if x.shape[1] > 1:
+            x = x.mean(dim=1, keepdim=True)
+        gray = x.clamp(min=0.0)
+
+        x1 = self.stage1(self.stem(gray))
+        x2 = self.stage2(self.down2(x1))
+        x3 = self.stage3(self.down3(x2))
+        p3 = self.sppf(x3)
+        skip1 = _interpolate_preserve_layout(self.skip1(x1), size=p3.shape[-2:], mode="bilinear", align_corners=False)
+        skip2 = _interpolate_preserve_layout(self.skip2(x2), size=p3.shape[-2:], mode="bilinear", align_corners=False)
+        f_s8 = self.context(p3 + skip1 + skip2)
+
+        f_s4 = self.lateral_s4(x2)
+        f_s2 = self.lateral_s2(x1)
+        f_fused = self.deep_fuse(torch.cat([f_s8, f_s4, f_s2], dim=1))
+        f_refined = self.refine(f_fused)
+
+        real_seed, imag_seed = self.complex_seed(f_refined).chunk(2, dim=1)
+        semantic_phase = 3.141592653589793 * self.semantic_phase(f_refined)
+        real = real_seed * torch.cos(semantic_phase) - imag_seed * torch.sin(semantic_phase)
+        imag = real_seed * torch.sin(semantic_phase) + imag_seed * torch.cos(semantic_phase)
+        optical_feature = self.optical_conv(real, imag)
+        raw_cipher = F.softplus(self.proj_out(optical_feature))
+        raw_cipher = raw_cipher * (0.75 + 0.50 * self.semantic_gain(f_refined))
+        feat_1ch = self._normalize_intensity(raw_cipher)
+        feat_1ch = torch.clamp(feat_1ch * F.softplus(self.out_scale) + self.out_bias, min=0.0)
+        det_feature = _interpolate_preserve_layout(feat_1ch, size=gray.shape[-2:], mode="bilinear", align_corners=False)
+
+        if return_aux:
+            return {
+                "det_feature": det_feature,
+                "gray": gray,
+                "feat_scale8": f_refined,
+                "feat_scale4": f_s4,
+                "feat_scale2": f_s2,
+                "feat_raw_1ch": feat_1ch,
+                "complex_real": real,
+                "complex_imag": imag,
+                "optical_cipher_raw": raw_cipher,
+            }
+        return det_feature
+
+
 def build_teacher(config=None):
     arch = str(getattr(config, "TEACHER_ARCH", "convteacher_v2") if config is not None else "convteacher_v2").strip().lower()
     if arch in {"convteacher", "v1"}:
@@ -437,7 +577,9 @@ def build_teacher(config=None):
     if arch in {"convteacher_v2", "v2"}:
         c = int(getattr(config, "TEACHER_V2_BASE_CHANNELS", 24) if config is not None else 24)
         b = int(getattr(config, "TEACHER_V2_C2F_BLOCKS", 2) if config is not None else 2)
-        return ConvTeacherV2(base_channels=c, c2f_blocks=b)
+        w = int(getattr(config, "TEACHER_V2_SYNTHETIC_WAVELENGTHS", 3) if config is not None else 3)
+        k = int(getattr(config, "TEACHER_V2_COMPLEX_KERNEL_SIZE", 5) if config is not None else 5)
+        return CVOCAConvTeacherV2(base_channels=c, c2f_blocks=b, synthetic_wavelengths=w, complex_kernel_size=k)
     if arch in {"convteacher_v3", "v3"}:
         c = int(getattr(config, "TEACHER_V3_BASE_CHANNELS", 24) if config is not None else 24)
         b = int(getattr(config, "TEACHER_V3_C2F_BLOCKS", 2) if config is not None else 2)

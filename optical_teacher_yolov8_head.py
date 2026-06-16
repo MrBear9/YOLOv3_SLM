@@ -66,8 +66,12 @@ def log_all_parameters():
     log_to_file(Config, f"Anchors: {Config.ANCHORS}")
     log_to_file(Config, f"Loss weights box/obj/noobj/cls: {Config.BOX_WEIGHT_BASE}/{Config.OBJ_WEIGHT_BASE}/{Config.NOOBJ_WEIGHT_BASE}/{Config.CLS_WEIGHT_BASE}")
     log_to_file(Config, f"Focal alpha/gamma: {Config.FOCAL_ALPHA}/{Config.FOCAL_GAMMA}")
-    log_to_file(Config, f"Anchor matching: ratio_thresh={Config.ANCHOR_MATCH_RATIO_THRESH}, "
-                f"neighbor_cells={Config.ASSIGN_NEIGHBOR_CELLS}")
+    log_to_file(
+        Config,
+        f"Anchor matching: mode={Config.ANCHOR_MATCH_MODE}, ratio_thresh={Config.ANCHOR_MATCH_RATIO_THRESH}, "
+        f"neighbor_cells={Config.ASSIGN_NEIGHBOR_CELLS}, simota_iou={Config.ANCHOR_MATCH_IOU_THRESH}, "
+        f"center_radius={Config.CENTER_PRIOR_RADIUS}, top_n={Config.SIMOTA_TOP_N}, max_assign={Config.SIMOTA_MAX_ASSIGN}",
+    )
     log_to_file(Config, f"Hard negative mining: ratio={Config.HARD_NEG_RATIO}, min={Config.HARD_NEG_MIN}")
     log_to_file(Config, f"Box decode range: {Config.BOX_DECODE_RANGE}")
     log_to_file(Config, f"LR teacher/detector: {Config.PHASE1_TEACHER_LR}/{Config.PHASE1_DETECTOR_LR} -> {Config.PHASE2_TEACHER_LR}/{Config.PHASE2_DETECTOR_LR} -> {Config.PHASE3_TEACHER_LR}/{Config.PHASE3_DETECTOR_LR}")
@@ -76,11 +80,17 @@ def log_all_parameters():
     log_to_file(Config, f"Output: {Config.TEACHER_OUTPUT_DIR}")
     teacher = build_teacher(Config)
     detector = build_detector_head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
+    arch_lower = str(Config.TEACHER_ARCH).strip().lower()
     log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}")
+    if arch_lower in {"convteacher_v2", "v2"}:
+        log_to_file(
+            Config,
+            f"V2 CVOCA teacher: synthetic_wavelengths={Config.TEACHER_V2_SYNTHETIC_WAVELENGTHS}, "
+            f"complex_kernel={Config.TEACHER_V2_COMPLEX_KERNEL_SIZE}",
+        )
     log_to_file(Config, f"Teacher parameters: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
     log_to_file(Config, f"Detector head type: {Config.DETECTOR_HEAD_TYPE}")
     log_to_file(Config, f"Detector parameters: {sum(p.numel() for p in detector.parameters() if p.requires_grad):,}")
-    arch_lower = str(Config.TEACHER_ARCH).strip().lower()
     if arch_lower in {"convteacher_v3", "v3"}:
         log_to_file(Config, f"V3 residual_scale={Config.TEACHER_V3_RESIDUAL_SCALE}")
         log_to_file(

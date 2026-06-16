@@ -84,6 +84,8 @@ class ConfigYOLOv8Anchor:
     TEACHER_ARCH = "convteacher"
     TEACHER_V2_BASE_CHANNELS = 24
     TEACHER_V2_C2F_BLOCKS = 2
+    TEACHER_V2_SYNTHETIC_WAVELENGTHS = 3
+    TEACHER_V2_COMPLEX_KERNEL_SIZE = 5
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v3" | "v3"  (residual + gate)
@@ -136,9 +138,23 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Anchor assignment
     # =========================================================================
+    # Options: "auto", "ratio", "yolo7_simota".
+    # "auto" keeps current ratio matching for light_branch/yolov8_anchor, and
+    # enables YOLOv7-style neighbor + SimOTA matching for DETECTOR_HEAD_TYPE="light".
+    ANCHOR_MATCH_MODE = "auto"
     ANCHOR_MATCH_RATIO_THRESH = 3.5   # ratio-based (max w/h ratio)
     ASSIGN_NEIGHBOR_CELLS = True       # extra grid cells near boundaries
     NOOBJ_IGNORE_IOU = 0.68
+    ANCHOR_MATCH_IOU_THRESH = 0.20
+    CENTER_PRIOR_RADIUS = 2.5
+    CENTER_PRIOR_WEIGHT = 0.50
+    SIMOTA_TOP_N = 20
+    SIMOTA_MAX_ASSIGN = 15
+    SIMOTA_OBJ_POS_THRESH = 0.05
+    SIMOTA_USE_SIZE_WEIGHT_OVERRIDE = True
+    SIMOTA_SMALL_OBJ_WEIGHT = 1.5
+    SIMOTA_MEDIUM_OBJ_WEIGHT = 1.0
+    SIMOTA_LARGE_OBJ_WEIGHT = 0.8
 
     # =========================================================================
     # Box decode
@@ -299,12 +315,21 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_DETECTOR_HEAD_TYPE": ("DETECTOR_HEAD_TYPE", str),
             "OPTICAL_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),
             "OPTICAL_TEACHER_V2_C2F_BLOCKS": ("TEACHER_V2_C2F_BLOCKS", int),
+            "OPTICAL_TEACHER_V2_SYNTHETIC_WAVELENGTHS": ("TEACHER_V2_SYNTHETIC_WAVELENGTHS", int),
+            "OPTICAL_TEACHER_V2_COMPLEX_KERNEL_SIZE": ("TEACHER_V2_COMPLEX_KERNEL_SIZE", int),
             "OPTICAL_TEACHER_V3_BASE_CHANNELS": ("TEACHER_V3_BASE_CHANNELS", int),
             "OPTICAL_TEACHER_V3_C2F_BLOCKS": ("TEACHER_V3_C2F_BLOCKS", int),
             "OPTICAL_TEACHER_V3_RESIDUAL_SCALE": ("TEACHER_V3_RESIDUAL_SCALE", float),
             "OPTICAL_TEACHER_V3_GATE_SPARSITY_WEIGHT": ("TEACHER_V3_GATE_SPARSITY_WEIGHT", float),
             "OPTICAL_TEACHER_V3_RESIDUAL_L1_WEIGHT": ("TEACHER_V3_RESIDUAL_L1_WEIGHT", float),
             "OPTICAL_TEACHER_V3_OUTPUT_DEVIATION_WEIGHT": ("TEACHER_V3_OUTPUT_DEVIATION_WEIGHT", float),
+            "OPTICAL_TEACHER_ANCHOR_MATCH_MODE": ("ANCHOR_MATCH_MODE", str),
+            "OPTICAL_TEACHER_ANCHOR_MATCH_IOU_THRESH": ("ANCHOR_MATCH_IOU_THRESH", float),
+            "OPTICAL_TEACHER_CENTER_PRIOR_RADIUS": ("CENTER_PRIOR_RADIUS", float),
+            "OPTICAL_TEACHER_CENTER_PRIOR_WEIGHT": ("CENTER_PRIOR_WEIGHT", float),
+            "OPTICAL_TEACHER_SIMOTA_TOP_N": ("SIMOTA_TOP_N", int),
+            "OPTICAL_TEACHER_SIMOTA_MAX_ASSIGN": ("SIMOTA_MAX_ASSIGN", int),
+            "OPTICAL_TEACHER_SIMOTA_OBJ_POS_THRESH": ("SIMOTA_OBJ_POS_THRESH", float),
             "OPTICAL_TEACHER_BATCH_SIZE": ("BATCH_SIZE", int),
             "OPTICAL_TEACHER_EPOCHS": ("EPOCHS", int),
             "OPTICAL_TEACHER_EARLY_STOP_PATIENCE": ("TEACHER_EARLY_STOP_PATIENCE", int),

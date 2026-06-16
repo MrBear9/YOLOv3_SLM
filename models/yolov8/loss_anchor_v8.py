@@ -42,7 +42,7 @@ def _focal_bce_unreduced(logits, targets, alpha, gamma):
 
 
 class YOLOv3AnchorLossForV8Head(nn.Module):
-    """Anchor-based YOLO loss with ratio matching, neighbor cells, and HNM."""
+    """Anchor-based YOLO loss with ratio matching or YOLOv7-style SimOTA."""
 
     def __init__(self, config):
         super().__init__()
@@ -55,6 +55,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
         self.focal_gamma = config.FOCAL_GAMMA
         self.focal_loss = SigmoidFocalLoss(alpha=self.focal_alpha, gamma=self.focal_gamma, reduction="mean")
         self.size_weights = {"small": 1.0, "medium": 1.0, "large": 1.0}
+        self._active_match_mode = "ratio"
         self.last_components = {"total": 0.0, "box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
 
         # Uncertainty-weighted multi-task loss (learnable task precisions)
@@ -83,8 +84,23 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
         self.size_weights = weights.get("size_weights", self.size_weights)
         return weights["phase"]
 
+    def _resolve_anchor_match_mode(self):
+        mode = str(getattr(self.config, "ANCHOR_MATCH_MODE", "auto")).strip().lower()
+        head_type = str(getattr(self.config, "DETECTOR_HEAD_TYPE", "")).strip().lower()
+        if mode in {"auto", "default", ""}:
+            return "yolo7_simota" if head_type in {"light", "yolo_light"} else "ratio"
+        if mode in {"simota", "yolo7", "yolo7_simota", "neighbor_simota", "ota"}:
+            return "yolo7_simota"
+        return "ratio"
+
     def _get_size_weight(self, width, height):
         area = float(width * height)
+        if self._active_match_mode == "yolo7_simota" and getattr(self.config, "SIMOTA_USE_SIZE_WEIGHT_OVERRIDE", True):
+            if area >= self.config.LARGE_OBJ_AREA:
+                return float(getattr(self.config, "SIMOTA_LARGE_OBJ_WEIGHT", 0.8))
+            if area >= self.config.SMALL_OBJ_AREA:
+                return float(getattr(self.config, "SIMOTA_MEDIUM_OBJ_WEIGHT", 1.0))
+            return float(getattr(self.config, "SIMOTA_SMALL_OBJ_WEIGHT", 1.5))
         if area >= self.config.LARGE_OBJ_AREA:
             return self.size_weights["large"]
         if area >= self.config.SMALL_OBJ_AREA:
@@ -123,6 +139,60 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
             offsets.append((gi, gj + 1))
         return offsets
 
+    def _match_anchors_yolo7_simota(self, tx, ty, tw, th, prepared_scales):
+        """YOLOv7-style assignment: center-neighborhood candidates + SimOTA top-k."""
+        config = self.config
+        img_size = float(config.IMG_SIZE)
+        radius = float(getattr(config, "CENTER_PRIOR_RADIUS", 2.5))
+        radius = max(radius, 0.5)
+        center_weight = float(getattr(config, "CENTER_PRIOR_WEIGHT", 0.5))
+        iou_thresh = float(getattr(config, "ANCHOR_MATCH_IOU_THRESH", 0.20))
+        top_n = int(getattr(config, "SIMOTA_TOP_N", 20))
+        max_assign = int(getattr(config, "SIMOTA_MAX_ASSIGN", 15))
+        gt_box = torch.stack([tx * img_size, ty * img_size, tw, th]).view(1, 4)
+
+        candidates = []
+        for scale_idx, scale_data in enumerate(prepared_scales):
+            gw, gh = scale_data["grid_w"], scale_data["grid_h"]
+            stride = float(scale_data["stride"])
+            gx = float((tx * gw).detach().item())
+            gy = float((ty * gh).detach().item())
+            x0 = max(int(gx - radius), 0)
+            x1 = min(int(gx + radius) + 1, gw - 1)
+            y0 = max(int(gy - radius), 0)
+            y1 = min(int(gy + radius) + 1, gh - 1)
+            for grid_y in range(y0, y1 + 1):
+                for grid_x in range(x0, x1 + 1):
+                    dx = (grid_x + 0.5) - gx
+                    dy = (grid_y + 0.5) - gy
+                    center_dist = (dx * dx + dy * dy) ** 0.5
+                    if center_dist > radius * 1.4143:
+                        continue
+                    for anchor_idx in range(3):
+                        aw, ah = scale_data["anchors"][anchor_idx]
+                        cand_box = torch.stack(
+                            [
+                                torch.as_tensor((grid_x + 0.5) * stride, device=tw.device, dtype=tw.dtype),
+                                torch.as_tensor((grid_y + 0.5) * stride, device=tw.device, dtype=tw.dtype),
+                                aw.to(device=tw.device, dtype=tw.dtype),
+                                ah.to(device=tw.device, dtype=tw.dtype),
+                            ]
+                        ).view(1, 4)
+                        iou = bbox_iou_xywh(cand_box, gt_box).clamp(min=0.0, max=1.0).squeeze()
+                        iou_value = float(iou.detach().item())
+                        norm_dist = min(center_dist / radius, 2.0)
+                        cost = -iou_value + center_weight * norm_dist
+                        candidates.append((cost, iou_value, scale_idx, anchor_idx, grid_x, grid_y))
+
+        if not candidates:
+            return []
+        eligible = [item for item in candidates if item[1] >= iou_thresh]
+        ranked_for_k = sorted(eligible if eligible else candidates, key=lambda item: item[1], reverse=True)
+        top_ious = [item[1] for item in ranked_for_k[: max(top_n, 1)]]
+        dynamic_k = int(torch.ceil(torch.tensor(sum(top_ious))).item()) if top_ious else 1
+        dynamic_k = max(1, min(max_assign, dynamic_k, len(ranked_for_k)))
+        return sorted(ranked_for_k, key=lambda item: item[0])[:dynamic_k]
+
     def forward(self, predictions, targets):
         config = self.config
         device = predictions[0].device
@@ -131,6 +201,10 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
         batch_size = predictions[0].shape[0]
         prepared_scales = []
         box_decode_range = float(getattr(config, "BOX_DECODE_RANGE", 2.0))
+        match_mode = self._resolve_anchor_match_mode()
+        self._active_match_mode = match_mode
+        use_simota = match_mode == "yolo7_simota"
+        obj_pos_thresh = float(getattr(config, "SIMOTA_OBJ_POS_THRESH", 0.05)) if use_simota else 0.5
         ratio_thresh = float(getattr(config, "ANCHOR_MATCH_RATIO_THRESH", 3.5))
         hard_neg_ratio = int(getattr(config, "HARD_NEG_RATIO", 30))
         hard_neg_min = int(getattr(config, "HARD_NEG_MIN", 512))
@@ -146,7 +220,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
                     "target_boxes_abs": torch.zeros_like(pred[..., :4]),
                     "target_obj": torch.zeros_like(pred[..., 4]),
                     "target_cls": torch.zeros_like(pred[..., 5:]),
-                    "target_match_ratio": torch.full_like(pred[..., 4], float("inf")),
+                    "target_match_ratio": torch.full_like(pred[..., 4], -1.0 if use_simota else float("inf")),
                     "target_scale_weight": torch.ones_like(pred[..., 4]),
                     "grid_h": grid_h,
                     "grid_w": grid_w,
@@ -168,27 +242,47 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
                 gt_boxes_abs_by_batch[b].append(torch.stack([tx * config.IMG_SIZE, ty * config.IMG_SIZE, tw, th]))
                 size_weight = self._get_size_weight(tw.item(), th.item())
 
-                candidates = self._match_anchors_by_ratio(tw, th, prepared_scales)
-                for ratio, scale_idx, anchor_idx in candidates:
-                    if ratio >= ratio_thresh and len([m for m in candidates if m[0] < ratio_thresh]) > 0:
-                        continue
-                    scale_data = prepared_scales[scale_idx]
-                    gx = tx * scale_data["grid_w"]
-                    gy = ty * scale_data["grid_h"]
-                    gw, gh = scale_data["grid_w"], scale_data["grid_h"]
-
-                    for grid_x, grid_y in self._neighbor_offsets(gx, gy, gw, gh):
+                if use_simota:
+                    candidates = self._match_anchors_yolo7_simota(tx, ty, tw, th, prepared_scales)
+                    for _, iou_value, scale_idx, anchor_idx, grid_x, grid_y in candidates:
+                        scale_data = prepared_scales[scale_idx]
+                        gw, gh = scale_data["grid_w"], scale_data["grid_h"]
                         if not (0 <= grid_x < gw and 0 <= grid_y < gh):
                             continue
-                        if scale_data["target_match_ratio"][b, grid_y, grid_x, anchor_idx] <= ratio:
+                        if scale_data["target_match_ratio"][b, grid_y, grid_x, anchor_idx] >= iou_value:
                             continue
                         scale_data["target_boxes_abs"][b, grid_y, grid_x, anchor_idx] = torch.stack(
                             [tx * config.IMG_SIZE, ty * config.IMG_SIZE, tw, th]
                         )
-                        scale_data["target_obj"][b, grid_y, grid_x, anchor_idx] = 1.0
+                        scale_data["target_obj"][b, grid_y, grid_x, anchor_idx] = max(iou_value, obj_pos_thresh)
+                        scale_data["target_cls"][b, grid_y, grid_x, anchor_idx].zero_()
                         scale_data["target_cls"][b, grid_y, grid_x, anchor_idx, cls_id] = 1.0
-                        scale_data["target_match_ratio"][b, grid_y, grid_x, anchor_idx] = ratio
+                        scale_data["target_match_ratio"][b, grid_y, grid_x, anchor_idx] = iou_value
                         scale_data["target_scale_weight"][b, grid_y, grid_x, anchor_idx] = size_weight
+                else:
+                    candidates = self._match_anchors_by_ratio(tw, th, prepared_scales)
+                    valid_ratio_matches = len([m for m in candidates if m[0] < ratio_thresh])
+                    for ratio, scale_idx, anchor_idx in candidates:
+                        if ratio >= ratio_thresh and valid_ratio_matches > 0:
+                            continue
+                        scale_data = prepared_scales[scale_idx]
+                        gx = tx * scale_data["grid_w"]
+                        gy = ty * scale_data["grid_h"]
+                        gw, gh = scale_data["grid_w"], scale_data["grid_h"]
+
+                        for grid_x, grid_y in self._neighbor_offsets(gx, gy, gw, gh):
+                            if not (0 <= grid_x < gw and 0 <= grid_y < gh):
+                                continue
+                            if scale_data["target_match_ratio"][b, grid_y, grid_x, anchor_idx] <= ratio:
+                                continue
+                            scale_data["target_boxes_abs"][b, grid_y, grid_x, anchor_idx] = torch.stack(
+                                [tx * config.IMG_SIZE, ty * config.IMG_SIZE, tw, th]
+                            )
+                            scale_data["target_obj"][b, grid_y, grid_x, anchor_idx] = 1.0
+                            scale_data["target_cls"][b, grid_y, grid_x, anchor_idx].zero_()
+                            scale_data["target_cls"][b, grid_y, grid_x, anchor_idx, cls_id] = 1.0
+                            scale_data["target_match_ratio"][b, grid_y, grid_x, anchor_idx] = ratio
+                            scale_data["target_scale_weight"][b, grid_y, grid_x, anchor_idx] = size_weight
 
         gt_boxes_abs_by_batch = [
             torch.stack(sample_boxes).to(device=device, dtype=predictions[0].dtype)
@@ -207,7 +301,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
             target_scale_weight = scale_data["target_scale_weight"]
 
             pred_boxes_abs = decode_boxes_to_absolute(pred_boxes, scale_data["anchors"], scale_data["stride"], box_decode_range)
-            obj_mask = target_obj > 0.5
+            obj_mask = target_obj >= obj_pos_thresh
 
             # Ignore mask: predictions with high IoU to any GT (not positive) are ignored
             ignore_mask = torch.zeros_like(target_obj, dtype=torch.bool)
@@ -218,7 +312,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
                 flat_pred_boxes = pred_boxes_abs[b].contiguous().reshape(-1, 4)
                 max_iou = bbox_iou_matrix_xywh(flat_pred_boxes, gt_boxes_abs).max(dim=1).values
                 ignore_mask[b] = max_iou.contiguous().view(scale_data["grid_h"], scale_data["grid_w"], 3) >= config.NOOBJ_IGNORE_IOU
-            noobj_mask = (target_obj <= 0.5) & (~ignore_mask)
+            noobj_mask = (target_obj < obj_pos_thresh) & (~ignore_mask)
 
             # Positive losses
             if obj_mask.any():

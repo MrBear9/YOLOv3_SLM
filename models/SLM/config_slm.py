@@ -94,6 +94,8 @@ class ConfigSLM:
     # -------- TEACHER_ARCH = "convteacher_v2" --------
     TEACHER_V2_BASE_CHANNELS = 24
     TEACHER_V2_C2F_BLOCKS = 2
+    TEACHER_V2_SYNTHETIC_WAVELENGTHS = 3
+    TEACHER_V2_COMPLEX_KERNEL_SIZE = 5
 
     # -------- TEACHER_ARCH = "convteacher_v3" --------
     TEACHER_V3_BASE_CHANNELS = 24
@@ -129,9 +131,23 @@ class ConfigSLM:
     # =========================================================================
     # Anchor assignment
     # =========================================================================
+    # Options: "auto", "ratio", "yolo7_simota".
+    # "auto" keeps current ratio matching for light_branch/yolov8_anchor, and
+    # enables YOLOv7-style neighbor + SimOTA matching for DETECTOR_HEAD_TYPE="light".
+    ANCHOR_MATCH_MODE = "auto"
     ANCHOR_MATCH_RATIO_THRESH = 3.5
     ASSIGN_NEIGHBOR_CELLS = True
     NOOBJ_IGNORE_IOU = 0.68
+    ANCHOR_MATCH_IOU_THRESH = 0.20
+    CENTER_PRIOR_RADIUS = 2.5
+    CENTER_PRIOR_WEIGHT = 0.50
+    SIMOTA_TOP_N = 20
+    SIMOTA_MAX_ASSIGN = 15
+    SIMOTA_OBJ_POS_THRESH = 0.05
+    SIMOTA_USE_SIZE_WEIGHT_OVERRIDE = True
+    SIMOTA_SMALL_OBJ_WEIGHT = 1.5
+    SIMOTA_MEDIUM_OBJ_WEIGHT = 1.0
+    SIMOTA_LARGE_OBJ_WEIGHT = 0.8
 
     # =========================================================================
     # Box decode
@@ -255,6 +271,9 @@ class ConfigSLM:
     CONF_THRESH = 0.7
     NMS_THRESH = 0.25
     MAX_DET = 5
+    METRIC_CONF_THRESH = 0.001
+    METRIC_NMS_THRESH = 0.50
+    METRIC_MAX_DET = 300
     AGNOSTIC_NMS = False
     ENABLE_CONTAINMENT_SUPPRESSION = False
     ENABLE_WBF = False
@@ -326,9 +345,18 @@ class ConfigSLM:
             "OPTICAL_SLM_TEACHER_ARCH": ("TEACHER_ARCH", str),
             "OPTICAL_SLM_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),
             "OPTICAL_SLM_TEACHER_V2_C2F_BLOCKS": ("TEACHER_V2_C2F_BLOCKS", int),
+            "OPTICAL_SLM_TEACHER_V2_SYNTHETIC_WAVELENGTHS": ("TEACHER_V2_SYNTHETIC_WAVELENGTHS", int),
+            "OPTICAL_SLM_TEACHER_V2_COMPLEX_KERNEL_SIZE": ("TEACHER_V2_COMPLEX_KERNEL_SIZE", int),
             "OPTICAL_SLM_TEACHER_V3_BASE_CHANNELS": ("TEACHER_V3_BASE_CHANNELS", int),
             "OPTICAL_SLM_TEACHER_V3_C2F_BLOCKS": ("TEACHER_V3_C2F_BLOCKS", int),
             "OPTICAL_SLM_TEACHER_V3_RESIDUAL_SCALE": ("TEACHER_V3_RESIDUAL_SCALE", float),
+            "OPTICAL_SLM_ANCHOR_MATCH_MODE": ("ANCHOR_MATCH_MODE", str),
+            "OPTICAL_SLM_ANCHOR_MATCH_IOU_THRESH": ("ANCHOR_MATCH_IOU_THRESH", float),
+            "OPTICAL_SLM_CENTER_PRIOR_RADIUS": ("CENTER_PRIOR_RADIUS", float),
+            "OPTICAL_SLM_CENTER_PRIOR_WEIGHT": ("CENTER_PRIOR_WEIGHT", float),
+            "OPTICAL_SLM_SIMOTA_TOP_N": ("SIMOTA_TOP_N", int),
+            "OPTICAL_SLM_SIMOTA_MAX_ASSIGN": ("SIMOTA_MAX_ASSIGN", int),
+            "OPTICAL_SLM_SIMOTA_OBJ_POS_THRESH": ("SIMOTA_OBJ_POS_THRESH", float),
             "OPTICAL_SLM_STUDENT_NORM_SCHEDULE": ("STUDENT_NORM_SCHEDULE", str),
             "OPTICAL_SLM_STUDENT_NORM_MODE": ("STUDENT_NORM_MODE", str),
             "OPTICAL_SLM_STUDENT_NORM_PERCENTILE": ("STUDENT_NORM_PERCENTILE", float),
