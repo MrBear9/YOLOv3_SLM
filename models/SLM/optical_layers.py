@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class SLMLayer(nn.Module):
@@ -135,6 +136,11 @@ class OpticalStudent(nn.Module):
         field = self.prop1(self.slm1(field))
         field = self.prop2(self.slm2(field))
         out = torch.abs(field) ** 2
+        blur_kernel = int(getattr(self.config, "STUDENT_OUTPUT_BLUR_KERNEL", 1))
+        if blur_kernel > 1:
+            if blur_kernel % 2 == 0:
+                blur_kernel += 1
+            out = F.avg_pool2d(out, kernel_size=blur_kernel, stride=1, padding=blur_kernel // 2)
         if self.enable_norm:
             norm_mode = str(getattr(self.config, "STUDENT_NORM_MODE", "mean")).lower()
             if norm_mode == "max":
@@ -148,6 +154,9 @@ class OpticalStudent(nn.Module):
             else:
                 scale = out.mean(dim=[2, 3], keepdim=True)
             out = out / (scale + self.config.OPTICAL_NORM_EPS)
+            clamp_max = float(getattr(self.config, "STUDENT_OUTPUT_CLAMP_MAX", 0.0))
+            if clamp_max > 0:
+                out = out.clamp(max=clamp_max)
         return out
 
 

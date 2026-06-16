@@ -73,6 +73,8 @@ def configure_student_norm_for_stage(stage_name, deployment_norm_mode):
     schedule = str(getattr(Config, "STUDENT_NORM_SCHEDULE", "norm_joint_only")).lower()
     if not getattr(Config, "ENABLE_STUDENT_NORM", True) or schedule in {"none", "off", "false"}:
         stage_norm_mode = "none"
+    elif schedule in {"joint_and_norm", "joint_norm"}:
+        stage_norm_mode = deployment_norm_mode if stage_name in {"joint_fit", "norm_joint"} else "none"
     elif schedule in {"norm_joint_only", "norm_joint"}:
         stage_norm_mode = deployment_norm_mode if stage_name == "norm_joint" else "none"
     else:
@@ -236,13 +238,22 @@ def log_config():
         Config,
         f"Student normalization: enabled={Config.ENABLE_STUDENT_NORM}, schedule={Config.STUDENT_NORM_SCHEDULE}, "
         f"deployment_mode={Config.STUDENT_NORM_MODE}, "
-        f"percentile={Config.STUDENT_NORM_PERCENTILE}",
+        f"percentile={Config.STUDENT_NORM_PERCENTILE}, clamp_max={Config.STUDENT_OUTPUT_CLAMP_MAX}, "
+        f"blur_kernel={Config.STUDENT_OUTPUT_BLUR_KERNEL}",
     )
     log_to_file(
         Config,
         "Feature loss weights full/low1/low2/ssim/grad/freq/pearson: "
         f"{Config.LOSS_FULL_WEIGHT}/{Config.LOSS_LOW1_WEIGHT}/{Config.LOSS_LOW2_WEIGHT}/"
         f"{Config.LOSS_SSIM_WEIGHT}/{Config.LOSS_GRAD_WEIGHT}/{Config.LOSS_FREQ_WEIGHT}/{Config.LOSS_PEARSON_WEIGHT}",
+    )
+    log_to_file(Config, f"Feature loss prefilter kernel: {Config.FEATURE_LOSS_PREFILTER_KERNEL}")
+    log_to_file(
+        Config,
+        f"Phase regularization by stage: phase_focus={Config.get_phase_regularization_weights('phase_focus')}, "
+        f"detector_focus={Config.get_phase_regularization_weights('detector_focus')}, "
+        f"joint_fit={Config.get_phase_regularization_weights('joint_fit')}, "
+        f"norm_joint={Config.get_phase_regularization_weights('norm_joint')}",
     )
     log_to_file(
         Config,
@@ -434,7 +445,7 @@ def train():
 
                 zero = torch.zeros((), device=device, dtype=student_feature.dtype)
                 if stage_weights["feature"] > 0:
-                    feature_loss, _ = feature_criterion(student_feature, teacher_feature.detach(), student_raw)
+                    feature_loss, _ = feature_criterion(student_feature, teacher_feature.detach(), student_raw, stage_name=stage_name)
                 else:
                     feature_loss = zero
                 if stage_weights["response"] > 0:

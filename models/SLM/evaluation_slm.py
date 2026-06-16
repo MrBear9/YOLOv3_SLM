@@ -52,7 +52,7 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
             student_feature = student_core(gray)
             zero = torch.zeros((), device=device, dtype=student_feature.dtype)
             if stage_weights["feature"] > 0:
-                feature_loss, _ = feature_criterion(student_feature, teacher_feature, student_core)
+                feature_loss, _ = feature_criterion(student_feature, teacher_feature, student_core, stage_name=stage_name)
             else:
                 feature_loss = zero
             if stage_weights["response"] > 0:

@@ -22,7 +22,7 @@ from models.runtime import (
     wrap_data_parallel,
 )
 from models.teacher import build_teacher
-from models.teacher_guidance import build_feature_distillation_loss, teacher_cipher_loss
+from models.teacher_guidance import build_feature_distillation_loss, teacher_cipher_loss, teacher_physical_cipher_loss
 from models.training_utils import (
     build_optimizer_from_model,
     initialize_teacher_weights,
@@ -98,6 +98,14 @@ def log_all_parameters():
         f"corr_target={Config.TEACHER_CIPHER_CORR_TARGET}, "
         f"ssim_target={Config.TEACHER_CIPHER_SSIM_TARGET}, "
         f"structure_weight={Config.TEACHER_CIPHER_STRUCTURE_WEIGHT}",
+    )
+    log_to_file(
+        Config,
+        f"Teacher physical loss: weight={Config.TEACHER_PHYSICAL_LOSS_WEIGHT}, "
+        f"blur_kernel={Config.TEACHER_PHYSICAL_BLUR_KERNEL}, "
+        f"tv_target={Config.TEACHER_PHYSICAL_TV_TARGET}, "
+        f"hf_target={Config.TEACHER_PHYSICAL_HF_TARGET}, "
+        f"range_floor={Config.TEACHER_PHYSICAL_RANGE_FLOOR}",
     )
     log_to_file(Config, "=" * 80)
 
@@ -220,11 +228,12 @@ def train():
             optimizer.zero_grad()
             use_distill = enable_distill and distill_loss_fn is not None
             use_cipher = Config.TEACHER_CIPHER_LOSS_WEIGHT > 0
+            use_physical = Config.TEACHER_PHYSICAL_LOSS_WEIGHT > 0
             if use_distill:
                 teacher_features, predictions, teacher_aux, det_features = model(
                     batch_images, return_feature=True, return_teacher_aux=True, return_det_features=True
                 )
-            elif is_v3 or use_cipher:
+            elif is_v3 or use_cipher or use_physical:
                 teacher_features, predictions, teacher_aux = model(
                     batch_images, return_feature=True, return_teacher_aux=True
                 )
@@ -241,6 +250,10 @@ def train():
             if use_cipher:
                 cipher_loss, _ = teacher_cipher_loss(Config, teacher_aux)
                 loss = loss + cipher_loss
+
+            if use_physical:
+                physical_loss, _ = teacher_physical_cipher_loss(Config, teacher_aux)
+                loss = loss + physical_loss
 
             if is_v3 and teacher_aux is not None:
                 gate_sparsity = teacher_aux["gate"].mean()

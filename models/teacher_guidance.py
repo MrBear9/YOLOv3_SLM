@@ -34,6 +34,21 @@ def _ssim_similarity(a, b, eps):
     return torch.clamp(ssim_map.mean(), min=0.0, max=1.0)
 
 
+def _blur_feature(x, kernel_size):
+    kernel_size = int(kernel_size)
+    if kernel_size <= 1:
+        return x
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    return F.avg_pool2d(x, kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
+
+
+def _neighbor_total_variation(x):
+    grad_x = (x[:, :, :, 1:] - x[:, :, :, :-1]).abs().mean()
+    grad_y = (x[:, :, 1:, :] - x[:, :, :-1, :]).abs().mean()
+    return 0.5 * (grad_x + grad_y)
+
+
 def teacher_cipher_loss(config, teacher_aux):
     weight = float(getattr(config, "TEACHER_CIPHER_LOSS_WEIGHT", 0.0))
     if weight <= 0 or teacher_aux is None:
@@ -70,6 +85,37 @@ def teacher_cipher_loss(config, teacher_aux):
         "cipher_ssim": float(ssim_sim.detach().item()),
         "cipher_std": float(feat_std.detach().item()),
         "cipher_grad": float(grad_mean.detach().item()),
+    }
+
+
+def teacher_physical_cipher_loss(config, teacher_aux):
+    weight = float(getattr(config, "TEACHER_PHYSICAL_LOSS_WEIGHT", 0.0))
+    if weight <= 0 or teacher_aux is None:
+        device = teacher_aux["det_feature"].device if teacher_aux is not None else "cpu"
+        zero = torch.zeros((), device=device)
+        return zero, {"physical": 0.0, "physical_tv": 0.0, "physical_hf": 0.0, "physical_range": 0.0}
+
+    eps = float(getattr(config, "OPTICAL_NORM_EPS", 1e-6))
+    feature = teacher_aux["det_feature"].float()
+    feature_view = _max_normalize(feature.clamp(min=0), eps)
+    kernel = int(getattr(config, "TEACHER_PHYSICAL_BLUR_KERNEL", 9))
+    low_freq = _blur_feature(feature_view, kernel)
+    high_freq = feature_view - low_freq
+
+    tv = _neighbor_total_variation(feature_view)
+    hf = high_freq.abs().mean()
+    tv_target = float(getattr(config, "TEACHER_PHYSICAL_TV_TARGET", 0.030))
+    hf_target = float(getattr(config, "TEACHER_PHYSICAL_HF_TARGET", 0.060))
+    range_floor = float(getattr(config, "TEACHER_PHYSICAL_RANGE_FLOOR", 0.35))
+    spatial_range = feature_view.amax(dim=(2, 3), keepdim=True) - feature_view.amin(dim=(2, 3), keepdim=True)
+    range_penalty = F.relu(range_floor - spatial_range.mean())
+
+    raw = F.relu(tv - tv_target) + F.relu(hf - hf_target) + range_penalty
+    return raw * weight, {
+        "physical": float(raw.detach().item()),
+        "physical_tv": float(tv.detach().item()),
+        "physical_hf": float(hf.detach().item()),
+        "physical_range": float(spatial_range.mean().detach().item()),
     }
 
 

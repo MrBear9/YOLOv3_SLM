@@ -14,14 +14,14 @@ class ConfigSLM:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_Tv1_light_branch_slim_4stage_phase_privacy"
+    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_Tv1_light_branch_slim_relaxed_phase_privacy"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_privacy/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_physical_privacy/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -35,7 +35,7 @@ class ConfigSLM:
 
     PHASE_FOCUS_EPOCHS = 45
     DETECTOR_FOCUS_EPOCHS = 35
-    JOINT_FIT_EPOCHS = 40
+    JOINT_FIT_EPOCHS = 100
     NORM_JOINT_EPOCHS = 30
     EPOCHS = PHASE_FOCUS_EPOCHS + DETECTOR_FOCUS_EPOCHS + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
 
@@ -54,11 +54,13 @@ class ConfigSLM:
 
     # -------- Student normalization --------
     ENABLE_STUDENT_NORM = True
-    # Options: "norm_joint_only", "always", "none".
-    STUDENT_NORM_SCHEDULE = "norm_joint_only"
+    # Options: "joint_and_norm", "norm_joint_only", "always", "none".
+    STUDENT_NORM_SCHEDULE = "joint_and_norm"
     # Options: "max", "percentile", "mean", "none".
-    STUDENT_NORM_MODE = "max"
-    STUDENT_NORM_PERCENTILE = 0.995
+    STUDENT_NORM_MODE = "percentile"
+    STUDENT_NORM_PERCENTILE = 0.990
+    STUDENT_OUTPUT_CLAMP_MAX = 2.5
+    STUDENT_OUTPUT_BLUR_KERNEL = 5
 
     # -------- SLM phase init --------
     # Options: random, vortex, dh_psf/double_helix_psf, checkpoint,
@@ -72,8 +74,8 @@ class ConfigSLM:
     # Number of tiled DH-PSF phase cells: 1.0 -> single cell, 2.0 -> 2 x 2 array, 3.0 -> 3 x 3 array.
     SLM_DH_PSF_PERIODS = 1.0
     # Spiral topological charge inside each DH-PSF cell; this is not the array count.
-    SLM_DH_PSF_CHARGE = 2.0
-    SLM_DH_PSF_RADIAL_SCALE = 12.0
+    SLM_DH_PSF_CHARGE = 1.0
+    SLM_DH_PSF_RADIAL_SCALE = 6.0
     SLM_DH_PSF_SADDLE_SCALE = 0.08
     SLM_DH_PSF_SPIRAL_OFFSET = 0.0
     SLM_DH_PSF_APERTURE_RADIUS = 2.0
@@ -81,7 +83,7 @@ class ConfigSLM:
     SLM_DH_PSF_ROTATION_2 = np.pi / 2
     SLM_DH_PSF_HANDEDNESS_1 = 1.0
     SLM_DH_PSF_HANDEDNESS_2 = -1.0
-    SLM_INIT_NOISE_STD = 0.03
+    SLM_INIT_NOISE_STD = 0.08
 
     # =========================================================================
     # TEACHER_ARCH  (must match teacher-training checkpoint)
@@ -176,6 +178,15 @@ class ConfigSLM:
     LOSS_PEARSON_WEIGHT = 0.70
     LOSS_PHASE_SMOOTH_WEIGHT = 0.001
     LOSS_PHASE_DIVERSITY_WEIGHT = 0.15
+    PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.0
+    PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS = 0.0
+    PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS = 0.0
+    PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS = 0.0
+    PHASE_SMOOTH_WEIGHT_JOINT = 0.0002
+    PHASE_DIVERSITY_WEIGHT_JOINT = 0.03
+    PHASE_SMOOTH_WEIGHT_NORM_JOINT = 0.0008
+    PHASE_DIVERSITY_WEIGHT_NORM_JOINT = 0.08
+    FEATURE_LOSS_PREFILTER_KERNEL = 9
     ENABLE_FEATURE_DOMAIN_ALIGNMENT = True
     # Options: "mean_std", "minmax"/"min_max", "none".
     FEATURE_DOMAIN_ALIGN_MODE = "mean_std"
@@ -198,24 +209,24 @@ class ConfigSLM:
     # =========================================================================
     # Stage loss weights
     # =========================================================================
-    FEATURE_LOSS_WEIGHT_PHASE_FOCUS = 0.18
-    DETECTION_LOSS_WEIGHT_PHASE_FOCUS = 0.55
-    RESPONSE_LOSS_WEIGHT_PHASE_FOCUS = 0.03
-    PRIVACY_LOSS_WEIGHT_PHASE_FOCUS = 0.01
+    FEATURE_LOSS_WEIGHT_PHASE_FOCUS = 0.35
+    DETECTION_LOSS_WEIGHT_PHASE_FOCUS = 0.35
+    RESPONSE_LOSS_WEIGHT_PHASE_FOCUS = 0.05
+    PRIVACY_LOSS_WEIGHT_PHASE_FOCUS = 0.0
 
     FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
     DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS = 1.0
     RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
     PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
 
-    FEATURE_LOSS_WEIGHT_JOINT = 0.04
+    FEATURE_LOSS_WEIGHT_JOINT = 0.08
     DETECTION_LOSS_WEIGHT_JOINT = 1.00
-    RESPONSE_LOSS_WEIGHT_JOINT = 0.02
-    PRIVACY_LOSS_WEIGHT_JOINT = 0.04
+    RESPONSE_LOSS_WEIGHT_JOINT = 0.03
+    PRIVACY_LOSS_WEIGHT_JOINT = 0.02
 
-    FEATURE_LOSS_WEIGHT_NORM_JOINT = 0.02
+    FEATURE_LOSS_WEIGHT_NORM_JOINT = 0.05
     DETECTION_LOSS_WEIGHT_NORM_JOINT = 1.00
-    RESPONSE_LOSS_WEIGHT_NORM_JOINT = 0.01
+    RESPONSE_LOSS_WEIGHT_NORM_JOINT = 0.02
     PRIVACY_LOSS_WEIGHT_NORM_JOINT = 0.08
 
     # =========================================================================
@@ -321,6 +332,8 @@ class ConfigSLM:
             "OPTICAL_SLM_STUDENT_NORM_SCHEDULE": ("STUDENT_NORM_SCHEDULE", str),
             "OPTICAL_SLM_STUDENT_NORM_MODE": ("STUDENT_NORM_MODE", str),
             "OPTICAL_SLM_STUDENT_NORM_PERCENTILE": ("STUDENT_NORM_PERCENTILE", float),
+            "OPTICAL_SLM_STUDENT_OUTPUT_CLAMP_MAX": ("STUDENT_OUTPUT_CLAMP_MAX", float),
+            "OPTICAL_SLM_STUDENT_OUTPUT_BLUR_KERNEL": ("STUDENT_OUTPUT_BLUR_KERNEL", int),
             "OPTICAL_SLM_PHASE_FOCUS_PHASE_PARAM_LR": ("PHASE_FOCUS_PHASE_PARAM_LR", float),
             "OPTICAL_SLM_DETECTOR_LR": ("DETECTOR_LR", float),
             "OPTICAL_SLM_JOINT_PHASE_PARAM_LR": ("JOINT_PHASE_PARAM_LR", float),
@@ -344,6 +357,14 @@ class ConfigSLM:
             "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_NORM_JOINT": ("DETECTION_LOSS_WEIGHT_NORM_JOINT", float),
             "OPTICAL_SLM_RESPONSE_LOSS_WEIGHT_NORM_JOINT": ("RESPONSE_LOSS_WEIGHT_NORM_JOINT", float),
             "OPTICAL_SLM_PRIVACY_LOSS_WEIGHT_NORM_JOINT": ("PRIVACY_LOSS_WEIGHT_NORM_JOINT", float),
+            "OPTICAL_SLM_PHASE_SMOOTH_WEIGHT_PHASE_FOCUS": ("PHASE_SMOOTH_WEIGHT_PHASE_FOCUS", float),
+            "OPTICAL_SLM_PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS": ("PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS", float),
+            "OPTICAL_SLM_PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS": ("PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS", float),
+            "OPTICAL_SLM_PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS": ("PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS", float),
+            "OPTICAL_SLM_PHASE_SMOOTH_WEIGHT_JOINT": ("PHASE_SMOOTH_WEIGHT_JOINT", float),
+            "OPTICAL_SLM_PHASE_DIVERSITY_WEIGHT_JOINT": ("PHASE_DIVERSITY_WEIGHT_JOINT", float),
+            "OPTICAL_SLM_PHASE_SMOOTH_WEIGHT_NORM_JOINT": ("PHASE_SMOOTH_WEIGHT_NORM_JOINT", float),
+            "OPTICAL_SLM_PHASE_DIVERSITY_WEIGHT_NORM_JOINT": ("PHASE_DIVERSITY_WEIGHT_NORM_JOINT", float),
             "OPTICAL_SLM_FEATURE_DOMAIN_ALIGN_MODE": ("FEATURE_DOMAIN_ALIGN_MODE", str),
             "OPTICAL_SLM_PRIVACY_CORR_TARGET": ("PRIVACY_CORR_TARGET", float),
             "OPTICAL_SLM_PRIVACY_SSIM_TARGET": ("PRIVACY_SSIM_TARGET", float),
@@ -429,6 +450,28 @@ class ConfigSLM:
             "detection": cls.DETECTION_LOSS_WEIGHT_JOINT,
             "response": cls.RESPONSE_LOSS_WEIGHT_JOINT,
             "privacy": cls.PRIVACY_LOSS_WEIGHT_JOINT,
+        }
+
+    @classmethod
+    def get_phase_regularization_weights(cls, stage_name):
+        if stage_name == "phase_focus":
+            return {
+                "smooth": cls.PHASE_SMOOTH_WEIGHT_PHASE_FOCUS,
+                "diversity": cls.PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS,
+            }
+        if stage_name == "detector_focus":
+            return {
+                "smooth": cls.PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS,
+                "diversity": cls.PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS,
+            }
+        if stage_name == "norm_joint":
+            return {
+                "smooth": cls.PHASE_SMOOTH_WEIGHT_NORM_JOINT,
+                "diversity": cls.PHASE_DIVERSITY_WEIGHT_NORM_JOINT,
+            }
+        return {
+            "smooth": cls.PHASE_SMOOTH_WEIGHT_JOINT,
+            "diversity": cls.PHASE_DIVERSITY_WEIGHT_JOINT,
         }
 
     @classmethod

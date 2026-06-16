@@ -168,17 +168,34 @@ class CompositeOpticalFeatureLoss(nn.Module):
             sum(near_ratios) / len(near_ratios),
         )
 
-    def forward(self, student_feature, teacher_feature, student):
-        aligned_student, aligned_teacher = self.domain_align(student_feature, teacher_feature)
+    def prefilter_feature(self, x):
+        kernel_size = int(getattr(self.config, "FEATURE_LOSS_PREFILTER_KERNEL", 1))
+        if kernel_size <= 1:
+            return x
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        return F.avg_pool2d(x, kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
+
+    def forward(self, student_feature, teacher_feature, student, stage_name=None):
+        filtered_student = self.prefilter_feature(student_feature)
+        filtered_teacher = self.prefilter_feature(teacher_feature)
+        aligned_student, aligned_teacher = self.domain_align(filtered_student, filtered_teacher)
         loss_full = F.mse_loss(aligned_student, aligned_teacher)
         loss_low1 = F.mse_loss(self.pool1(aligned_student), self.pool1(aligned_teacher))
         loss_low2 = F.mse_loss(self.pool2(aligned_student), self.pool2(aligned_teacher))
         loss_ssim = self.ssim_loss(aligned_student, aligned_teacher)
         loss_grad = self.gradient_loss(aligned_student, aligned_teacher)
         loss_freq = self.frequency_loss(aligned_student, aligned_teacher)
-        loss_pearson = self.pearson_loss(student_feature, teacher_feature)
+        loss_pearson = self.pearson_loss(filtered_student, filtered_teacher)
         loss_smooth = self.phase_smoothness_loss(student)
         loss_div, std, span, circular_std, near_boundary = self.phase_diversity_loss(student)
+        if hasattr(self.config, "get_phase_regularization_weights"):
+            phase_weights = self.config.get_phase_regularization_weights(stage_name)
+            smooth_weight = phase_weights["smooth"]
+            diversity_weight = phase_weights["diversity"]
+        else:
+            smooth_weight = self.config.LOSS_PHASE_SMOOTH_WEIGHT
+            diversity_weight = self.config.LOSS_PHASE_DIVERSITY_WEIGHT
         total = (
             loss_full * self.config.LOSS_FULL_WEIGHT
             + loss_low1 * self.config.LOSS_LOW1_WEIGHT
@@ -187,8 +204,8 @@ class CompositeOpticalFeatureLoss(nn.Module):
             + loss_grad * self.config.LOSS_GRAD_WEIGHT
             + loss_freq * self.config.LOSS_FREQ_WEIGHT
             + loss_pearson * self.config.LOSS_PEARSON_WEIGHT
-            + loss_smooth * self.config.LOSS_PHASE_SMOOTH_WEIGHT
-            + loss_div * self.config.LOSS_PHASE_DIVERSITY_WEIGHT
+            + loss_smooth * smooth_weight
+            + loss_div * diversity_weight
         )
         stats = {
             "feature_total": float(total.detach().item()),

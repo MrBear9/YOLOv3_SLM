@@ -214,6 +214,7 @@ class ConvTeacher(nn.Module):
                 "feat_scale8": f_refined,
                 "feat_scale4": f_s4,
                 "feat_scale2": f_s2,
+                "feat_raw_1ch": feat_1ch,
             }
         return det_feature
 
@@ -324,6 +325,7 @@ class ConvTeacherV2(nn.Module):
                 "feat_scale8": f_refined,     # [B, c1, H/8, W/8]
                 "feat_scale4": f_s4,          # [B, c3, H/8, W/8]
                 "feat_scale2": f_s2,          # [B, c3, H/8, W/8]
+                "feat_raw_1ch": feat_1ch,
             }
         return det_feature
 
@@ -417,6 +419,7 @@ class ConvTeacherV3(nn.Module):
                 "edge_logits": self.edge_head(f),
                 "gate": gate,
                 "residual": residual,
+                "feat_raw_1ch": det_feature,
                 # Multi-scale features for detector distillation (training only)
                 "feat_scale2": x1,       # [B, c1, H/2, W/2] — shallow texture
                 "feat_scale4": x2,       # [B, c2, H/4, W/4] — mid-level structure
