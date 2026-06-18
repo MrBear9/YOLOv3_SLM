@@ -178,6 +178,47 @@ def clip_phase_grad_norm(student, max_norm):
     return float(torch.nn.utils.clip_grad_norm_(params, max_norm).detach().item())
 
 
+def save_current_student_checkpoint(
+    student,
+    path,
+    display_epoch,
+    avg_total,
+    stage_name,
+    slm_stats,
+    slm_ok,
+    val_losses=None,
+    val_metrics=None,
+    phase_grad_norm=None,
+    phase_update_norm=None,
+    phase_update_rel=None,
+    mirror_path=None,
+):
+    extra = {
+        "train_loss": avg_total,
+        "val_loss": val_losses["total"] if val_losses is not None else None,
+        "val_map50": val_metrics["map50"] if val_metrics is not None else None,
+        "slm_stats": slm_stats,
+        "paired_with_detector_best": False,
+        "paired_detector_checkpoint": None,
+        "paired_student_epoch": display_epoch,
+        "paired_student_stage": stage_name,
+        "selection_metric": "current_optical_student",
+        "recommended_inference_checkpoint": False,
+        "student_norm_mode": Config.STUDENT_NORM_MODE,
+        "student_norm_schedule": Config.STUDENT_NORM_SCHEDULE,
+        "slm_quality_passed": bool(slm_ok),
+        "phase_grad_norm": phase_grad_norm,
+        "phase_update_norm": phase_update_norm,
+        "phase_update_rel": phase_update_rel,
+    }
+    save_student_best(Config, student, path, display_epoch, avg_total, extra=extra)
+    if mirror_path is not None:
+        mirror_extra = dict(extra)
+        mirror_extra["selection_metric"] = "phase_focus_current_optical_student"
+        mirror_extra["phase_focus_mirror_checkpoint"] = path
+        save_student_best(Config, student, mirror_path, display_epoch, avg_total, extra=mirror_extra)
+
+
 def zero_model_grads(*modules):
     for module in modules:
         module.zero_grad(set_to_none=True)
@@ -227,6 +268,7 @@ def log_config():
     )
     log_to_file(Config, f"Save paired detector best: {Config.get_detector_best_path()}")
     log_to_file(Config, f"Save paired student mirror: {Config.get_student_best_path()}")
+    log_to_file(Config, f"Save current optical student snapshot: {Config.get_student_current_path()}")
     log_to_file(
         Config,
         "Recommended inference checkpoint: detector_best.pth, because it carries the detector and "
@@ -550,6 +592,23 @@ def train():
                 for key in ("val_total", "val_feature", "val_detection", "val_response", "val_privacy", "precision", "recall", "f1", "map50"):
                     history[key].append(np.nan)
 
+            if is_main:
+                save_current_student_checkpoint(
+                    student_raw,
+                    Config.get_student_current_path(),
+                    display_epoch,
+                    avg_total,
+                    stage_name,
+                    slm_stats,
+                    slm_ok,
+                    val_losses=val_losses,
+                    val_metrics=val_metrics,
+                    phase_grad_norm=avg_phase_grad_norm,
+                    phase_update_norm=phase_update_norm,
+                    phase_update_rel=phase_update_rel,
+                    mirror_path=Config.get_student_best_path() if stage_name == "phase_focus" else None,
+                )
+
             student_score_is_best = False
             if norm_is_deployment_ready and slm_ok and stage_name == "norm_joint":
                 if val_metrics is not None:
@@ -568,8 +627,8 @@ def train():
             elif stage_name == "phase_focus" and not norm_is_deployment_ready:
                 log_to_file(
                     Config,
-                    "Phase-focus stage was trained without deployment normalization; standalone "
-                    "optical_student_best.pth is deferred until normalized detector/joint training.",
+                    "Phase-focus stage was trained without deployment normalization; optical_student_current.pth "
+                    "and a phase-focus optical_student_best.pth mirror were saved for phase inspection.",
                 )
 
             detector_score_is_best = False
