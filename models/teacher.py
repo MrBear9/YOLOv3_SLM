@@ -120,8 +120,8 @@ class ConvTeacher(nn.Module):
     blocks per stage (3 vs 2), deeper context with two dilated residual
     blocks, and higher-capacity bottleneck (128 vs 96 channels at c3).
 
-    The architecture follows the same pattern — multi-scale fusion at
-    stride-8 followed by 1ch projection and bilinear upsampling — but
+    The architecture follows the same pattern: multi-scale fusion at
+    stride-8 followed by 1ch projection and bilinear upsampling, but
     with extra depth and width for richer feature extraction.
     """
 
@@ -151,7 +151,7 @@ class ConvTeacher(nn.Module):
             TeacherResidualBlock(c3, dilation=4),
         )
 
-        # Multi-scale lateral connections → all to stride-8
+        # Multi-scale lateral connections projected to stride-8.
         self.lateral_s4 = nn.Sequential(
             nn.Conv2d(c2, c3, 3, 2, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU(),
         )
@@ -179,7 +179,7 @@ class ConvTeacher(nn.Module):
             nn.Conv2d(c1, 1, 1),
         )
 
-        # Learnable output affine — lets the teacher adapt its output
+        # Learnable output affine lets the teacher adapt its output
         # distribution to the detector's needs (feature stabilization)
         self.out_scale = nn.Parameter(torch.ones(1))
         self.out_bias = nn.Parameter(torch.zeros(1))
@@ -219,123 +219,13 @@ class ConvTeacher(nn.Module):
         return det_feature
 
 
-class ConvTeacherV2(nn.Module):
-    """Deep semantic projection teacher.
-
-    The backbone produces multi-scale features at strides 2/4/8, which are
-    fused at stride-8 (80×80).  The output head operates at this low
-    resolution — each output pixel encodes a large receptive field with
-    rich semantic context — then bilinear-upsamples to 640×640.
-
-    The 1-channel output stays SLM-compatible, but instead of a per-pixel
-    brightness tweak it carries block-level semantic information that
-    drastically reduces the burden on the downstream detector.
-    """
-
-    def __init__(self, base_channels=24, c2f_blocks=2):
-        super().__init__()
-        c1 = base_channels
-        c2 = base_channels * 2
-        c3 = base_channels * 4
-
-        # --- Backbone (shared with legacy V2) ---
-        self.stem = TeacherConvBNAct(1, c1, 3, 2)
-        self.stage1 = TeacherC2f(c1, c1, c2f_blocks, shortcut=True)
-        self.down2 = TeacherConvBNAct(c1, c2, 3, 2)
-        self.stage2 = TeacherC2f(c2, c2, c2f_blocks + 1, shortcut=True)
-        self.down3 = TeacherConvBNAct(c2, c3, 3, 2)
-        self.stage3 = TeacherC2f(c3, c3, c2f_blocks + 1, shortcut=True)
-        self.sppf = TeacherSPPF(c3, c3)
-
-        # Skip connections to bottleneck
-        self.skip1 = nn.Sequential(nn.Conv2d(c1, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
-        self.skip2 = nn.Sequential(nn.Conv2d(c2, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
-
-        # Context at stride-8
-        self.context = nn.Sequential(
-            TeacherC2f(c3, c3, c2f_blocks, shortcut=True),
-            TeacherResidualBlock(c3, dilation=2),
-        )
-
-        # --- Multi-scale lateral connections → all projected to stride-8 ---
-        self.lateral_s4 = nn.Sequential(
-            nn.Conv2d(c2, c3, 3, 2, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU(),
-        )
-        self.lateral_s2 = nn.Sequential(
-            nn.Conv2d(c1, c2, 3, 2, 1, bias=False), nn.BatchNorm2d(c2), nn.SiLU(),
-            nn.Conv2d(c2, c3, 3, 2, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU(),
-        )
-
-        # Deep fusion of all three scales at stride-8
-        self.deep_fuse = nn.Sequential(
-            TeacherConvBNAct(c3 * 3, c3),
-            TeacherC2f(c3, c3, c2f_blocks, shortcut=True),
-        )
-
-        # Refinement at stride-8
-        self.refine = nn.Sequential(
-            TeacherConvBNAct(c3, c2, 3),
-            TeacherC2f(c2, c2, max(c2f_blocks, 1), shortcut=True),
-            TeacherConvBNAct(c2, c1, 1),
-        )
-
-        # --- 1-channel projection at stride-8 ---
-        self.proj_out = nn.Sequential(
-            TeacherConvBNAct(c1, c1, 3),
-            nn.Conv2d(c1, 1, 1),
-        )
-
-        # Learnable output affine (feature stabilization)
-        self.out_scale = nn.Parameter(torch.ones(1))
-        self.out_bias = nn.Parameter(torch.zeros(1))
-
-    def forward(self, x, return_aux=False):
-        if x.shape[1] > 1:
-            x = x.mean(dim=1, keepdim=True)
-        gray = x
-
-        # Backbone
-        x1 = self.stage1(self.stem(gray))                              # [B, c1, H/2,  W/2]
-        x2 = self.stage2(self.down2(x1))                               # [B, c2, H/4,  W/4]
-        x3 = self.stage3(self.down3(x2))                               # [B, c3, H/8,  W/8]
-        p3 = self.sppf(x3)                                             # [B, c3, H/8,  W/8]
-
-        # Skip + context at stride-8 (deepest path)
-        skip1 = _interpolate_preserve_layout(self.skip1(x1), size=p3.shape[-2:], mode="bilinear", align_corners=False)
-        skip2 = _interpolate_preserve_layout(self.skip2(x2), size=p3.shape[-2:], mode="bilinear", align_corners=False)
-        f_s8 = self.context(p3 + skip1 + skip2)                        # [B, c3, H/8, W/8]
-
-        # Multi-scale fusion — all mapped to stride-8
-        f_s4 = self.lateral_s4(x2)                                     # [B, c3, H/8, W/8]
-        f_s2 = self.lateral_s2(x1)                                     # [B, c3, H/8, W/8]
-        f_fused = self.deep_fuse(torch.cat([f_s8, f_s4, f_s2], dim=1)) # [B, c3, H/8, W/8]
-
-        # Refine at stride-8, then project to 1ch
-        f_refined = self.refine(f_fused)                               # [B, c1, H/8, W/8]
-        feat_1ch = torch.sigmoid(self.proj_out(f_refined))             # [B,  1, H/8, W/8]
-        feat_1ch = feat_1ch * self.out_scale + self.out_bias           # learnable affine
-
-        # Upsample to output resolution
-        det_feature = _interpolate_preserve_layout(feat_1ch, size=gray.shape[-2:], mode="bilinear", align_corners=False)
-
-        if return_aux:
-            return {
-                "det_feature": det_feature,
-                "gray": gray,
-                "feat_scale8": f_refined,     # [B, c1, H/8, W/8]
-                "feat_scale4": f_s4,          # [B, c3, H/8, W/8]
-                "feat_scale2": f_s2,          # [B, c3, H/8, W/8]
-                "feat_raw_1ch": feat_1ch,
-            }
-        return det_feature
-
 
 class ConvTeacherV3(nn.Module):
     """YOLOv8-style teacher with residual+gate output (V2 backbone, new output head).
 
     Shares the same C2f feedforward backbone as ConvTeacherV2.  The difference
-    is in the output: instead of ``sigmoid(abs(bridge(refine)))`` — a purely
-    synthetic feature map — V3 produces::
+    is in the output: instead of ``sigmoid(abs(bridge(refine)))``, a purely
+    synthetic feature map, V3 produces::
 
         det_feature = gray + residual_scale * gate * residual
 
@@ -400,7 +290,7 @@ class ConvTeacherV3(nn.Module):
         f = self.refine(f)
 
         # Multi-scale features for distillation (before upsampling)
-        feat_scale8 = f                                                # [B, c1, H/8, W/8] — deepest fused
+        feat_scale8 = f                                                # [B, c1, H/8, W/8] deepest fused
 
         # Upsample to original resolution before applying heads
         f = _interpolate_preserve_layout(f, size=gray.shape[-2:], mode="bilinear", align_corners=False)
@@ -421,9 +311,9 @@ class ConvTeacherV3(nn.Module):
                 "residual": residual,
                 "feat_raw_1ch": det_feature,
                 # Multi-scale features for detector distillation (training only)
-                "feat_scale2": x1,       # [B, c1, H/2, W/2] — shallow texture
-                "feat_scale4": x2,       # [B, c2, H/4, W/4] — mid-level structure
-                "feat_scale8": feat_scale8,  # [B, c1, H/8, W/8] — deep semantics
+                "feat_scale2": x1,       # [B, c1, H/2, W/2] shallow texture
+                "feat_scale4": x2,       # [B, c2, H/4, W/4] mid-level structure
+                "feat_scale8": feat_scale8,  # [B, c1, H/8, W/8] deep semantics
             }
         return det_feature
 
@@ -466,8 +356,51 @@ class SyntheticWavelengthComplexConv(nn.Module):
         return self.mix(torch.cat(intensities, dim=1))
 
 
+class CVOCAStage(nn.Module):
+    """One optical feature stage: phase modulation, complex convolution, intensity readout."""
+
+    def __init__(self, in_channels, out_channels, kernel_size=5, num_wavelengths=3, stride=1, residual=True):
+        super().__init__()
+        self.amp = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, stride, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.SiLU(),
+        )
+        self.phase = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, stride, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.Tanh(),
+        )
+        self.optical_conv = SyntheticWavelengthComplexConv(
+            out_channels,
+            kernel_size=kernel_size,
+            num_wavelengths=num_wavelengths,
+        )
+        self.post = nn.Sequential(
+            TeacherConvBNAct(out_channels, out_channels, 1),
+            TeacherResidualBlock(out_channels, dilation=1),
+        )
+        use_projection = residual and (stride != 1 or in_channels != out_channels)
+        if residual and not use_projection:
+            self.skip = nn.Identity()
+        elif use_projection:
+            self.skip = TeacherConvBNAct(in_channels, out_channels, 1, stride=stride)
+        else:
+            self.skip = None
+
+    def forward(self, x):
+        amp = F.softplus(self.amp(x))
+        phase = 3.141592653589793 * self.phase(x)
+        real = amp * torch.cos(phase)
+        imag = amp * torch.sin(phase)
+        out = self.post(self.optical_conv(real, imag))
+        if self.skip is not None:
+            out = out + self.skip(x)
+        return out
+
+
 class CVOCAConvTeacherV2(nn.Module):
-    """CVOCA-style v2 teacher that still emits a single CCD-like channel."""
+    """CVOCA-style v2 teacher that uses optical stages as the feature extractor."""
 
     def __init__(self, base_channels=24, c2f_blocks=2, synthetic_wavelengths=3, complex_kernel_size=5):
         super().__init__()
@@ -475,46 +408,75 @@ class CVOCAConvTeacherV2(nn.Module):
         c2 = base_channels * 2
         c3 = base_channels * 4
 
-        self.stem = TeacherConvBNAct(1, c1, 3, 2)
-        self.stage1 = TeacherC2f(c1, c1, c2f_blocks, shortcut=True)
-        self.down2 = TeacherConvBNAct(c1, c2, 3, 2)
-        self.stage2 = TeacherC2f(c2, c2, c2f_blocks + 1, shortcut=True)
-        self.down3 = TeacherConvBNAct(c2, c3, 3, 2)
-        self.stage3 = TeacherC2f(c3, c3, c2f_blocks + 1, shortcut=True)
-        self.sppf = TeacherSPPF(c3, c3)
-
-        self.skip1 = nn.Sequential(nn.Conv2d(c1, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
-        self.skip2 = nn.Sequential(nn.Conv2d(c2, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
-        self.context = nn.Sequential(
-            TeacherC2f(c3, c3, c2f_blocks, shortcut=True),
-            TeacherResidualBlock(c3, dilation=2),
-        )
-        self.lateral_s4 = nn.Sequential(
-            nn.Conv2d(c2, c3, 3, 2, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU(),
-        )
-        self.lateral_s2 = nn.Sequential(
-            nn.Conv2d(c1, c2, 3, 2, 1, bias=False), nn.BatchNorm2d(c2), nn.SiLU(),
-            nn.Conv2d(c2, c3, 3, 2, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU(),
-        )
-        self.deep_fuse = nn.Sequential(
-            TeacherConvBNAct(c3 * 3, c3),
-            TeacherC2f(c3, c3, c2f_blocks, shortcut=True),
-        )
-        self.refine = nn.Sequential(
-            TeacherConvBNAct(c3, c2, 3),
-            TeacherC2f(c2, c2, max(c2f_blocks, 1), shortcut=True),
-            TeacherConvBNAct(c2, c1, 1),
-        )
-
-        self.complex_seed = nn.Conv2d(c1, c1 * 2, 1)
-        self.semantic_phase = nn.Sequential(TeacherConvBNAct(c1, c1, 3), nn.Conv2d(c1, c1, 1), nn.Tanh())
-        self.optical_conv = SyntheticWavelengthComplexConv(
+        depth = max(int(c2f_blocks), 1)
+        self.entry = CVOCAStage(
+            1,
             c1,
             kernel_size=complex_kernel_size,
             num_wavelengths=synthetic_wavelengths,
+            stride=2,
+            residual=False,
+        )
+        self.stage_s2 = nn.Sequential(
+            *[
+                CVOCAStage(
+                    c1,
+                    c1,
+                    kernel_size=complex_kernel_size,
+                    num_wavelengths=synthetic_wavelengths,
+                    stride=1,
+                )
+                for _ in range(depth)
+            ]
+        )
+        self.stage_s4 = nn.Sequential(
+            CVOCAStage(c1, c2, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=2),
+            *[
+                CVOCAStage(
+                    c2,
+                    c2,
+                    kernel_size=complex_kernel_size,
+                    num_wavelengths=synthetic_wavelengths,
+                    stride=1,
+                )
+                for _ in range(depth + 1)
+            ],
+        )
+        self.stage_s8 = nn.Sequential(
+            CVOCAStage(c2, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=2),
+            *[
+                CVOCAStage(
+                    c3,
+                    c3,
+                    kernel_size=complex_kernel_size,
+                    num_wavelengths=synthetic_wavelengths,
+                    stride=1,
+                )
+                for _ in range(depth + 2)
+            ],
+        )
+        self.global_optical_context = nn.Sequential(
+            CVOCAStage(c3, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=1),
+            TeacherResidualBlock(c3, dilation=2),
+            CVOCAStage(c3, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=1),
+            TeacherResidualBlock(c3, dilation=4),
+        )
+        self.s2_to_s8 = nn.Sequential(
+            CVOCAStage(c1, c2, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=2),
+            CVOCAStage(c2, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=2),
+        )
+        self.s4_to_s8 = CVOCAStage(c2, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=2)
+        self.fuse = nn.Sequential(
+            TeacherConvBNAct(c3 * 3, c3, 1),
+            CVOCAStage(c3, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=1),
+            TeacherResidualBlock(c3, dilation=2),
+            TeacherConvBNAct(c3, c1, 1),
         )
         self.semantic_gain = nn.Sequential(nn.Conv2d(c1, 1, 1), nn.Sigmoid())
-        self.proj_out = nn.Sequential(TeacherConvBNAct(c1, c1, 3), nn.Conv2d(c1, 1, 1))
+        self.proj_out = nn.Sequential(
+            CVOCAStage(c1, c1, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=1),
+            nn.Conv2d(c1, 1, 1),
+        )
         self.out_scale = nn.Parameter(torch.ones(1))
         self.out_bias = nn.Parameter(torch.zeros(1))
 
@@ -529,25 +491,15 @@ class CVOCAConvTeacherV2(nn.Module):
             x = x.mean(dim=1, keepdim=True)
         gray = x.clamp(min=0.0)
 
-        x1 = self.stage1(self.stem(gray))
-        x2 = self.stage2(self.down2(x1))
-        x3 = self.stage3(self.down3(x2))
-        p3 = self.sppf(x3)
-        skip1 = _interpolate_preserve_layout(self.skip1(x1), size=p3.shape[-2:], mode="bilinear", align_corners=False)
-        skip2 = _interpolate_preserve_layout(self.skip2(x2), size=p3.shape[-2:], mode="bilinear", align_corners=False)
-        f_s8 = self.context(p3 + skip1 + skip2)
+        f_s2 = self.stage_s2(self.entry(gray))
+        f_s4 = self.stage_s4(f_s2)
+        f_s8 = self.stage_s8(f_s4)
+        f_context = self.global_optical_context(f_s8)
+        f_from_s2 = self.s2_to_s8(f_s2)
+        f_from_s4 = self.s4_to_s8(f_s4)
+        f_refined = self.fuse(torch.cat([f_context, f_from_s4, f_from_s2], dim=1))
 
-        f_s4 = self.lateral_s4(x2)
-        f_s2 = self.lateral_s2(x1)
-        f_fused = self.deep_fuse(torch.cat([f_s8, f_s4, f_s2], dim=1))
-        f_refined = self.refine(f_fused)
-
-        real_seed, imag_seed = self.complex_seed(f_refined).chunk(2, dim=1)
-        semantic_phase = 3.141592653589793 * self.semantic_phase(f_refined)
-        real = real_seed * torch.cos(semantic_phase) - imag_seed * torch.sin(semantic_phase)
-        imag = real_seed * torch.sin(semantic_phase) + imag_seed * torch.cos(semantic_phase)
-        optical_feature = self.optical_conv(real, imag)
-        raw_cipher = F.softplus(self.proj_out(optical_feature))
+        raw_cipher = F.softplus(self.proj_out(f_refined))
         raw_cipher = raw_cipher * (0.75 + 0.50 * self.semantic_gain(f_refined))
         feat_1ch = self._normalize_intensity(raw_cipher)
         feat_1ch = torch.clamp(feat_1ch * F.softplus(self.out_scale) + self.out_bias, min=0.0)
@@ -561,8 +513,6 @@ class CVOCAConvTeacherV2(nn.Module):
                 "feat_scale4": f_s4,
                 "feat_scale2": f_s2,
                 "feat_raw_1ch": feat_1ch,
-                "complex_real": real,
-                "complex_imag": imag,
                 "optical_cipher_raw": raw_cipher,
             }
         return det_feature

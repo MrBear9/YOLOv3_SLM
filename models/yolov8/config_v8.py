@@ -81,7 +81,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v2" | "v2"  (deep semantic projection, default)
     # =========================================================================
-    TEACHER_ARCH = "convteacher"
+    TEACHER_ARCH = "convteacher_v2"
     TEACHER_V2_BASE_CHANNELS = 24
     TEACHER_V2_C2F_BLOCKS = 2
     TEACHER_V2_SYNTHETIC_WAVELENGTHS = 3
@@ -113,7 +113,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # DETECTOR_HEAD_TYPE = "light" | "yolov8_anchor"
     # =========================================================================
-    DETECTOR_HEAD_TYPE = "light_branch"
+    DETECTOR_HEAD_TYPE = "light"
 
     # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
     YOLOV8_BASE_CHANNELS = 32
