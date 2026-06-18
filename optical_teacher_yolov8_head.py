@@ -22,7 +22,11 @@ from models.runtime import (
     wrap_data_parallel,
 )
 from models.teacher import build_teacher
-from models.teacher_guidance import build_feature_distillation_loss, teacher_cipher_loss, teacher_physical_cipher_loss
+from models.teacher_guidance import (
+    build_feature_distillation_loss,
+    teacher_cipher_loss,
+    teacher_slm_cipher_loss,
+)
 from models.training_utils import (
     build_optimizer_from_model,
     initialize_teacher_weights,
@@ -101,11 +105,14 @@ def log_all_parameters():
     )
     log_to_file(
         Config,
-        f"Teacher physical loss: weight={Config.TEACHER_PHYSICAL_LOSS_WEIGHT}, "
-        f"blur_kernel={Config.TEACHER_PHYSICAL_BLUR_KERNEL}, "
-        f"tv_target={Config.TEACHER_PHYSICAL_TV_TARGET}, "
-        f"hf_target={Config.TEACHER_PHYSICAL_HF_TARGET}, "
-        f"range_floor={Config.TEACHER_PHYSICAL_RANGE_FLOOR}",
+        f"Teacher SLM-cipher loss: weight={Config.TEACHER_SLM_CIPHER_LOSS_WEIGHT}, "
+        f"blur_kernel={Config.TEACHER_SLM_CIPHER_BLUR_KERNEL}, "
+        f"tv_target={Config.TEACHER_SLM_CIPHER_TV_TARGET}, "
+        f"hf_target={Config.TEACHER_SLM_CIPHER_HF_TARGET}, "
+        f"range_floor={Config.TEACHER_SLM_CIPHER_RANGE_FLOOR}, "
+        f"mean_floor={Config.TEACHER_SLM_CIPHER_MEAN_FLOOR}, "
+        f"peak_limit={Config.TEACHER_SLM_CIPHER_PEAK_LIMIT}, "
+        f"edge_limit={Config.TEACHER_SLM_CIPHER_EDGE_LIMIT}",
     )
     log_to_file(Config, "=" * 80)
 
@@ -208,7 +215,21 @@ def train():
         if use_ddp and train_sampler is not None:
             train_sampler.set_epoch(epoch)
         model.train()
-        train_component_sums = {"total": 0.0, "box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
+        train_component_sums = {
+            "total": 0.0,
+            "box": 0.0,
+            "obj": 0.0,
+            "noobj": 0.0,
+            "cls": 0.0,
+            "cipher": 0.0,
+            "slm_cipher": 0.0,
+            "slm_tv": 0.0,
+            "slm_hf": 0.0,
+            "slm_range": 0.0,
+            "slm_mean": 0.0,
+            "slm_peak": 0.0,
+            "slm_edge": 0.0,
+        }
         stage_settings = Config.get_stage_settings(epoch)
         phase = criterion.set_epoch_weights(epoch)
         if phase != current_phase:
@@ -228,12 +249,12 @@ def train():
             optimizer.zero_grad()
             use_distill = enable_distill and distill_loss_fn is not None
             use_cipher = Config.TEACHER_CIPHER_LOSS_WEIGHT > 0
-            use_physical = Config.TEACHER_PHYSICAL_LOSS_WEIGHT > 0
+            use_slm_cipher = Config.TEACHER_SLM_CIPHER_LOSS_WEIGHT > 0
             if use_distill:
                 teacher_features, predictions, teacher_aux, det_features = model(
                     batch_images, return_feature=True, return_teacher_aux=True, return_det_features=True
                 )
-            elif is_v3 or use_cipher or use_physical:
+            elif is_v3 or use_cipher or use_slm_cipher:
                 teacher_features, predictions, teacher_aux = model(
                     batch_images, return_feature=True, return_teacher_aux=True
                 )
@@ -248,12 +269,15 @@ def train():
                 loss = loss + distill_loss * Config.FEATURE_DISTILL_WEIGHT
 
             if use_cipher:
-                cipher_loss, _ = teacher_cipher_loss(Config, teacher_aux)
+                cipher_loss, cipher_stats = teacher_cipher_loss(Config, teacher_aux)
                 loss = loss + cipher_loss
+                train_component_sums["cipher"] += cipher_stats["cipher"]
 
-            if use_physical:
-                physical_loss, _ = teacher_physical_cipher_loss(Config, teacher_aux)
-                loss = loss + physical_loss
+            if use_slm_cipher:
+                slm_cipher_loss, slm_cipher_stats = teacher_slm_cipher_loss(Config, teacher_aux)
+                loss = loss + slm_cipher_loss
+                for key in ("slm_cipher", "slm_tv", "slm_hf", "slm_range", "slm_mean", "slm_peak", "slm_edge"):
+                    train_component_sums[key] += slm_cipher_stats[key]
 
             if is_v3 and teacher_aux is not None:
                 gate_sparsity = teacher_aux["gate"].mean()
@@ -335,6 +359,15 @@ def train():
             map50=val_metrics["map50"] if val_metrics is not None else None,
             lr=current_lr,
             best_status=Config.EPOCH_TABLE_BEST_MARK if is_best else "",
+        )
+        log_to_file(
+            Config,
+            f"Epoch {epoch + 1:03d} [{phase}] components "
+            f"cipher={avg_train['cipher']:.4f} slm_cipher={avg_train['slm_cipher']:.4f} "
+            f"tv={avg_train['slm_tv']:.4f} hf={avg_train['slm_hf']:.4f} "
+            f"range={avg_train['slm_range']:.4f} mean={avg_train['slm_mean']:.4f} "
+            f"peak={avg_train['slm_peak']:.4f} "
+            f"edge={avg_train['slm_edge']:.4f}",
         )
         if is_main:
             save_training_curves(history, Config.TEACHER_OUTPUT_DIR)

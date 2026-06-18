@@ -88,34 +88,72 @@ def teacher_cipher_loss(config, teacher_aux):
     }
 
 
-def teacher_physical_cipher_loss(config, teacher_aux):
-    weight = float(getattr(config, "TEACHER_PHYSICAL_LOSS_WEIGHT", 0.0))
+def teacher_slm_cipher_loss(config, teacher_aux):
+    weight = float(getattr(config, "TEACHER_SLM_CIPHER_LOSS_WEIGHT", 0.0))
     if weight <= 0 or teacher_aux is None:
         device = teacher_aux["det_feature"].device if teacher_aux is not None else "cpu"
         zero = torch.zeros((), device=device)
-        return zero, {"physical": 0.0, "physical_tv": 0.0, "physical_hf": 0.0, "physical_range": 0.0}
+        return zero, {
+            "slm_cipher": 0.0,
+            "slm_tv": 0.0,
+            "slm_hf": 0.0,
+            "slm_range": 0.0,
+            "slm_mean": 0.0,
+            "slm_peak": 0.0,
+            "slm_edge": 0.0,
+        }
 
     eps = float(getattr(config, "OPTICAL_NORM_EPS", 1e-6))
     feature = teacher_aux["det_feature"].float()
     feature_view = _max_normalize(feature.clamp(min=0), eps)
-    kernel = int(getattr(config, "TEACHER_PHYSICAL_BLUR_KERNEL", 9))
+    kernel = int(getattr(config, "TEACHER_SLM_CIPHER_BLUR_KERNEL", 15))
     low_freq = _blur_feature(feature_view, kernel)
     high_freq = feature_view - low_freq
 
     tv = _neighbor_total_variation(feature_view)
     hf = high_freq.abs().mean()
-    tv_target = float(getattr(config, "TEACHER_PHYSICAL_TV_TARGET", 0.030))
-    hf_target = float(getattr(config, "TEACHER_PHYSICAL_HF_TARGET", 0.060))
-    range_floor = float(getattr(config, "TEACHER_PHYSICAL_RANGE_FLOOR", 0.35))
-    spatial_range = feature_view.amax(dim=(2, 3), keepdim=True) - feature_view.amin(dim=(2, 3), keepdim=True)
-    range_penalty = F.relu(range_floor - spatial_range.mean())
+    tv_target = float(getattr(config, "TEACHER_SLM_CIPHER_TV_TARGET", 0.026))
+    hf_target = float(getattr(config, "TEACHER_SLM_CIPHER_HF_TARGET", 0.045))
+    range_floor = float(getattr(config, "TEACHER_SLM_CIPHER_RANGE_FLOOR", 0.28))
+    mean_floor = float(getattr(config, "TEACHER_SLM_CIPHER_MEAN_FLOOR", 0.52))
+    peak_limit = float(getattr(config, "TEACHER_SLM_CIPHER_PEAK_LIMIT", 0.88))
+    edge_limit = float(getattr(config, "TEACHER_SLM_CIPHER_EDGE_LIMIT", 0.62))
+    tv_weight = float(getattr(config, "TEACHER_SLM_CIPHER_TV_WEIGHT", 1.0))
+    hf_weight = float(getattr(config, "TEACHER_SLM_CIPHER_HF_WEIGHT", 1.2))
+    range_weight = float(getattr(config, "TEACHER_SLM_CIPHER_RANGE_WEIGHT", 0.6))
+    mean_weight = float(getattr(config, "TEACHER_SLM_CIPHER_MEAN_WEIGHT", 1.4))
+    peak_weight = float(getattr(config, "TEACHER_SLM_CIPHER_PEAK_WEIGHT", 0.8))
+    edge_weight = float(getattr(config, "TEACHER_SLM_CIPHER_EDGE_WEIGHT", 0.4))
 
-    raw = F.relu(tv - tv_target) + F.relu(hf - hf_target) + range_penalty
+    spatial_range = feature_view.amax(dim=(2, 3), keepdim=True) - feature_view.amin(dim=(2, 3), keepdim=True)
+    mean_val = feature_view.mean()
+    peak_mean = feature_view.flatten(2).topk(k=max(1, feature_view.shape[-1] * feature_view.shape[-2] // 100), dim=2).values.mean()
+
+    edge = max(2, int(round(min(feature_view.shape[-2:]) * 0.025)))
+    edge_parts = [
+        feature_view[:, :, :edge, :],
+        feature_view[:, :, -edge:, :],
+        feature_view[:, :, :, :edge],
+        feature_view[:, :, :, -edge:],
+    ]
+    edge_mean = torch.cat([part.flatten(1) for part in edge_parts], dim=1).mean()
+
+    raw = (
+        tv_weight * F.relu(tv - tv_target)
+        + hf_weight * F.relu(hf - hf_target)
+        + range_weight * F.relu(range_floor - spatial_range.mean())
+        + mean_weight * F.relu(mean_floor - mean_val)
+        + peak_weight * F.relu(peak_mean - peak_limit)
+        + edge_weight * F.relu(edge_mean - edge_limit)
+    )
     return raw * weight, {
-        "physical": float(raw.detach().item()),
-        "physical_tv": float(tv.detach().item()),
-        "physical_hf": float(hf.detach().item()),
-        "physical_range": float(spatial_range.mean().detach().item()),
+        "slm_cipher": float(raw.detach().item()),
+        "slm_tv": float(tv.detach().item()),
+        "slm_hf": float(hf.detach().item()),
+        "slm_range": float(spatial_range.mean().detach().item()),
+        "slm_mean": float(mean_val.detach().item()),
+        "slm_peak": float(peak_mean.detach().item()),
+        "slm_edge": float(edge_mean.detach().item()),
     }
 
 

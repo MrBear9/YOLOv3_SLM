@@ -14,14 +14,14 @@ class ConfigSLM:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_Tv1_light_branch_slim_relaxed_phase_privacy"
+    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_Tv1_light_branch_slim_brightfield_slm_cipher_teacher_decoupled_phase_privacy"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_physical_privacy/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_brightfield_slm_cipher_privacy/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -172,13 +172,13 @@ class ConfigSLM:
     LOSS_FULL_WEIGHT = 0.05
     LOSS_LOW1_WEIGHT = 0.20
     LOSS_LOW2_WEIGHT = 0.10
-    LOSS_SSIM_WEIGHT = 0.20
-    LOSS_GRAD_WEIGHT = 0.15
+    LOSS_SSIM_WEIGHT = 0.30
+    LOSS_GRAD_WEIGHT = 0.25
     LOSS_FREQ_WEIGHT = 0.05
-    LOSS_PEARSON_WEIGHT = 0.70
+    LOSS_PEARSON_WEIGHT = 0.40
     LOSS_PHASE_SMOOTH_WEIGHT = 0.001
     LOSS_PHASE_DIVERSITY_WEIGHT = 0.15
-    PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.0
+    PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.0001
     PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS = 0.0
     PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS = 0.0
     PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS = 0.0
@@ -210,8 +210,8 @@ class ConfigSLM:
     # Stage loss weights
     # =========================================================================
     FEATURE_LOSS_WEIGHT_PHASE_FOCUS = 0.35
-    DETECTION_LOSS_WEIGHT_PHASE_FOCUS = 0.35
-    RESPONSE_LOSS_WEIGHT_PHASE_FOCUS = 0.05
+    DETECTION_LOSS_WEIGHT_PHASE_FOCUS = 0.0
+    RESPONSE_LOSS_WEIGHT_PHASE_FOCUS = 0.0
     PRIVACY_LOSS_WEIGHT_PHASE_FOCUS = 0.0
 
     FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
@@ -341,6 +341,10 @@ class ConfigSLM:
             "OPTICAL_SLM_NORM_JOINT_PHASE_PARAM_LR": ("NORM_JOINT_PHASE_PARAM_LR", float),
             "OPTICAL_SLM_NORM_JOINT_DETECTOR_LR": ("NORM_JOINT_DETECTOR_LR", float),
             "OPTICAL_SLM_PHASE_GRAD_CLIP_NORM": ("PHASE_GRAD_CLIP_NORM", float),
+            "OPTICAL_SLM_LOSS_SSIM_WEIGHT": ("LOSS_SSIM_WEIGHT", float),
+            "OPTICAL_SLM_LOSS_GRAD_WEIGHT": ("LOSS_GRAD_WEIGHT", float),
+            "OPTICAL_SLM_LOSS_FREQ_WEIGHT": ("LOSS_FREQ_WEIGHT", float),
+            "OPTICAL_SLM_LOSS_PEARSON_WEIGHT": ("LOSS_PEARSON_WEIGHT", float),
             "OPTICAL_SLM_FEATURE_LOSS_WEIGHT_PHASE_FOCUS": ("FEATURE_LOSS_WEIGHT_PHASE_FOCUS", float),
             "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_PHASE_FOCUS": ("DETECTION_LOSS_WEIGHT_PHASE_FOCUS", float),
             "OPTICAL_SLM_RESPONSE_LOSS_WEIGHT_PHASE_FOCUS": ("RESPONSE_LOSS_WEIGHT_PHASE_FOCUS", float),
@@ -477,6 +481,10 @@ class ConfigSLM:
     @classmethod
     def get_student_best_path(cls):
         return os.path.join(cls.OUTPUT_DIR, "optical_student_best.pth")
+
+    @classmethod
+    def get_student_current_path(cls):
+        return os.path.join(cls.OUTPUT_DIR, "optical_student_current.pth")
 
     @classmethod
     def get_detector_best_path(cls):
