@@ -137,6 +137,7 @@ class YOLOv8AnchorHead(nn.Module):
         self.pan_p4 = C2f(base_ch * 8, base_ch * 4, c2f_blocks)
         self.down_p4 = ConvBNAct(base_ch * 4, base_ch * 8, 3, 2)
         self.pan_p5 = C2f(base_ch * 16, base_ch * 8, c2f_blocks)
+        self.head_dropout = nn.Dropout2d(0.1)
         self.head_p3 = YOLOv8AnchorDetectBranch(base_ch * 2, out_channels)
         self.head_p4 = YOLOv8AnchorDetectBranch(base_ch * 4, out_channels)
         self.head_p5 = YOLOv8AnchorDetectBranch(base_ch * 8, out_channels)
@@ -159,7 +160,7 @@ class YOLOv8AnchorHead(nn.Module):
         p3 = self.fuse_p3(torch.cat([p4_up, x80], dim=1))
         p4 = self.pan_p4(torch.cat([self.down_p3(p3), p4], dim=1))
         p5 = self.pan_p5(torch.cat([self.down_p4(p4), p5], dim=1))
-        preds = (self.head_p3(p3), self.head_p4(p4), self.head_p5(p5))
+        preds = (self.head_p3(self.head_dropout(p3)), self.head_p4(self.head_dropout(p4)), self.head_p5(self.head_dropout(p5)))
         if return_features:
             return preds, {"s8": x80, "s16": x40, "s32": p5}
         return preds
@@ -201,6 +202,7 @@ class YOLOLightHead(nn.Module):
         # Top-down FPN: simple 1×1 fusion conv (no residual, no ECA)
         self.fuse_p4 = ConvBNAct(c8 * 2, c4, 1)
         self.fuse_p3 = ConvBNAct(c4 + c8, c2, 1)
+        self.head_dropout = nn.Dropout2d(0.1)
 
         # Decoupled detection heads: [shared 3×3 → 3× branch 1×1] per scale
         hc = c2
@@ -239,9 +241,9 @@ class YOLOLightHead(nn.Module):
         p4_up = F.interpolate(p4_fused, size=p3_feat.shape[-2:], mode="nearest")
         p3_fused = self.fuse_p3(torch.cat([p4_up, p3_feat], dim=1))
 
-        pred_p3 = self._decode_head(self.head_p3_shared, self.head_p3_box, self.head_p3_obj, self.head_p3_cls, p3_fused)
-        pred_p4 = self._decode_head(self.head_p4_shared, self.head_p4_box, self.head_p4_obj, self.head_p4_cls, p4_fused)
-        pred_p5 = self._decode_head(self.head_p5_shared, self.head_p5_box, self.head_p5_obj, self.head_p5_cls, p5_feat)
+        pred_p3 = self._decode_head(self.head_p3_shared, self.head_p3_box, self.head_p3_obj, self.head_p3_cls, self.head_dropout(p3_fused))
+        pred_p4 = self._decode_head(self.head_p4_shared, self.head_p4_box, self.head_p4_obj, self.head_p4_cls, self.head_dropout(p4_fused))
+        pred_p5 = self._decode_head(self.head_p5_shared, self.head_p5_box, self.head_p5_obj, self.head_p5_cls, self.head_dropout(p5_feat))
 
         if return_features:
             return (pred_p3, pred_p4, pred_p5), {"s8": p3_feat, "s16": p4_feat, "s32": p5_feat}
@@ -278,6 +280,7 @@ class YOLOBranchLightHead(nn.Module):
         self.p5_path = nn.Sequential(ConvBNAct(c8, c8, 3, 2), SPPF(c8, c8))
         self.fuse_p4 = ConvBNAct(c8 * 2, c4, 1)
         self.fuse_p3 = ConvBNAct(c4 + c8, c2, 1)
+        self.head_dropout = nn.Dropout2d(0.1)
 
         hc = c2
         self.head_p3_shared = ConvBNAct(c2, hc, 3)
@@ -319,9 +322,9 @@ class YOLOBranchLightHead(nn.Module):
         p4_up = F.interpolate(p4_fused, size=p3_base.shape[-2:], mode="nearest")
         p3_fused = self.fuse_p3(torch.cat([p4_up, p3_base], dim=1))
 
-        pred_p3 = self._decode_head(self.head_p3_shared, self.head_p3_box, self.head_p3_obj, self.head_p3_cls, p3_fused)
-        pred_p4 = self._decode_head(self.head_p4_shared, self.head_p4_box, self.head_p4_obj, self.head_p4_cls, p4_fused)
-        pred_p5 = self._decode_head(self.head_p5_shared, self.head_p5_box, self.head_p5_obj, self.head_p5_cls, p5_feat)
+        pred_p3 = self._decode_head(self.head_p3_shared, self.head_p3_box, self.head_p3_obj, self.head_p3_cls, self.head_dropout(p3_fused))
+        pred_p4 = self._decode_head(self.head_p4_shared, self.head_p4_box, self.head_p4_obj, self.head_p4_cls, self.head_dropout(p4_fused))
+        pred_p5 = self._decode_head(self.head_p5_shared, self.head_p5_box, self.head_p5_obj, self.head_p5_cls, self.head_dropout(p5_feat))
 
         if return_features:
             return (pred_p3, pred_p4, pred_p5), {"s8": p3_base, "s16": p4_base, "s32": p5_feat}

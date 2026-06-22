@@ -56,6 +56,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
         self.focal_loss = SigmoidFocalLoss(alpha=self.focal_alpha, gamma=self.focal_gamma, reduction="mean")
         self.size_weights = {"small": 1.0, "medium": 1.0, "large": 1.0}
         self.last_components = {"total": 0.0, "box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
+        self.label_smoothing = float(getattr(config, "LABEL_SMOOTHING", 0.0))
 
         # Uncertainty-weighted multi-task loss (learnable task precisions)
         # Initialised to match static weights so training starts identically.
@@ -186,7 +187,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
                             [tx * config.IMG_SIZE, ty * config.IMG_SIZE, tw, th]
                         )
                         scale_data["target_obj"][b, grid_y, grid_x, anchor_idx] = 1.0
-                        scale_data["target_cls"][b, grid_y, grid_x, anchor_idx, cls_id] = 1.0
+                        scale_data["target_cls"][b, grid_y, grid_x, anchor_idx, cls_id] = 1.0 - self.label_smoothing
                         scale_data["target_match_ratio"][b, grid_y, grid_x, anchor_idx] = ratio
                         scale_data["target_scale_weight"][b, grid_y, grid_x, anchor_idx] = size_weight
 

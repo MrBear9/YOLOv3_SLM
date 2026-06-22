@@ -235,14 +235,9 @@ def train():
         if phase != current_phase:
             current_phase = phase
             optimizer = build_optimizer_from_model(Config, model, teacher_lr=stage_settings["teacher_lr"], detector_lr=stage_settings["detector_lr"])
-            if phase == "locate_gt":
-                phase_epochs = Config.STAGE1_LOCATE_EPOCHS
-            elif phase == "texture_detail":
-                phase_epochs = Config.STAGE2_TEXTURE_EPOCHS
-            else:
-                phase_epochs = Config.STAGE3_BALANCE_EPOCHS
-            scheduler = CosineAnnealingLR(optimizer, T_max=phase_epochs, eta_min=Config.ETA_MIN)
-            log_to_file(Config, f"Epoch {epoch}: phase={phase}, teacher_lr={stage_settings['teacher_lr']:.6g}, detector_lr={stage_settings['detector_lr']:.6g}, cosine_T_max={phase_epochs}")
+            remaining = Config.EPOCHS - epoch
+            scheduler = CosineAnnealingLR(optimizer, T_max=remaining, eta_min=Config.ETA_MIN)
+            log_to_file(Config, f"Epoch {epoch}: phase={phase}, teacher_lr={stage_settings['teacher_lr']:.6g}, detector_lr={stage_settings['detector_lr']:.6g}, cosine_T_max={remaining}")
 
         for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True, disable=not is_main):
             batch_images, batch_targets = prepare_batch(Config, batch, device)

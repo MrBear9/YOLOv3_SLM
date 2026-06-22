@@ -67,6 +67,9 @@ def build_optimizer_from_model(config, model, teacher_lr=None, detector_lr=None)
         param_groups.append({"params": detector_params, "lr": detector_lr})
     if not param_groups:
         raise ValueError("No trainable parameters found when building optimizer.")
+    optimizer_name = str(getattr(config, "OPTIMIZER", "Adam")).strip()
+    if optimizer_name.lower() == "adamw":
+        return torch.optim.AdamW(param_groups, weight_decay=config.WEIGHT_DECAY)
     return torch.optim.Adam(param_groups, weight_decay=config.WEIGHT_DECAY)
 
 

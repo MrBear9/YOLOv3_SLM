@@ -165,6 +165,7 @@ class ConvTeacher(nn.Module):
             TeacherConvBNAct(c3 * 3, c3),
             TeacherC2f(c3, c3, c2f_blocks, shortcut=True),
         )
+        self.dropout = nn.Dropout2d(0.1)
 
         # Refinement at stride-8
         self.refine = nn.Sequential(
@@ -201,9 +202,10 @@ class ConvTeacher(nn.Module):
         f_s4 = self.lateral_s4(x2)                                     # [B, c3, H/8, W/8]
         f_s2 = self.lateral_s2(x1)                                     # [B, c3, H/8, W/8]
         f_fused = self.deep_fuse(torch.cat([f_s8, f_s4, f_s2], dim=1)) # [B, c3, H/8, W/8]
+        f_fused = self.dropout(f_fused)
 
         f_refined = self.refine(f_fused)                               # [B, c1, H/8, W/8]
-        feat_1ch = torch.sigmoid(self.proj_out(f_refined))             # [B, 1, H/8, W/8]
+        feat_1ch = F.softplus(self.proj_out(f_refined))                # [B, 1, H/8, W/8]  — no saturation, ≥0
         feat_1ch = feat_1ch * self.out_scale + self.out_bias           # learnable affine
         det_feature = _interpolate_preserve_layout(feat_1ch, size=gray.shape[-2:], mode="bilinear", align_corners=False)
 
@@ -271,6 +273,7 @@ class ConvTeacherV2(nn.Module):
             TeacherConvBNAct(c3 * 3, c3),
             TeacherC2f(c3, c3, c2f_blocks, shortcut=True),
         )
+        self.dropout = nn.Dropout2d(0.1)
 
         # Refinement at stride-8
         self.refine = nn.Sequential(
@@ -309,10 +312,11 @@ class ConvTeacherV2(nn.Module):
         f_s4 = self.lateral_s4(x2)                                     # [B, c3, H/8, W/8]
         f_s2 = self.lateral_s2(x1)                                     # [B, c3, H/8, W/8]
         f_fused = self.deep_fuse(torch.cat([f_s8, f_s4, f_s2], dim=1)) # [B, c3, H/8, W/8]
+        f_fused = self.dropout(f_fused)
 
         # Refine at stride-8, then project to 1ch
         f_refined = self.refine(f_fused)                               # [B, c1, H/8, W/8]
-        feat_1ch = torch.sigmoid(self.proj_out(f_refined))             # [B,  1, H/8, W/8]
+        feat_1ch = F.softplus(self.proj_out(f_refined))                # [B,  1, H/8, W/8]  — no saturation, ≥0
         feat_1ch = feat_1ch * self.out_scale + self.out_bias           # learnable affine
 
         # Upsample to output resolution

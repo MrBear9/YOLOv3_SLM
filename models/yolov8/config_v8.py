@@ -51,7 +51,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_brightfield_slm_cipher_privacy"
+    TEACHER_OUTPUT_DIR = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_brightfield_adamw"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -169,6 +169,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     FOCAL_ALPHA = 0.35
     FOCAL_GAMMA = 2.0
+    LABEL_SMOOTHING = 0.1
 
     # =========================================================================
     # Hard negative mining
@@ -191,7 +192,7 @@ class ConfigYOLOv8Anchor:
     TEACHER_CIPHER_STRUCTURE_WEIGHT = 0.25
     TEACHER_CIPHER_STD_FLOOR = 0.08
     TEACHER_CIPHER_GRAD_FLOOR = 0.015
-    TEACHER_SLM_CIPHER_LOSS_WEIGHT = 0.35
+    TEACHER_SLM_CIPHER_LOSS_WEIGHT = 0.10
     TEACHER_SLM_CIPHER_BLUR_KERNEL = 15
     TEACHER_SLM_CIPHER_TV_TARGET = 0.026
     TEACHER_SLM_CIPHER_HF_TARGET = 0.045
@@ -218,8 +219,8 @@ class ConfigYOLOv8Anchor:
     PHASE3_TEACHER_LR = 1.5e-4
     PHASE3_DETECTOR_LR = 1e-4
     LEARNING_RATE = 3e-4
-    WEIGHT_DECAY = 3e-5
-    OPTIMIZER = "Adam"
+    WEIGHT_DECAY = 1e-3
+    OPTIMIZER = "AdamW"
     LR_SCHEDULER = "CosineAnnealingLR"
     ETA_MIN = 1e-6
 
