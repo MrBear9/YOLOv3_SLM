@@ -51,7 +51,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_brightfield_slm_cipher_privacy"
+    TEACHER_OUTPUT_DIR = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -292,10 +292,12 @@ class ConfigYOLOv8Anchor:
     EMPTY_IMAGE_SAMPLE_WEIGHT = 0.7
     MIN_IMAGE_SAMPLE_WEIGHT = 0.35
 
-    NUM_WORKERS = min(12, os.cpu_count() or 0)
+    # Windows 使用 spawn 创建多进程，开销远大于 Linux 的 fork，需要降低 worker 数量
+    _IS_WINDOWS = os.name == "nt"
+    NUM_WORKERS = (4 if _IS_WINDOWS else min(12, os.cpu_count() or 0))
     PIN_MEMORY = torch.cuda.is_available()
-    PERSISTENT_WORKERS = True
-    PREFETCH_FACTOR = 4
+    PERSISTENT_WORKERS = (not _IS_WINDOWS)
+    PREFETCH_FACTOR = (2 if _IS_WINDOWS else 4)
     ENABLE_CUDNN_BENCHMARK = True
     ENABLE_CHANNELS_LAST = True
     ENABLE_TF32 = True
