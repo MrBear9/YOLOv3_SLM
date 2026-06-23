@@ -104,7 +104,17 @@ def save_training_curves(history, output_dir):
     axes[0].plot(val_x, val_y, label="val_total")
     axes[0].set_title("Loss")
     axes[0].legend()
-    for axis_idx, metric in enumerate(("precision", "recall", "map50"), start=1):
+
+    # Precision: show both COCO-style (0.001) and operating-point (0.35)
+    prec_x, prec_y = _valid_history_points(history.get("precision", []))
+    axes[1].plot(prec_x, prec_y, label="Prec@0.001 (COCO)", alpha=0.5)
+    prec_op_x, prec_op_y = _valid_history_points(history.get("precision_op", []))
+    if prec_op_y:
+        axes[1].plot(prec_op_x, prec_op_y, label="Prec@0.35 (op)", linewidth=2)
+    axes[1].set_title("Precision")
+    axes[1].legend()
+
+    for axis_idx, metric in enumerate(("recall", "map50"), start=2):
         xs, ys = _valid_history_points(history.get(metric, []))
         axes[axis_idx].plot(xs, ys, label=metric)
         axes[axis_idx].set_title(metric)

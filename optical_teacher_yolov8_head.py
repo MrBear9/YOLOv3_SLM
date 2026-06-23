@@ -196,7 +196,7 @@ def train():
     joint_best_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "teacher_detector_best.pth")
     joint_final_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "teacher_detector_final.pth")
 
-    history = {"train_total": [], "val_total": [], "precision": [], "recall": [], "f1": [], "map50": []}
+    history = {"train_total": [], "val_total": [], "precision": [], "recall": [], "f1": [], "map50": [], "precision_op": [], "recall_op": [], "f1_op": []}
     best_loss = float("inf")
     best_map50 = -1.0
     no_improve_epochs = 0
@@ -304,8 +304,11 @@ def train():
             history["recall"].append(val_metrics["recall"])
             history["f1"].append(val_metrics["f1"])
             history["map50"].append(val_metrics["map50"])
+            history["precision_op"].append(val_metrics["precision_op"])
+            history["recall_op"].append(val_metrics["recall_op"])
+            history["f1_op"].append(val_metrics["f1_op"])
         else:
-            for key in ("val_total", "precision", "recall", "f1", "map50"):
+            for key in ("val_total", "precision", "recall", "f1", "map50", "precision_op", "recall_op", "f1_op"):
                 history[key].append(np.nan)
 
         is_best = False
@@ -354,6 +357,7 @@ def train():
             map50=val_metrics["map50"] if val_metrics is not None else None,
             lr=current_lr,
             best_status=Config.EPOCH_TABLE_BEST_MARK if is_best else "",
+            precision_op=val_metrics["precision_op"] if val_metrics is not None else None,
         )
         log_to_file(
             Config,
