@@ -214,7 +214,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     PHASE1_TEACHER_LR = 4e-4
     PHASE1_DETECTOR_LR = 3e-4
-    PHASE2_TEACHER_LR = 2e-4
+    PHASE2_TEACHER_LR = 5e-5
     PHASE2_DETECTOR_LR = 2e-4
     PHASE3_TEACHER_LR = 1.5e-4
     PHASE3_DETECTOR_LR = 1e-4

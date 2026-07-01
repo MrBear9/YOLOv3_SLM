@@ -14,7 +14,6 @@ class SLMLayer(nn.Module):
         self.mode = mode
         self.layer_index = layer_index
         self.phase_raw = nn.Parameter(self._initial_phase(resolution))
-        self.register_buffer("fixed_phase", self._fixed_phase(resolution), persistent=True)
         if mode == "amp_phase":
             self.amp_raw = nn.Parameter(torch.rand(1, 1, *resolution))
         else:
@@ -33,40 +32,36 @@ class SLMLayer(nn.Module):
             phase = phase + torch.randn_like(phase) * noise_std
         return torch.remainder(phase, 2 * np.pi).contiguous().view(1, 1, height, width)
 
-    def _fixed_phase(self, resolution):
-        height, width, yy, xx = self._phase_grid(resolution)
-        fixed = torch.zeros_like(xx)
-        if not bool(getattr(self.config, "ENABLE_FIXED_SLM_PHASE_BIAS", False)):
-            return fixed.contiguous().view(1, 1, height, width)
-
-        if bool(getattr(self.config, "ENABLE_BLAZE_PHASE", False)):
-            cycles_x = float(getattr(self.config, f"SLM_BLAZE_CYCLES_X_{self.layer_index}", 0.0))
-            cycles_y = float(getattr(self.config, f"SLM_BLAZE_CYCLES_Y_{self.layer_index}", 0.0))
-            x01 = (xx + 1.0) * 0.5
-            y01 = (yy + 1.0) * 0.5
-            fixed = fixed + 2 * np.pi * (cycles_x * x01 + cycles_y * y01)
-
-        if bool(getattr(self.config, "ENABLE_FRESNEL_PHASE", False)):
-            strength = float(getattr(self.config, f"SLM_FRESNEL_STRENGTH_{self.layer_index}", 0.0))
-            radius2 = xx.square() + yy.square()
-            radius2 = radius2 / torch.clamp(radius2.amax(), min=1e-8)
-            fixed = fixed + 2 * np.pi * strength * radius2
-
-        return torch.remainder(fixed, 2 * np.pi).contiguous().view(1, 1, height, width)
-
     def _initial_phase(self, resolution):
         init_mode = str(getattr(self.config, "SLM_INIT_MODE", "random")).lower()
         if init_mode in {"vortex", "vortex_checkpoint"}:
             height, width, yy, xx = self._phase_grid(resolution)
-            theta = torch.atan2(yy, xx)
-            radius2 = xx.square() + yy.square()
+            periods = max(float(getattr(self.config, "SLM_VORTEX_PERIODS", 1.0)), 1.0)
             if self.layer_index == 1:
                 charge = float(getattr(self.config, "SLM_VORTEX_CHARGE_1", 1.0))
                 radial_scale = float(getattr(self.config, "SLM_VORTEX_RADIAL_SCALE_1", 0.35))
             else:
                 charge = float(getattr(self.config, "SLM_VORTEX_CHARGE_2", -1.0))
                 radial_scale = float(getattr(self.config, "SLM_VORTEX_RADIAL_SCALE_2", -0.25))
-            phase = charge * theta + radial_scale * np.pi * radius2
+
+            if periods > 1.0:
+                # Map global coords to cell-local coords in [-1, 1]
+                cell_x = torch.remainder((xx + 1.0) * periods / 2.0, 1.0) * 2.0 - 1.0
+                cell_y = torch.remainder((yy + 1.0) * periods / 2.0, 1.0) * 2.0 - 1.0
+                # Compute cell indices for checkerboard alternation
+                cell_i = torch.floor((xx + 1.0) * periods / 2.0).long()
+                cell_j = torch.floor((yy + 1.0) * periods / 2.0).long()
+                theta = torch.atan2(cell_y, cell_x)
+                radius2 = cell_x.square() + cell_y.square()
+                # Checkerboard charge sign alternation
+                if bool(getattr(self.config, "SLM_VORTEX_ALTERNATE_CHARGE", True)):
+                    sign = torch.where((cell_i + cell_j) % 2 == 0, 1.0, -1.0)
+                    charge = charge * sign.float()
+                phase = charge * theta + radial_scale * np.pi * radius2
+            else:
+                theta = torch.atan2(yy, xx)
+                radius2 = xx.square() + yy.square()
+                phase = charge * theta + radial_scale * np.pi * radius2
             return self._wrap_with_noise(phase, height, width)
         if init_mode in {"double_helix", "double_helix_psf", "dh_psf", "double_helix_checkpoint", "dh_psf_checkpoint"}:
             height, width, yy, xx = self._phase_grid(resolution)
@@ -114,15 +109,12 @@ class SLMLayer(nn.Module):
     def wrapped_phase(self):
         return torch.remainder(self.phase_raw, 2 * np.pi)
 
-    def effective_phase(self):
-        return torch.remainder(self.wrapped_phase() + self.fixed_phase, 2 * np.pi)
-
     def centered_phase(self):
         wrapped = self.wrapped_phase()
         return torch.atan2(torch.sin(wrapped), torch.cos(wrapped))
 
     def forward(self, field):
-        mod = torch.exp(1j * self.effective_phase())
+        mod = torch.exp(1j * self.wrapped_phase())
         if self.mode == "amp_phase":
             mod = mod * torch.sigmoid(self.amp_raw)
         return field * mod
@@ -154,50 +146,12 @@ class OpticalStudent(nn.Module):
         self.slm2 = SLMLayer(config, layer_index=2)
         self.prop2 = ASMPropagation(config, config.PROP_DISTANCE_2)
         self.enable_norm = config.ENABLE_STUDENT_NORM if enable_norm is None else enable_norm
-        self.register_buffer("zero_order_mask", self._build_zero_order_mask(config.RESOLUTION), persistent=False)
-
-    def _build_zero_order_mask(self, resolution):
-        height, width = resolution
-        fy = torch.fft.fftfreq(height)
-        fx = torch.fft.fftfreq(width)
-        fy_grid, fx_grid = torch.meshgrid(fy, fx, indexing="ij")
-        radius = torch.sqrt(fx_grid.square() + fy_grid.square())
-        cutoff = float(getattr(self.config, "ZERO_ORDER_SUPPRESSION_RADIUS", 0.0))
-        softness = max(float(getattr(self.config, "ZERO_ORDER_SUPPRESSION_SOFTNESS", 1e-3)), 1e-6)
-        if cutoff <= 0:
-            mask = torch.ones_like(radius)
-        else:
-            mask = torch.sigmoid((radius - cutoff) / softness)
-        return mask.contiguous().view(1, 1, height, width)
-
-    def _suppress_zero_order(self, field):
-        if not bool(getattr(self.config, "ENABLE_ZERO_ORDER_SUPPRESSION", False)):
-            return field
-        strength = float(getattr(self.config, "ZERO_ORDER_SUPPRESSION_STRENGTH", 1.0))
-        if strength <= 0:
-            return field
-        strength = min(strength, 1.0)
-        mask = self.zero_order_mask.to(device=field.device, dtype=field.real.dtype)
-        before_power = torch.mean(torch.abs(field).square(), dim=(2, 3), keepdim=True)
-        filtered = torch.fft.ifft2(torch.fft.fft2(field) * mask)
-        if strength < 1.0:
-            filtered = field * (1.0 - strength) + filtered * strength
-        if bool(getattr(self.config, "ZERO_ORDER_PRESERVE_FIELD_RMS", True)):
-            after_power = torch.mean(torch.abs(filtered).square(), dim=(2, 3), keepdim=True)
-            scale = torch.sqrt(before_power / (after_power + self.config.OPTICAL_FIELD_EPS))
-            filtered = filtered * scale
-        return filtered
 
     def forward(self, intensity):
         amp = torch.sqrt(intensity.clamp(min=0) + self.config.OPTICAL_FIELD_EPS)
         field = torch.complex(amp, torch.zeros_like(amp))
         field = self.prop1(self.slm1(field))
-        suppression_stage = str(getattr(self.config, "ZERO_ORDER_SUPPRESSION_STAGE", "final")).lower()
-        if suppression_stage in {"after_prop1", "both"}:
-            field = self._suppress_zero_order(field)
         field = self.prop2(self.slm2(field))
-        if suppression_stage in {"final", "after_prop2", "both"}:
-            field = self._suppress_zero_order(field)
         out = torch.abs(field) ** 2
         blur_kernel = int(getattr(self.config, "STUDENT_OUTPUT_BLUR_KERNEL", 1))
         if blur_kernel > 1:

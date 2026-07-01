@@ -151,12 +151,6 @@ def save_student_best(config, student, path, epoch, loss_value, extra=None):
         if "phase_raw" in key:
             payload[key] = value.detach().cpu()
             payload[key.replace("phase_raw", "wrapped_slm_0_2pi")] = torch.remainder(value.detach().cpu(), 2 * np.pi)
-        if "fixed_phase" in key:
-            payload[key] = value.detach().cpu()
-    for layer_name in ("slm1", "slm2"):
-        slm = getattr(student, layer_name, None)
-        if slm is not None and hasattr(slm, "effective_phase"):
-            payload[f"{layer_name}.effective_slm_0_2pi"] = slm.effective_phase().detach().cpu()
     if extra:
         payload.update(extra)
     torch.save(payload, path)
@@ -176,12 +170,6 @@ def save_detector_best(detector, path, epoch, loss_value, extra=None, student=No
             if "phase_raw" in key:
                 payload[key] = value.detach().cpu()
                 payload[key.replace("phase_raw", "wrapped_slm_0_2pi")] = torch.remainder(value.detach().cpu(), 2 * np.pi)
-            if "fixed_phase" in key:
-                payload[key] = value.detach().cpu()
-        for layer_name in ("slm1", "slm2"):
-            slm = getattr(student, layer_name, None)
-            if slm is not None and hasattr(slm, "effective_phase"):
-                payload[f"{layer_name}.effective_slm_0_2pi"] = slm.effective_phase().detach().cpu()
     if extra:
         payload.update(extra)
     torch.save(payload, path)

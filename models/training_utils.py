@@ -105,12 +105,13 @@ def save_training_curves(history, output_dir):
     axes[0].set_title("Loss")
     axes[0].legend()
 
-    # Precision: show both COCO-style (0.001) and operating-point (0.35)
-    prec_x, prec_y = _valid_history_points(history.get("precision", []))
-    axes[1].plot(prec_x, prec_y, label="Prec@0.001 (COCO)", alpha=0.5)
+    # Precision: prefer operating-point if available, otherwise fallback to metric threshold
     prec_op_x, prec_op_y = _valid_history_points(history.get("precision_op", []))
     if prec_op_y:
-        axes[1].plot(prec_op_x, prec_op_y, label="Prec@0.35 (op)", linewidth=2)
+        axes[1].plot(prec_op_x, prec_op_y, label="Prec (op)")
+    else:
+        prec_x, prec_y = _valid_history_points(history.get("precision", []))
+        axes[1].plot(prec_x, prec_y, label="precision")
     axes[1].set_title("Precision")
     axes[1].legend()
 

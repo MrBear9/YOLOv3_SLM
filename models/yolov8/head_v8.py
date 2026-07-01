@@ -270,6 +270,7 @@ class YOLOBranchLightHead(nn.Module):
         self.down1 = ConvBNAct(c, c2, 3, 2)
         self.down2 = ConvBNAct(c2, c4, 3, 2)
         self.down3 = ConvBNAct(c4, c8, 3, 2)
+        self.stem_dropout = nn.Dropout2d(0.1)
 
         self.p3_main = ConvBNAct(c8, c4, 1)
         self.p3_from_s4 = ConvBNAct(c4, c4, 3, 2)
@@ -280,6 +281,7 @@ class YOLOBranchLightHead(nn.Module):
         self.p5_path = nn.Sequential(ConvBNAct(c8, c8, 3, 2), SPPF(c8, c8))
         self.fuse_p4 = ConvBNAct(c8 * 2, c4, 1)
         self.fuse_p3 = ConvBNAct(c4 + c8, c2, 1)
+        self.fpn_dropout = nn.Dropout2d(0.1)
         self.head_dropout = nn.Dropout2d(0.1)
 
         hc = c2
@@ -309,11 +311,12 @@ class YOLOBranchLightHead(nn.Module):
 
     def forward(self, x, return_features=False):
         s1 = self.stem0(x)
-        s2 = self.down1(s1)
-        s4 = self.down2(s2)
-        s8 = self.down3(s4)
+        s2 = self.stem_dropout(self.down1(s1))
+        s4 = self.stem_dropout(self.down2(s2))
+        s8 = self.stem_dropout(self.down3(s4))
 
         p3_base = self.p3_fuse(torch.cat([self.p3_main(s8), self.p3_from_s4(s4), self.p3_from_s2(s2)], dim=1))
+        p3_base = self.fpn_dropout(p3_base)
         p4_base = self.p4_path(p3_base)
         p5_feat = self.p5_path(p4_base)
 

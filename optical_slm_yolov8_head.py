@@ -255,12 +255,6 @@ def log_config():
         f"{Config.PHASE_FOCUS_EPOCHS}/{Config.DETECTOR_FOCUS_EPOCHS}/"
         f"{Config.JOINT_FIT_EPOCHS}/{Config.NORM_JOINT_EPOCHS}",
     )
-    if getattr(Config, "PHASE_FOCUS_EPOCHS_WAS_CLIPPED", False):
-        log_to_file(
-            Config,
-            f"Warning: requested phase_focus epochs={Config.REQUESTED_PHASE_FOCUS_EPOCHS} was clipped "
-            f"to {Config.PHASE_FOCUS_EPOCHS} by MAX_PHASE_FOCUS_EPOCHS={Config.MAX_PHASE_FOCUS_EPOCHS}.",
-        )
     log_to_file(Config, f"Save paired detector best: {Config.get_detector_best_path()}")
     log_to_file(Config, f"Save paired student mirror: {Config.get_student_best_path()}")
     log_to_file(Config, f"Save current optical student snapshot: {Config.get_student_current_path()}")
@@ -282,23 +276,6 @@ def log_config():
     log_to_file(Config, f"Visualization: split={Config.VIS_DATASET_SPLIT}, interval={Config.VIS_INTERVAL}")
     log_to_file(Config, f"SLM init mode: {Config.SLM_INIT_MODE}")
     log_to_file(Config, f"SLM init checkpoint: {Config.SLM_INIT_CHECKPOINT}")
-    log_to_file(
-        Config,
-        "Fixed SLM phase bias: "
-        f"enabled={Config.ENABLE_FIXED_SLM_PHASE_BIAS}, blaze={Config.ENABLE_BLAZE_PHASE}, "
-        f"cycles1=({Config.SLM_BLAZE_CYCLES_X_1},{Config.SLM_BLAZE_CYCLES_Y_1}), "
-        f"cycles2=({Config.SLM_BLAZE_CYCLES_X_2},{Config.SLM_BLAZE_CYCLES_Y_2}), "
-        f"fresnel={Config.ENABLE_FRESNEL_PHASE}, "
-        f"strengths=({Config.SLM_FRESNEL_STRENGTH_1},{Config.SLM_FRESNEL_STRENGTH_2})",
-    )
-    log_to_file(
-        Config,
-        "Zero-order suppression: "
-        f"enabled={Config.ENABLE_ZERO_ORDER_SUPPRESSION}, stage={Config.ZERO_ORDER_SUPPRESSION_STAGE}, "
-        f"radius={Config.ZERO_ORDER_SUPPRESSION_RADIUS}, softness={Config.ZERO_ORDER_SUPPRESSION_SOFTNESS}, "
-        f"strength={Config.ZERO_ORDER_SUPPRESSION_STRENGTH}, "
-        f"preserve_rms={Config.ZERO_ORDER_PRESERVE_FIELD_RMS}",
-    )
     log_to_file(
         Config,
         f"Student normalization: enabled={Config.ENABLE_STUDENT_NORM}, schedule={Config.STUDENT_NORM_SCHEDULE}, "
@@ -454,6 +431,9 @@ def train():
         "recall": [],
         "f1": [],
         "map50": [],
+        "precision_op": [],
+        "recall_op": [],
+        "f1_op": [],
     }
     global_epoch = 0
     deployment_norm_mode = Config.STUDENT_NORM_MODE
@@ -600,8 +580,13 @@ def train():
                 history["recall"].append(val_metrics["recall"])
                 history["f1"].append(val_metrics["f1"])
                 history["map50"].append(val_metrics["map50"])
+                history["precision_op"].append(val_metrics["precision_op"])
+                history["recall_op"].append(val_metrics["recall_op"])
+                history["f1_op"].append(val_metrics["f1_op"])
             else:
-                for key in ("val_total", "val_feature", "val_detection", "val_response", "val_privacy", "precision", "recall", "f1", "map50"):
+                for key in ("val_total", "val_feature", "val_detection", "val_response", "val_privacy",
+                            "precision", "recall", "f1", "map50",
+                            "precision_op", "recall_op", "f1_op"):
                     history[key].append(np.nan)
 
             if is_main:

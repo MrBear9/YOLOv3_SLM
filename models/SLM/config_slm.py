@@ -14,7 +14,7 @@ class ConfigSLM:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_Tv1_light_branch_slim_brightfield_slm_cipher_teacher_blaze_zero_order"
+    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_Tv1_light_branch_slim_brightfield_slm_cipher_teacher_decoupled_phase_privacy"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
@@ -38,7 +38,6 @@ class ConfigSLM:
     JOINT_FIT_EPOCHS = 100
     NORM_JOINT_EPOCHS = 30
     EPOCHS = PHASE_FOCUS_EPOCHS + DETECTOR_FOCUS_EPOCHS + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
-    MAX_PHASE_FOCUS_EPOCHS = 80
 
     # =========================================================================
     # SLM optical parameters
@@ -61,17 +60,21 @@ class ConfigSLM:
     STUDENT_NORM_MODE = "percentile"
     STUDENT_NORM_PERCENTILE = 0.990
     STUDENT_OUTPUT_CLAMP_MAX = 2.5
-    STUDENT_OUTPUT_BLUR_KERNEL = 5
+    STUDENT_OUTPUT_BLUR_KERNEL = 1
 
     # -------- SLM phase init --------
     # Options: random, vortex, dh_psf/double_helix_psf, checkpoint,
     # vortex_checkpoint, dh_psf_checkpoint/double_helix_checkpoint.
-    SLM_INIT_MODE = "dh_psf"
+    SLM_INIT_MODE = "vortex"
     SLM_INIT_CHECKPOINT = r"output/OpticalSLM_YOLOv8Head_student/optical_student_best.pth"
     SLM_VORTEX_CHARGE_1 = 1.0
     SLM_VORTEX_CHARGE_2 = -1.0
     SLM_VORTEX_RADIAL_SCALE_1 = 0.35
     SLM_VORTEX_RADIAL_SCALE_2 = -0.25
+    # Number of tiled vortex phase cells: 1.0 -> single cell, 2.0 -> 2 x 2 array, 3.0 -> 3 x 3 array.
+    SLM_VORTEX_PERIODS = 1.0
+    # When True and periods > 1, alternate charge sign in a checkerboard across cells.
+    SLM_VORTEX_ALTERNATE_CHARGE = True
     # Number of tiled DH-PSF phase cells: 1.0 -> single cell, 2.0 -> 2 x 2 array, 3.0 -> 3 x 3 array.
     SLM_DH_PSF_PERIODS = 1.0
     # Spiral topological charge inside each DH-PSF cell; this is not the array count.
@@ -86,34 +89,15 @@ class ConfigSLM:
     SLM_DH_PSF_HANDEDNESS_2 = -1.0
     SLM_INIT_NOISE_STD = 0.08
 
-    # -------- Fixed physical phase bias --------
-    # Non-trainable phase patterns added to the learned phase before modulation.
-    # Blaze shifts useful diffraction away from zero order; Fresnel is optional
-    # and should stay off unless the optical bench uses a lens phase.
-    ENABLE_FIXED_SLM_PHASE_BIAS = True
-    ENABLE_BLAZE_PHASE = True
-    SLM_BLAZE_CYCLES_X_1 = 18.0
-    SLM_BLAZE_CYCLES_Y_1 = 0.0
-    SLM_BLAZE_CYCLES_X_2 = -18.0
-    SLM_BLAZE_CYCLES_Y_2 = 0.0
-    ENABLE_FRESNEL_PHASE = False
-    SLM_FRESNEL_STRENGTH_1 = 0.0
-    SLM_FRESNEL_STRENGTH_2 = 0.0
-
-    # -------- Zero-order / DC suppression --------
-    # Options for ZERO_ORDER_SUPPRESSION_STAGE: "final", "after_prop1", "both", "none".
-    ENABLE_ZERO_ORDER_SUPPRESSION = True
-    ZERO_ORDER_SUPPRESSION_STAGE = "final"
-    ZERO_ORDER_SUPPRESSION_RADIUS = 0.018
-    ZERO_ORDER_SUPPRESSION_SOFTNESS = 0.004
-    ZERO_ORDER_SUPPRESSION_STRENGTH = 0.55
-    ZERO_ORDER_PRESERVE_FIELD_RMS = True
-
     # =========================================================================
     # TEACHER_ARCH  (must match teacher-training checkpoint)
     # Options: "convteacher"/"v1", "convteacher_v2"/"v2", "convteacher_v3"/"v3".
     # =========================================================================
     TEACHER_ARCH = "convteacher"
+
+    # -------- TEACHER_ARCH = "convteacher" / "v1" --------
+    TEACHER_V1_BASE_CHANNELS = 32
+    TEACHER_V1_C2F_BLOCKS = 3
 
     # -------- TEACHER_ARCH = "convteacher_v2" --------
     TEACHER_V2_BASE_CHANNELS = 24
@@ -200,15 +184,15 @@ class ConfigSLM:
     LOSS_GRAD_WEIGHT = 0.25
     LOSS_FREQ_WEIGHT = 0.05
     LOSS_PEARSON_WEIGHT = 0.40
-    LOSS_PHASE_SMOOTH_WEIGHT = 0.001
+    LOSS_PHASE_SMOOTH_WEIGHT = 0.3
     LOSS_PHASE_DIVERSITY_WEIGHT = 0.15
-    PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.0001
+    PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.3
     PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS = 0.0
     PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS = 0.0
     PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS = 0.0
-    PHASE_SMOOTH_WEIGHT_JOINT = 0.0002
+    PHASE_SMOOTH_WEIGHT_JOINT = 0.2
     PHASE_DIVERSITY_WEIGHT_JOINT = 0.03
-    PHASE_SMOOTH_WEIGHT_NORM_JOINT = 0.0008
+    PHASE_SMOOTH_WEIGHT_NORM_JOINT = 0.2
     PHASE_DIVERSITY_WEIGHT_NORM_JOINT = 0.08
     FEATURE_LOSS_PREFILTER_KERNEL = 9
     ENABLE_FEATURE_DOMAIN_ALIGNMENT = True
@@ -225,10 +209,10 @@ class ConfigSLM:
     PHASE_CIRCULAR_STD_TARGET = 0.50
     PHASE_NEAR_BOUNDARY_LIMIT = 0.85
     PHASE_NEAR_BOUNDARY_EPS = 0.05
-    PHASE_BEST_MIN_STD = 0.30
-    PHASE_BEST_MIN_CIRCULAR_STD = 0.35
+    PHASE_BEST_MIN_STD = 0.10
+    PHASE_BEST_MIN_CIRCULAR_STD = 0.15
     PHASE_BEST_MAX_NEAR_BOUNDARY_RATIO = 0.90
-    PHASE_BEST_MIN_SPAN = 2.50
+    PHASE_BEST_MIN_SPAN = 1.10
 
     # =========================================================================
     # Stage loss weights
@@ -337,6 +321,11 @@ class ConfigSLM:
             "OPTICAL_SLM_DETECTOR_HEAD_TYPE": ("DETECTOR_HEAD_TYPE", str),
             "OPTICAL_SLM_INIT_MODE": ("SLM_INIT_MODE", str),
             "OPTICAL_SLM_INIT_CHECKPOINT": ("SLM_INIT_CHECKPOINT", str),
+            "OPTICAL_SLM_VORTEX_PERIODS": ("SLM_VORTEX_PERIODS", float),
+            "OPTICAL_SLM_VORTEX_CHARGE_1": ("SLM_VORTEX_CHARGE_1", float),
+            "OPTICAL_SLM_VORTEX_CHARGE_2": ("SLM_VORTEX_CHARGE_2", float),
+            "OPTICAL_SLM_VORTEX_RADIAL_SCALE_1": ("SLM_VORTEX_RADIAL_SCALE_1", float),
+            "OPTICAL_SLM_VORTEX_RADIAL_SCALE_2": ("SLM_VORTEX_RADIAL_SCALE_2", float),
             "OPTICAL_SLM_DH_PSF_PERIODS": ("SLM_DH_PSF_PERIODS", float),
             "OPTICAL_SLM_DH_PSF_CHARGE": ("SLM_DH_PSF_CHARGE", float),
             "OPTICAL_SLM_DH_PSF_RADIAL_SCALE": ("SLM_DH_PSF_RADIAL_SCALE", float),
@@ -347,21 +336,14 @@ class ConfigSLM:
             "OPTICAL_SLM_DH_PSF_ROTATION_2": ("SLM_DH_PSF_ROTATION_2", float),
             "OPTICAL_SLM_DH_PSF_HANDEDNESS_1": ("SLM_DH_PSF_HANDEDNESS_1", float),
             "OPTICAL_SLM_DH_PSF_HANDEDNESS_2": ("SLM_DH_PSF_HANDEDNESS_2", float),
-            "OPTICAL_SLM_BLAZE_CYCLES_X_1": ("SLM_BLAZE_CYCLES_X_1", float),
-            "OPTICAL_SLM_BLAZE_CYCLES_Y_1": ("SLM_BLAZE_CYCLES_Y_1", float),
-            "OPTICAL_SLM_BLAZE_CYCLES_X_2": ("SLM_BLAZE_CYCLES_X_2", float),
-            "OPTICAL_SLM_BLAZE_CYCLES_Y_2": ("SLM_BLAZE_CYCLES_Y_2", float),
-            "OPTICAL_SLM_FRESNEL_STRENGTH_1": ("SLM_FRESNEL_STRENGTH_1", float),
-            "OPTICAL_SLM_FRESNEL_STRENGTH_2": ("SLM_FRESNEL_STRENGTH_2", float),
-            "OPTICAL_SLM_ZERO_ORDER_SUPPRESSION_STAGE": ("ZERO_ORDER_SUPPRESSION_STAGE", str),
-            "OPTICAL_SLM_ZERO_ORDER_SUPPRESSION_RADIUS": ("ZERO_ORDER_SUPPRESSION_RADIUS", float),
-            "OPTICAL_SLM_ZERO_ORDER_SUPPRESSION_SOFTNESS": ("ZERO_ORDER_SUPPRESSION_SOFTNESS", float),
-            "OPTICAL_SLM_ZERO_ORDER_SUPPRESSION_STRENGTH": ("ZERO_ORDER_SUPPRESSION_STRENGTH", float),
             "OPTICAL_SLM_TEACHER_ARCH": ("TEACHER_ARCH", str),
+            "OPTICAL_SLM_TEACHER_V1_BASE_CHANNELS": ("TEACHER_V1_BASE_CHANNELS", int),
+            "OPTICAL_SLM_TEACHER_V1_C2F_BLOCKS": ("TEACHER_V1_C2F_BLOCKS", int),
             "OPTICAL_SLM_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),
             "OPTICAL_SLM_TEACHER_V2_C2F_BLOCKS": ("TEACHER_V2_C2F_BLOCKS", int),
             "OPTICAL_SLM_TEACHER_V3_BASE_CHANNELS": ("TEACHER_V3_BASE_CHANNELS", int),
             "OPTICAL_SLM_TEACHER_V3_C2F_BLOCKS": ("TEACHER_V3_C2F_BLOCKS", int),
+            "OPTICAL_SLM_YOLO_LIGHT_BASE_CH": ("YOLO_LIGHT_BASE_CH", int),
             "OPTICAL_SLM_TEACHER_V3_RESIDUAL_SCALE": ("TEACHER_V3_RESIDUAL_SCALE", float),
             "OPTICAL_SLM_STUDENT_NORM_SCHEDULE": ("STUDENT_NORM_SCHEDULE", str),
             "OPTICAL_SLM_STUDENT_NORM_MODE": ("STUDENT_NORM_MODE", str),
@@ -415,7 +397,6 @@ class ConfigSLM:
             "OPTICAL_SLM_DETECTOR_FOCUS_EPOCHS": ("DETECTOR_FOCUS_EPOCHS", int),
             "OPTICAL_SLM_JOINT_FIT_EPOCHS": ("JOINT_FIT_EPOCHS", int),
             "OPTICAL_SLM_NORM_JOINT_EPOCHS": ("NORM_JOINT_EPOCHS", int),
-            "OPTICAL_SLM_MAX_PHASE_FOCUS_EPOCHS": ("MAX_PHASE_FOCUS_EPOCHS", int),
             "OPTICAL_SLM_NUM_WORKERS": ("NUM_WORKERS", int),
         }
         for env_name, (attr, caster) in overrides.items():
@@ -430,11 +411,7 @@ class ConfigSLM:
         if early_stop:
             cls.ENABLE_DETECTOR_FOCUS_EARLY_STOP = early_stop.strip().lower() in {"1", "true", "yes", "on"}
         bool_overrides = {
-            "OPTICAL_SLM_ENABLE_FIXED_SLM_PHASE_BIAS": "ENABLE_FIXED_SLM_PHASE_BIAS",
-            "OPTICAL_SLM_ENABLE_BLAZE_PHASE": "ENABLE_BLAZE_PHASE",
-            "OPTICAL_SLM_ENABLE_FRESNEL_PHASE": "ENABLE_FRESNEL_PHASE",
-            "OPTICAL_SLM_ENABLE_ZERO_ORDER_SUPPRESSION": "ENABLE_ZERO_ORDER_SUPPRESSION",
-            "OPTICAL_SLM_ZERO_ORDER_PRESERVE_FIELD_RMS": "ZERO_ORDER_PRESERVE_FIELD_RMS",
+            "OPTICAL_SLM_VORTEX_ALTERNATE_CHARGE": "SLM_VORTEX_ALTERNATE_CHARGE",
         }
         for env_name, attr in bool_overrides.items():
             value = os.environ.get(env_name)
@@ -444,13 +421,6 @@ class ConfigSLM:
     @classmethod
     def initialize(cls):
         cls.apply_runtime_overrides()
-        requested_phase_focus_epochs = cls.PHASE_FOCUS_EPOCHS
-        max_phase_focus_epochs = int(getattr(cls, "MAX_PHASE_FOCUS_EPOCHS", 0))
-        cls.PHASE_FOCUS_EPOCHS_WAS_CLIPPED = False
-        cls.REQUESTED_PHASE_FOCUS_EPOCHS = requested_phase_focus_epochs
-        if max_phase_focus_epochs > 0 and cls.PHASE_FOCUS_EPOCHS > max_phase_focus_epochs:
-            cls.PHASE_FOCUS_EPOCHS = max_phase_focus_epochs
-            cls.PHASE_FOCUS_EPOCHS_WAS_CLIPPED = True
         cls.EPOCHS = cls.PHASE_FOCUS_EPOCHS + cls.DETECTOR_FOCUS_EPOCHS + cls.JOINT_FIT_EPOCHS + cls.NORM_JOINT_EPOCHS
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
         cls.OUTPUT_DIR = resolve_project_path(cls.OUTPUT_DIR)
