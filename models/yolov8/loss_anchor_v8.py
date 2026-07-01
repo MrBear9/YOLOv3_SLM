@@ -57,6 +57,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
         self.size_weights = {"small": 1.0, "medium": 1.0, "large": 1.0}
         self._active_match_mode = "ratio"
         self.last_components = {"total": 0.0, "box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
+        self.label_smoothing = float(getattr(config, "LABEL_SMOOTHING", 0.0))
 
         # Uncertainty-weighted multi-task loss (learnable task precisions)
         # Initialised to match static weights so training starts identically.
@@ -122,7 +123,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
         candidates.sort(key=lambda item: item[0])
         return candidates
 
-    def _vectorized_ratio_match(self, gt_boxes, gt_cls_ids, batch_size, prepared_scales, ratio_thresh):
+    def _vectorized_ratio_match(self, gt_boxes, gt_cls_ids, gt_batch_idx, batch_size, prepared_scales, ratio_thresh):
         """向量化锚点匹配：一次性处理所有 GT box，消除 Python 循环。
 
         gt_boxes: [total_gt, 4] (cx_px, cy_px, w_px, h_px)
@@ -174,7 +175,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
         matched_ratios = ratios[gt_idx, anchor_gidx]  # [M]
         matched_cls = gt_cls_ids[gt_idx]               # [M]
         matched_boxes = gt_boxes[gt_idx]               # [M, 4]
-        batch_of_gt = all_batch_idx_t[gt_idx]          # [M] batch index per pair
+        batch_of_gt = gt_batch_idx[gt_idx]          # [M] batch index per pair
 
         # 预计算 scale 元信息（用 list 索引，只做一次）
         si_list = [scale_indices[i] for i in anchor_gidx.tolist()]
@@ -391,7 +392,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
         if not use_simota and all_gt_boxes.numel() > 0:
             # 向量化 ratio 匹配（默认模式，全 GPU 批处理，无 Python 循环）
             self._vectorized_ratio_match(
-                all_gt_boxes, all_gt_cls, batch_size, prepared_scales, ratio_thresh
+                all_gt_boxes, all_gt_cls, all_batch_idx_t, batch_size, prepared_scales, ratio_thresh
             )
         elif use_simota and all_gt_boxes.numel() > 0:
             # SimOTA 仍用逐 box 循环（算法复杂度高，难以向量化）

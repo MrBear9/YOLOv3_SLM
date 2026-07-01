@@ -442,6 +442,9 @@ def train():
         "recall": [],
         "f1": [],
         "map50": [],
+        "precision_op": [],
+        "recall_op": [],
+        "f1_op": [],
     }
     global_epoch = 0
     deployment_norm_mode = Config.STUDENT_NORM_MODE
@@ -588,8 +591,13 @@ def train():
                 history["recall"].append(val_metrics["recall"])
                 history["f1"].append(val_metrics["f1"])
                 history["map50"].append(val_metrics["map50"])
+                history["precision_op"].append(val_metrics["precision_op"])
+                history["recall_op"].append(val_metrics["recall_op"])
+                history["f1_op"].append(val_metrics["f1_op"])
             else:
-                for key in ("val_total", "val_feature", "val_detection", "val_response", "val_privacy", "precision", "recall", "f1", "map50"):
+                for key in ("val_total", "val_feature", "val_detection", "val_response", "val_privacy",
+                            "precision", "recall", "f1", "map50",
+                            "precision_op", "recall_op", "f1_op"):
                     history[key].append(np.nan)
 
             if is_main:

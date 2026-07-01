@@ -206,7 +206,7 @@ def train():
     joint_best_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "teacher_detector_best.pth")
     joint_final_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "teacher_detector_final.pth")
 
-    history = {"train_total": [], "val_total": [], "precision": [], "recall": [], "f1": [], "map50": []}
+    history = {"train_total": [], "val_total": [], "precision": [], "recall": [], "f1": [], "map50": [], "precision_op": [], "recall_op": [], "f1_op": []}
     best_loss = float("inf")
     best_map50 = -1.0
     no_improve_epochs = 0
@@ -245,14 +245,9 @@ def train():
         if phase != current_phase:
             current_phase = phase
             optimizer = build_optimizer_from_model(Config, model, teacher_lr=stage_settings["teacher_lr"], detector_lr=stage_settings["detector_lr"])
-            if phase == "locate_gt":
-                phase_epochs = Config.STAGE1_LOCATE_EPOCHS
-            elif phase == "texture_detail":
-                phase_epochs = Config.STAGE2_TEXTURE_EPOCHS
-            else:
-                phase_epochs = Config.STAGE3_BALANCE_EPOCHS
-            scheduler = CosineAnnealingLR(optimizer, T_max=phase_epochs, eta_min=Config.ETA_MIN)
-            log_to_file(Config, f"Epoch {epoch}: phase={phase}, teacher_lr={stage_settings['teacher_lr']:.6g}, detector_lr={stage_settings['detector_lr']:.6g}, cosine_T_max={phase_epochs}")
+            remaining = Config.EPOCHS - epoch
+            scheduler = CosineAnnealingLR(optimizer, T_max=remaining, eta_min=Config.ETA_MIN)
+            log_to_file(Config, f"Epoch {epoch}: phase={phase}, teacher_lr={stage_settings['teacher_lr']:.6g}, detector_lr={stage_settings['detector_lr']:.6g}, cosine_T_max={remaining}")
 
         for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True, disable=not is_main):
             batch_images, batch_targets = prepare_batch(Config, batch, device)
@@ -319,8 +314,11 @@ def train():
             history["recall"].append(val_metrics["recall"])
             history["f1"].append(val_metrics["f1"])
             history["map50"].append(val_metrics["map50"])
+            history["precision_op"].append(val_metrics["precision_op"])
+            history["recall_op"].append(val_metrics["recall_op"])
+            history["f1_op"].append(val_metrics["f1_op"])
         else:
-            for key in ("val_total", "precision", "recall", "f1", "map50"):
+            for key in ("val_total", "precision", "recall", "f1", "map50", "precision_op", "recall_op", "f1_op"):
                 history[key].append(np.nan)
 
         is_best = False
@@ -369,6 +367,7 @@ def train():
             map50=val_metrics["map50"] if val_metrics is not None else None,
             lr=current_lr,
             best_status=Config.EPOCH_TABLE_BEST_MARK if is_best else "",
+            precision_op=val_metrics["precision_op"] if val_metrics is not None else None,
         )
         log_to_file(
             Config,

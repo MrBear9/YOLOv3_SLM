@@ -162,12 +162,11 @@ def _format_table_value(value, width, decimals=4):
     return f"{value:<{width}.{decimals}f}"
 
 
-def log_epoch_table_row(config, epoch, phase, train_loss, val_loss, precision, recall, f1_score, map50, lr, best_status):
+def log_epoch_table_row(config, epoch, phase, train_loss, val_loss, precision, recall, f1_score, map50, lr, best_status, precision_op=None):
     is_main = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     if is_main:
         phase_text = str(phase)[: config.EPOCH_TABLE_PHASE_WIDTH - 1]
-        append_plain_log(
-            config,
+        line = (
             f"{epoch + 1:<{config.EPOCH_TABLE_EPOCH_WIDTH}}"
             f"{phase_text:<{config.EPOCH_TABLE_PHASE_WIDTH}}"
             f"{_format_table_value(train_loss, config.EPOCH_TABLE_TRAIN_LOSS_WIDTH)}"
@@ -177,8 +176,11 @@ def log_epoch_table_row(config, epoch, phase, train_loss, val_loss, precision, r
             f"{_format_table_value(f1_score, config.EPOCH_TABLE_METRIC_WIDTH, 3)}"
             f"{_format_table_value(map50, config.EPOCH_TABLE_METRIC_WIDTH, 3)}"
             f"{_format_table_value(lr, config.EPOCH_TABLE_LR_WIDTH, 6)}"
-            f"{str(best_status):<{config.EPOCH_TABLE_BEST_WIDTH}}",
+            f"{str(best_status):<{config.EPOCH_TABLE_BEST_WIDTH}}"
         )
+        if precision_op is not None:
+            line += f" Prec@0.35={precision_op:.3f}"
+        append_plain_log(config, line)
 
 
 def prepare_batch(config, batch, device):

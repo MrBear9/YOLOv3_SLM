@@ -36,15 +36,32 @@ class SLMLayer(nn.Module):
         init_mode = str(getattr(self.config, "SLM_INIT_MODE", "random")).lower()
         if init_mode in {"vortex", "vortex_checkpoint"}:
             height, width, yy, xx = self._phase_grid(resolution)
-            theta = torch.atan2(yy, xx)
-            radius2 = xx.square() + yy.square()
+            periods = max(float(getattr(self.config, "SLM_VORTEX_PERIODS", 1.0)), 1.0)
             if self.layer_index == 1:
                 charge = float(getattr(self.config, "SLM_VORTEX_CHARGE_1", 1.0))
                 radial_scale = float(getattr(self.config, "SLM_VORTEX_RADIAL_SCALE_1", 0.35))
             else:
                 charge = float(getattr(self.config, "SLM_VORTEX_CHARGE_2", -1.0))
                 radial_scale = float(getattr(self.config, "SLM_VORTEX_RADIAL_SCALE_2", -0.25))
-            phase = charge * theta + radial_scale * np.pi * radius2
+
+            if periods > 1.0:
+                # Map global coords to cell-local coords in [-1, 1]
+                cell_x = torch.remainder((xx + 1.0) * periods / 2.0, 1.0) * 2.0 - 1.0
+                cell_y = torch.remainder((yy + 1.0) * periods / 2.0, 1.0) * 2.0 - 1.0
+                # Compute cell indices for checkerboard alternation
+                cell_i = torch.floor((xx + 1.0) * periods / 2.0).long()
+                cell_j = torch.floor((yy + 1.0) * periods / 2.0).long()
+                theta = torch.atan2(cell_y, cell_x)
+                radius2 = cell_x.square() + cell_y.square()
+                # Checkerboard charge sign alternation
+                if bool(getattr(self.config, "SLM_VORTEX_ALTERNATE_CHARGE", True)):
+                    sign = torch.where((cell_i + cell_j) % 2 == 0, 1.0, -1.0)
+                    charge = charge * sign.float()
+                phase = charge * theta + radial_scale * np.pi * radius2
+            else:
+                theta = torch.atan2(yy, xx)
+                radius2 = xx.square() + yy.square()
+                phase = charge * theta + radial_scale * np.pi * radius2
             return self._wrap_with_noise(phase, height, width)
         if init_mode in {"double_helix", "double_helix_psf", "dh_psf", "double_helix_checkpoint", "dh_psf_checkpoint"}:
             height, width, yy, xx = self._phase_grid(resolution)

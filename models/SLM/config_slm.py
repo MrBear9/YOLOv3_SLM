@@ -60,17 +60,21 @@ class ConfigSLM:
     STUDENT_NORM_MODE = "percentile"
     STUDENT_NORM_PERCENTILE = 0.990
     STUDENT_OUTPUT_CLAMP_MAX = 2.5
-    STUDENT_OUTPUT_BLUR_KERNEL = 5
+    STUDENT_OUTPUT_BLUR_KERNEL = 1
 
     # -------- SLM phase init --------
     # Options: random, vortex, dh_psf/double_helix_psf, checkpoint,
     # vortex_checkpoint, dh_psf_checkpoint/double_helix_checkpoint.
-    SLM_INIT_MODE = "dh_psf"
+    SLM_INIT_MODE = "vortex"
     SLM_INIT_CHECKPOINT = r"output/OpticalSLM_YOLOv8Head_student/optical_student_best.pth"
     SLM_VORTEX_CHARGE_1 = 1.0
     SLM_VORTEX_CHARGE_2 = -1.0
     SLM_VORTEX_RADIAL_SCALE_1 = 0.35
     SLM_VORTEX_RADIAL_SCALE_2 = -0.25
+    # Number of tiled vortex phase cells: 1.0 -> single cell, 2.0 -> 2 x 2 array, 3.0 -> 3 x 3 array.
+    SLM_VORTEX_PERIODS = 1.0
+    # When True and periods > 1, alternate charge sign in a checkerboard across cells.
+    SLM_VORTEX_ALTERNATE_CHARGE = True
     # Number of tiled DH-PSF phase cells: 1.0 -> single cell, 2.0 -> 2 x 2 array, 3.0 -> 3 x 3 array.
     SLM_DH_PSF_PERIODS = 1.0
     # Spiral topological charge inside each DH-PSF cell; this is not the array count.
@@ -89,7 +93,11 @@ class ConfigSLM:
     # TEACHER_ARCH  (must match teacher-training checkpoint)
     # Options: "convteacher"/"v1", "convteacher_v2"/"v2", "convteacher_v3"/"v3".
     # =========================================================================
-    TEACHER_ARCH = "convteacher"
+    TEACHER_ARCH = "convteacher_v2"
+
+    # -------- TEACHER_ARCH = "convteacher" / "v1" --------
+    TEACHER_V1_BASE_CHANNELS = 32
+    TEACHER_V1_C2F_BLOCKS = 3
 
     # -------- TEACHER_ARCH = "convteacher_v2" --------
     TEACHER_V2_BASE_CHANNELS = 24
@@ -106,7 +114,7 @@ class ConfigSLM:
     # DETECTOR_HEAD_TYPE  (must match teacher-training checkpoint)
     # Options: "light_branch", "light", "yolov8_anchor".
     # =========================================================================
-    DETECTOR_HEAD_TYPE = "light_branch"
+    DETECTOR_HEAD_TYPE = "light"
 
     # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
     YOLOV8_BASE_CHANNELS = 32
@@ -192,15 +200,15 @@ class ConfigSLM:
     LOSS_GRAD_WEIGHT = 0.25
     LOSS_FREQ_WEIGHT = 0.05
     LOSS_PEARSON_WEIGHT = 0.40
-    LOSS_PHASE_SMOOTH_WEIGHT = 0.001
+    LOSS_PHASE_SMOOTH_WEIGHT = 0.3
     LOSS_PHASE_DIVERSITY_WEIGHT = 0.15
-    PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.0001
+    PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.3
     PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS = 0.0
     PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS = 0.0
     PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS = 0.0
-    PHASE_SMOOTH_WEIGHT_JOINT = 0.0002
+    PHASE_SMOOTH_WEIGHT_JOINT = 0.2
     PHASE_DIVERSITY_WEIGHT_JOINT = 0.03
-    PHASE_SMOOTH_WEIGHT_NORM_JOINT = 0.0008
+    PHASE_SMOOTH_WEIGHT_NORM_JOINT = 0.2
     PHASE_DIVERSITY_WEIGHT_NORM_JOINT = 0.08
     FEATURE_LOSS_PREFILTER_KERNEL = 9
     ENABLE_FEATURE_DOMAIN_ALIGNMENT = True
@@ -217,10 +225,10 @@ class ConfigSLM:
     PHASE_CIRCULAR_STD_TARGET = 0.50
     PHASE_NEAR_BOUNDARY_LIMIT = 0.85
     PHASE_NEAR_BOUNDARY_EPS = 0.05
-    PHASE_BEST_MIN_STD = 0.30
-    PHASE_BEST_MIN_CIRCULAR_STD = 0.35
+    PHASE_BEST_MIN_STD = 0.10
+    PHASE_BEST_MIN_CIRCULAR_STD = 0.15
     PHASE_BEST_MAX_NEAR_BOUNDARY_RATIO = 0.90
-    PHASE_BEST_MIN_SPAN = 2.50
+    PHASE_BEST_MIN_SPAN = 1.10
 
     # =========================================================================
     # Stage loss weights
@@ -334,6 +342,11 @@ class ConfigSLM:
             "OPTICAL_SLM_DETECTOR_HEAD_TYPE": ("DETECTOR_HEAD_TYPE", str),
             "OPTICAL_SLM_INIT_MODE": ("SLM_INIT_MODE", str),
             "OPTICAL_SLM_INIT_CHECKPOINT": ("SLM_INIT_CHECKPOINT", str),
+            "OPTICAL_SLM_VORTEX_PERIODS": ("SLM_VORTEX_PERIODS", float),
+            "OPTICAL_SLM_VORTEX_CHARGE_1": ("SLM_VORTEX_CHARGE_1", float),
+            "OPTICAL_SLM_VORTEX_CHARGE_2": ("SLM_VORTEX_CHARGE_2", float),
+            "OPTICAL_SLM_VORTEX_RADIAL_SCALE_1": ("SLM_VORTEX_RADIAL_SCALE_1", float),
+            "OPTICAL_SLM_VORTEX_RADIAL_SCALE_2": ("SLM_VORTEX_RADIAL_SCALE_2", float),
             "OPTICAL_SLM_DH_PSF_PERIODS": ("SLM_DH_PSF_PERIODS", float),
             "OPTICAL_SLM_DH_PSF_CHARGE": ("SLM_DH_PSF_CHARGE", float),
             "OPTICAL_SLM_DH_PSF_RADIAL_SCALE": ("SLM_DH_PSF_RADIAL_SCALE", float),
@@ -345,12 +358,15 @@ class ConfigSLM:
             "OPTICAL_SLM_DH_PSF_HANDEDNESS_1": ("SLM_DH_PSF_HANDEDNESS_1", float),
             "OPTICAL_SLM_DH_PSF_HANDEDNESS_2": ("SLM_DH_PSF_HANDEDNESS_2", float),
             "OPTICAL_SLM_TEACHER_ARCH": ("TEACHER_ARCH", str),
+            "OPTICAL_SLM_TEACHER_V1_BASE_CHANNELS": ("TEACHER_V1_BASE_CHANNELS", int),
+            "OPTICAL_SLM_TEACHER_V1_C2F_BLOCKS": ("TEACHER_V1_C2F_BLOCKS", int),
             "OPTICAL_SLM_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),
             "OPTICAL_SLM_TEACHER_V2_C2F_BLOCKS": ("TEACHER_V2_C2F_BLOCKS", int),
             "OPTICAL_SLM_TEACHER_V2_SYNTHETIC_WAVELENGTHS": ("TEACHER_V2_SYNTHETIC_WAVELENGTHS", int),
             "OPTICAL_SLM_TEACHER_V2_COMPLEX_KERNEL_SIZE": ("TEACHER_V2_COMPLEX_KERNEL_SIZE", int),
             "OPTICAL_SLM_TEACHER_V3_BASE_CHANNELS": ("TEACHER_V3_BASE_CHANNELS", int),
             "OPTICAL_SLM_TEACHER_V3_C2F_BLOCKS": ("TEACHER_V3_C2F_BLOCKS", int),
+            "OPTICAL_SLM_YOLO_LIGHT_BASE_CH": ("YOLO_LIGHT_BASE_CH", int),
             "OPTICAL_SLM_TEACHER_V3_RESIDUAL_SCALE": ("TEACHER_V3_RESIDUAL_SCALE", float),
             "OPTICAL_SLM_ANCHOR_MATCH_MODE": ("ANCHOR_MATCH_MODE", str),
             "OPTICAL_SLM_ANCHOR_MATCH_IOU_THRESH": ("ANCHOR_MATCH_IOU_THRESH", float),
@@ -424,6 +440,13 @@ class ConfigSLM:
         early_stop = os.environ.get("OPTICAL_SLM_ENABLE_DETECTOR_FOCUS_EARLY_STOP")
         if early_stop:
             cls.ENABLE_DETECTOR_FOCUS_EARLY_STOP = early_stop.strip().lower() in {"1", "true", "yes", "on"}
+        bool_overrides = {
+            "OPTICAL_SLM_VORTEX_ALTERNATE_CHARGE": "SLM_VORTEX_ALTERNATE_CHARGE",
+        }
+        for env_name, attr in bool_overrides.items():
+            value = os.environ.get(env_name)
+            if value:
+                setattr(cls, attr, value.strip().lower() in {"1", "true", "yes", "on"})
 
     @classmethod
     def initialize(cls):

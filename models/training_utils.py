@@ -67,6 +67,9 @@ def build_optimizer_from_model(config, model, teacher_lr=None, detector_lr=None)
         param_groups.append({"params": detector_params, "lr": detector_lr})
     if not param_groups:
         raise ValueError("No trainable parameters found when building optimizer.")
+    optimizer_name = str(getattr(config, "OPTIMIZER", "Adam")).strip()
+    if optimizer_name.lower() == "adamw":
+        return torch.optim.AdamW(param_groups, weight_decay=config.WEIGHT_DECAY)
     return torch.optim.Adam(param_groups, weight_decay=config.WEIGHT_DECAY)
 
 
@@ -101,7 +104,18 @@ def save_training_curves(history, output_dir):
     axes[0].plot(val_x, val_y, label="val_total")
     axes[0].set_title("Loss")
     axes[0].legend()
-    for axis_idx, metric in enumerate(("precision", "recall", "map50"), start=1):
+
+    # Precision: prefer operating-point if available, otherwise fallback to metric threshold
+    prec_op_x, prec_op_y = _valid_history_points(history.get("precision_op", []))
+    if prec_op_y:
+        axes[1].plot(prec_op_x, prec_op_y, label="Prec (op)")
+    else:
+        prec_x, prec_y = _valid_history_points(history.get("precision", []))
+        axes[1].plot(prec_x, prec_y, label="precision")
+    axes[1].set_title("Precision")
+    axes[1].legend()
+
+    for axis_idx, metric in enumerate(("recall", "map50"), start=2):
         xs, ys = _valid_history_points(history.get(metric, []))
         axes[axis_idx].plot(xs, ys, label=metric)
         axes[axis_idx].set_title(metric)
