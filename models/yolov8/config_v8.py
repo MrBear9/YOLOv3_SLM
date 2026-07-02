@@ -51,7 +51,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light"
+    TEACHER_OUTPUT_DIR = r"output/Tv2_light"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -84,8 +84,8 @@ class ConfigYOLOv8Anchor:
     TEACHER_ARCH = "convteacher_v2"
     TEACHER_V2_BASE_CHANNELS = 24
     TEACHER_V2_C2F_BLOCKS = 2
-    TEACHER_V2_SYNTHETIC_WAVELENGTHS = 3
-    TEACHER_V2_COMPLEX_KERNEL_SIZE = 5
+    TEACHER_V2_SYNTHETIC_WAVELENGTHS = 2
+    TEACHER_V2_COMPLEX_KERNEL_SIZE = 3
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v3" | "v3"  (residual + gate)
@@ -139,8 +139,8 @@ class ConfigYOLOv8Anchor:
     # Anchor assignment
     # =========================================================================
     # Options: "auto", "ratio", "yolo7_simota".
-    # "auto" keeps current ratio matching for light_branch/yolov8_anchor, and
-    # enables YOLOv7-style neighbor + SimOTA matching for DETECTOR_HEAD_TYPE="light".
+    # "auto" keeps ratio matching for legacy heads and enables YOLOv7-style
+    # SimOTA matching for DETECTOR_HEAD_TYPE="light".
     ANCHOR_MATCH_MODE = "auto"
     ANCHOR_MATCH_RATIO_THRESH = 3.5   # ratio-based (max w/h ratio)
     ASSIGN_NEIGHBOR_CELLS = True       # extra grid cells near boundaries
@@ -202,13 +202,13 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Teacher ciphertext regularization
     # =========================================================================
-    TEACHER_CIPHER_LOSS_WEIGHT = 0.08
+    TEACHER_CIPHER_LOSS_WEIGHT = 0.0
     TEACHER_CIPHER_CORR_TARGET = 0.18
     TEACHER_CIPHER_SSIM_TARGET = 0.24
     TEACHER_CIPHER_STRUCTURE_WEIGHT = 0.25
     TEACHER_CIPHER_STD_FLOOR = 0.08
     TEACHER_CIPHER_GRAD_FLOOR = 0.015
-    TEACHER_SLM_CIPHER_LOSS_WEIGHT = 0.10
+    TEACHER_SLM_CIPHER_LOSS_WEIGHT = 0.0
     TEACHER_SLM_CIPHER_BLUR_KERNEL = 15
     TEACHER_SLM_CIPHER_TV_TARGET = 0.026
     TEACHER_SLM_CIPHER_HF_TARGET = 0.045
@@ -302,6 +302,8 @@ class ConfigYOLOv8Anchor:
     ENABLE_CUDNN_BENCHMARK = True
     ENABLE_CHANNELS_LAST = True
     ENABLE_TF32 = True
+    ENABLE_AMP = True
+    AMP_DTYPE = "float16"
 
     # =========================================================================
     # Log / table formatting
@@ -367,6 +369,7 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_SLM_CIPHER_PEAK_WEIGHT": ("TEACHER_SLM_CIPHER_PEAK_WEIGHT", float),
             "OPTICAL_TEACHER_SLM_CIPHER_EDGE_WEIGHT": ("TEACHER_SLM_CIPHER_EDGE_WEIGHT", float),
             "OPTICAL_TEACHER_NUM_WORKERS": ("NUM_WORKERS", int),
+            "OPTICAL_TEACHER_AMP_DTYPE": ("AMP_DTYPE", str),
         }
         for env_name, (attr, caster) in overrides.items():
             value = os.environ.get(env_name)
@@ -380,6 +383,10 @@ class ConfigYOLOv8Anchor:
         use_sampler = os.environ.get("OPTICAL_TEACHER_USE_CLASS_BALANCED_SAMPLER")
         if use_sampler:
             cls.USE_CLASS_BALANCED_SAMPLER = use_sampler.strip().lower() in {"1", "true", "yes", "on"}
+
+        enable_amp = os.environ.get("OPTICAL_TEACHER_ENABLE_AMP")
+        if enable_amp:
+            cls.ENABLE_AMP = enable_amp.strip().lower() in {"1", "true", "yes", "on"}
 
     @classmethod
     def initialize(cls):

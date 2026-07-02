@@ -14,14 +14,14 @@ class ConfigSLM:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_Tv1_light_branch_slim_brightfield_slm_cipher_teacher_decoupled_phase_privacy"
+    OUTPUT_DIR = r"output/SLM_Tv2_light"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_brightfield_slm_cipher_privacy/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_light/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -102,8 +102,8 @@ class ConfigSLM:
     # -------- TEACHER_ARCH = "convteacher_v2" --------
     TEACHER_V2_BASE_CHANNELS = 24
     TEACHER_V2_C2F_BLOCKS = 2
-    TEACHER_V2_SYNTHETIC_WAVELENGTHS = 3
-    TEACHER_V2_COMPLEX_KERNEL_SIZE = 5
+    TEACHER_V2_SYNTHETIC_WAVELENGTHS = 2
+    TEACHER_V2_COMPLEX_KERNEL_SIZE = 3
 
     # -------- TEACHER_ARCH = "convteacher_v3" --------
     TEACHER_V3_BASE_CHANNELS = 24
@@ -140,8 +140,8 @@ class ConfigSLM:
     # Anchor assignment
     # =========================================================================
     # Options: "auto", "ratio", "yolo7_simota".
-    # "auto" keeps current ratio matching for light_branch/yolov8_anchor, and
-    # enables YOLOv7-style neighbor + SimOTA matching for DETECTOR_HEAD_TYPE="light".
+    # "auto" keeps ratio matching for legacy heads and enables YOLOv7-style
+    # SimOTA matching for DETECTOR_HEAD_TYPE="light".
     ANCHOR_MATCH_MODE = "auto"
     ANCHOR_MATCH_RATIO_THRESH = 3.5
     ASSIGN_NEIGHBOR_CELLS = True

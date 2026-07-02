@@ -277,59 +277,101 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
             offsets.append((gi, gj + 1))
         return offsets
 
-    def _match_anchors_yolo7_simota(self, tx, ty, tw, th, prepared_scales):
-        """YOLOv7-style assignment: center-neighborhood candidates + SimOTA top-k."""
+    def _match_anchors_yolo7_simota(self, gt_idx, tx, ty, tw, th, prepared_scales):
+        """GPU-batched YOLOv7-style center candidates + SimOTA top-k for one GT."""
         config = self.config
         img_size = float(config.IMG_SIZE)
         radius = float(getattr(config, "CENTER_PRIOR_RADIUS", 2.5))
         radius = max(radius, 0.5)
+        radius_cells = int(torch.ceil(torch.as_tensor(radius)).item())
         center_weight = float(getattr(config, "CENTER_PRIOR_WEIGHT", 0.5))
         iou_thresh = float(getattr(config, "ANCHOR_MATCH_IOU_THRESH", 0.20))
         top_n = int(getattr(config, "SIMOTA_TOP_N", 20))
         max_assign = int(getattr(config, "SIMOTA_MAX_ASSIGN", 15))
+        device = tw.device
+        dtype = tw.dtype
         gt_box = torch.stack([tx * img_size, ty * img_size, tw, th]).view(1, 4)
 
-        candidates = []
+        candidate_chunks = []
         for scale_idx, scale_data in enumerate(prepared_scales):
             gw, gh = scale_data["grid_w"], scale_data["grid_h"]
             stride = float(scale_data["stride"])
-            gx = float((tx * gw).detach().item())
-            gy = float((ty * gh).detach().item())
-            x0 = max(int(gx - radius), 0)
-            x1 = min(int(gx + radius) + 1, gw - 1)
-            y0 = max(int(gy - radius), 0)
-            y1 = min(int(gy + radius) + 1, gh - 1)
-            for grid_y in range(y0, y1 + 1):
-                for grid_x in range(x0, x1 + 1):
-                    dx = (grid_x + 0.5) - gx
-                    dy = (grid_y + 0.5) - gy
-                    center_dist = (dx * dx + dy * dy) ** 0.5
-                    if center_dist > radius * 1.4143:
-                        continue
-                    for anchor_idx in range(3):
-                        aw, ah = scale_data["anchors"][anchor_idx]
-                        cand_box = torch.stack(
-                            [
-                                torch.as_tensor((grid_x + 0.5) * stride, device=tw.device, dtype=tw.dtype),
-                                torch.as_tensor((grid_y + 0.5) * stride, device=tw.device, dtype=tw.dtype),
-                                aw.to(device=tw.device, dtype=tw.dtype),
-                                ah.to(device=tw.device, dtype=tw.dtype),
-                            ]
-                        ).view(1, 4)
-                        iou = bbox_iou_xywh(cand_box, gt_box).clamp(min=0.0, max=1.0).squeeze()
-                        iou_value = float(iou.detach().item())
-                        norm_dist = min(center_dist / radius, 2.0)
-                        cost = -iou_value + center_weight * norm_dist
-                        candidates.append((cost, iou_value, scale_idx, anchor_idx, grid_x, grid_y))
+            gx = tx * gw
+            gy = ty * gh
+            base_x = torch.floor(gx).long()
+            base_y = torch.floor(gy).long()
+            offsets = torch.arange(-radius_cells, radius_cells + 1, device=device)
+            grid_y, grid_x = torch.meshgrid(base_y + offsets, base_x + offsets, indexing="ij")
+            valid = (grid_x >= 0) & (grid_x < gw) & (grid_y >= 0) & (grid_y < gh)
+            if not valid.any():
+                continue
 
-        if not candidates:
+            dx = (grid_x.to(dtype) + 0.5) - gx
+            dy = (grid_y.to(dtype) + 0.5) - gy
+            center_dist = torch.sqrt(dx * dx + dy * dy)
+            valid = valid & (center_dist <= radius * 1.4143)
+            if not valid.any():
+                continue
+
+            grid_x = grid_x[valid].long()
+            grid_y = grid_y[valid].long()
+            center_dist = center_dist[valid].to(dtype)
+            num_cells = grid_x.numel()
+            anchors = scale_data["anchors"].to(device=device, dtype=dtype)
+            anchor_idx = torch.arange(3, device=device).repeat(num_cells)
+            cell_x = grid_x.repeat_interleave(3)
+            cell_y = grid_y.repeat_interleave(3)
+            dist = center_dist.repeat_interleave(3)
+            anchor_wh = anchors[anchor_idx]
+            cand_box = torch.stack(
+                [
+                    (cell_x.to(dtype) + 0.5) * stride,
+                    (cell_y.to(dtype) + 0.5) * stride,
+                    anchor_wh[:, 0],
+                    anchor_wh[:, 1],
+                ],
+                dim=1,
+            )
+            iou = bbox_iou_xywh(cand_box, gt_box.expand_as(cand_box)).clamp(min=0.0, max=1.0)
+            norm_dist = torch.clamp(dist / radius, max=2.0)
+            cost = -iou + center_weight * norm_dist
+            candidate_chunks.append(
+                {
+                    "cost": cost,
+                    "iou": iou,
+                    "scale_idx": torch.full_like(anchor_idx, scale_idx),
+                    "anchor_idx": anchor_idx,
+                    "grid_x": cell_x,
+                    "grid_y": cell_y,
+                }
+            )
+
+        if not candidate_chunks:
             return []
-        eligible = [item for item in candidates if item[1] >= iou_thresh]
-        ranked_for_k = sorted(eligible if eligible else candidates, key=lambda item: item[1], reverse=True)
-        top_ious = [item[1] for item in ranked_for_k[: max(top_n, 1)]]
-        dynamic_k = int(torch.ceil(torch.tensor(sum(top_ious))).item()) if top_ious else 1
-        dynamic_k = max(1, min(max_assign, dynamic_k, len(ranked_for_k)))
-        return sorted(ranked_for_k, key=lambda item: item[0])[:dynamic_k]
+
+        cost = torch.cat([chunk["cost"] for chunk in candidate_chunks])
+        iou = torch.cat([chunk["iou"] for chunk in candidate_chunks])
+        scale_idx = torch.cat([chunk["scale_idx"] for chunk in candidate_chunks])
+        anchor_idx = torch.cat([chunk["anchor_idx"] for chunk in candidate_chunks])
+        grid_x = torch.cat([chunk["grid_x"] for chunk in candidate_chunks])
+        grid_y = torch.cat([chunk["grid_y"] for chunk in candidate_chunks])
+
+        eligible = iou >= iou_thresh
+        ranked_idx = torch.where(eligible)[0] if eligible.any() else torch.arange(iou.numel(), device=device)
+        ranked_ious = iou[ranked_idx]
+        top_count = min(max(top_n, 1), ranked_ious.numel())
+        top_ious = torch.topk(ranked_ious, k=top_count, largest=True).values
+        dynamic_k = int(torch.ceil(top_ious.sum()).clamp(min=1, max=max_assign).item())
+        dynamic_k = min(dynamic_k, ranked_idx.numel())
+        selected_local = torch.topk(cost[ranked_idx], k=dynamic_k, largest=False).indices
+        selected = ranked_idx[selected_local]
+        selected_iou = iou[selected].detach().cpu().tolist()
+        selected_scale = scale_idx[selected].long().detach().cpu().tolist()
+        selected_anchor = anchor_idx[selected].long().detach().cpu().tolist()
+        selected_x = grid_x[selected].long().detach().cpu().tolist()
+        selected_y = grid_y[selected].long().detach().cpu().tolist()
+        selected_cost = cost[selected].detach().cpu().tolist()
+        return list(zip(selected_cost, selected_iou, selected_scale, selected_anchor, selected_x, selected_y))
 
     def forward(self, predictions, targets):
         config = self.config
@@ -402,7 +444,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
                 b = int(all_batch_idx_t[gidx].item())
                 tx, ty, tw, th = bx[0] / config.IMG_SIZE, bx[1] / config.IMG_SIZE, bx[2], bx[3]
                 size_weight = self._get_size_weight(tw.item(), th.item())
-                candidates = self._match_anchors_yolo7_simota(tx, ty, tw, th, prepared_scales)
+                candidates = self._match_anchors_yolo7_simota(gidx, tx, ty, tw, th, prepared_scales)
                 for _, iou_value, scale_idx, anchor_idx, grid_x, grid_y in candidates:
                     sd = prepared_scales[scale_idx]
                     gw, gh = sd["grid_w"], sd["grid_h"]

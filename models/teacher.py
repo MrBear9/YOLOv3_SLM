@@ -402,7 +402,13 @@ class CVOCAStage(nn.Module):
 
 
 class CVOCAConvTeacherV2(nn.Module):
-    """CVOCA-style v2 teacher that uses optical stages as the feature extractor."""
+    """CVOCA-style v2 teacher with optical processing at the semantic scale.
+
+    High-resolution stages use ordinary lightweight conv blocks so 640x640
+    training does not materialize multiple real/imag optical branches at
+    320x320 or 160x160. CVOCA is kept at stride-8 where the feature map is
+    small enough for practical training.
+    """
 
     def __init__(self, base_channels=24, c2f_blocks=2, synthetic_wavelengths=3, complex_kernel_size=5):
         super().__init__()
@@ -411,63 +417,27 @@ class CVOCAConvTeacherV2(nn.Module):
         c3 = base_channels * 4
 
         depth = max(int(c2f_blocks), 1)
-        self.entry = CVOCAStage(
-            1,
-            c1,
-            kernel_size=complex_kernel_size,
-            num_wavelengths=synthetic_wavelengths,
-            stride=2,
-            residual=False,
-        )
-        self.stage_s2 = nn.Sequential(
-            *[
-                CVOCAStage(
-                    c1,
-                    c1,
-                    kernel_size=complex_kernel_size,
-                    num_wavelengths=synthetic_wavelengths,
-                    stride=1,
-                )
-                for _ in range(depth)
-            ]
-        )
+        self.entry = TeacherConvBNAct(1, c1, 3, 2)
+        self.stage_s2 = TeacherC2f(c1, c1, depth, shortcut=True)
         self.stage_s4 = nn.Sequential(
-            CVOCAStage(c1, c2, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=2),
-            *[
-                CVOCAStage(
-                    c2,
-                    c2,
-                    kernel_size=complex_kernel_size,
-                    num_wavelengths=synthetic_wavelengths,
-                    stride=1,
-                )
-                for _ in range(depth + 1)
-            ],
+            TeacherConvBNAct(c1, c2, 3, 2),
+            TeacherC2f(c2, c2, depth + 1, shortcut=True),
         )
         self.stage_s8 = nn.Sequential(
-            CVOCAStage(c2, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=2),
-            *[
-                CVOCAStage(
-                    c3,
-                    c3,
-                    kernel_size=complex_kernel_size,
-                    num_wavelengths=synthetic_wavelengths,
-                    stride=1,
-                )
-                for _ in range(depth + 2)
-            ],
+            TeacherConvBNAct(c2, c3, 3, 2),
+            CVOCAStage(c3, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=1),
+            TeacherResidualBlock(c3, dilation=2),
         )
         self.global_optical_context = nn.Sequential(
             CVOCAStage(c3, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=1),
             TeacherResidualBlock(c3, dilation=2),
-            CVOCAStage(c3, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=1),
             TeacherResidualBlock(c3, dilation=4),
         )
         self.s2_to_s8 = nn.Sequential(
-            CVOCAStage(c1, c2, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=2),
-            CVOCAStage(c2, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=2),
+            TeacherConvBNAct(c1, c2, 3, 2),
+            TeacherConvBNAct(c2, c3, 3, 2),
         )
-        self.s4_to_s8 = CVOCAStage(c2, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=2)
+        self.s4_to_s8 = TeacherConvBNAct(c2, c3, 3, 2)
         self.fuse = nn.Sequential(
             TeacherConvBNAct(c3 * 3, c3, 1),
             CVOCAStage(c3, c3, kernel_size=complex_kernel_size, num_wavelengths=synthetic_wavelengths, stride=1),
