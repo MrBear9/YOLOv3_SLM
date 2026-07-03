@@ -93,7 +93,13 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
             if not evaluate_detector:
                 continue
 
-            detections = decode_detections_anchor_v8(config, predictions)
+            detections = decode_detections_anchor_v8(
+                config,
+                predictions,
+                conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
+                nms_thresh=getattr(config, "METRIC_NMS_THRESH", config.NMS_THRESH),
+                max_det=getattr(config, "METRIC_MAX_DET", config.MAX_DET),
+            )
             for sample_idx, sample_detections in enumerate(detections):
                 gt_by_class = {}
                 for gt in targets[sample_idx]:

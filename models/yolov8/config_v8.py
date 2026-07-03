@@ -89,9 +89,11 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v2" | "v2"  (deep semantic projection, default)
     # =========================================================================
-    TEACHER_ARCH = "convteacher"
+    TEACHER_ARCH = "convteacher_v2"
     TEACHER_V2_BASE_CHANNELS = 24
     TEACHER_V2_C2F_BLOCKS = 2
+    TEACHER_V2_SYNTHETIC_WAVELENGTHS = 2
+    TEACHER_V2_COMPLEX_KERNEL_SIZE = 3
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v3" | "v3"  (residual + gate)
@@ -119,7 +121,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # DETECTOR_HEAD_TYPE = "light" | "yolov8_anchor"
     # =========================================================================
-    DETECTOR_HEAD_TYPE = "light_branch"
+    DETECTOR_HEAD_TYPE = "light"
 
     # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
     YOLOV8_BASE_CHANNELS = 32
@@ -144,9 +146,23 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Anchor assignment
     # =========================================================================
+    # Options: "auto", "ratio", "yolo7_simota".
+    # "auto" keeps ratio matching for legacy heads and enables YOLOv7-style
+    # SimOTA matching for DETECTOR_HEAD_TYPE="light".
+    ANCHOR_MATCH_MODE = "auto"
     ANCHOR_MATCH_RATIO_THRESH = 3.5   # ratio-based (max w/h ratio)
     ASSIGN_NEIGHBOR_CELLS = True       # extra grid cells near boundaries
     NOOBJ_IGNORE_IOU = 0.68
+    ANCHOR_MATCH_IOU_THRESH = 0.20
+    CENTER_PRIOR_RADIUS = 2.5
+    CENTER_PRIOR_WEIGHT = 0.50
+    SIMOTA_TOP_N = 20
+    SIMOTA_MAX_ASSIGN = 15
+    SIMOTA_OBJ_POS_THRESH = 0.05
+    SIMOTA_USE_SIZE_WEIGHT_OVERRIDE = True
+    SIMOTA_SMALL_OBJ_WEIGHT = 1.5
+    SIMOTA_MEDIUM_OBJ_WEIGHT = 1.0
+    SIMOTA_LARGE_OBJ_WEIGHT = 0.8
 
     # =========================================================================
     # Box decode
@@ -194,7 +210,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Teacher ciphertext regularization
     # =========================================================================
-    TEACHER_CIPHER_LOSS_WEIGHT = 0.08
+    TEACHER_CIPHER_LOSS_WEIGHT = 0.0
     TEACHER_CIPHER_CORR_TARGET = 0.18
     TEACHER_CIPHER_SSIM_TARGET = 0.24
     TEACHER_CIPHER_STRUCTURE_WEIGHT = 0.25
@@ -286,13 +302,17 @@ class ConfigYOLOv8Anchor:
     EMPTY_IMAGE_SAMPLE_WEIGHT = 0.7
     MIN_IMAGE_SAMPLE_WEIGHT = 0.35
 
-    NUM_WORKERS = min(12, os.cpu_count() or 0)
+    # Windows 使用 spawn 创建多进程，开销远大于 Linux 的 fork，需要降低 worker 数量
+    _IS_WINDOWS = os.name == "nt"
+    NUM_WORKERS = (4 if _IS_WINDOWS else min(12, os.cpu_count() or 0))
     PIN_MEMORY = torch.cuda.is_available()
-    PERSISTENT_WORKERS = True
-    PREFETCH_FACTOR = 4
+    PERSISTENT_WORKERS = (not _IS_WINDOWS)
+    PREFETCH_FACTOR = (2 if _IS_WINDOWS else 4)
     ENABLE_CUDNN_BENCHMARK = True
     ENABLE_CHANNELS_LAST = True
     ENABLE_TF32 = True
+    ENABLE_AMP = True
+    AMP_DTYPE = "float16"
 
     # =========================================================================
     # Log / table formatting
@@ -318,12 +338,21 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_DETECTOR_HEAD_TYPE": ("DETECTOR_HEAD_TYPE", str),
             "OPTICAL_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),
             "OPTICAL_TEACHER_V2_C2F_BLOCKS": ("TEACHER_V2_C2F_BLOCKS", int),
+            "OPTICAL_TEACHER_V2_SYNTHETIC_WAVELENGTHS": ("TEACHER_V2_SYNTHETIC_WAVELENGTHS", int),
+            "OPTICAL_TEACHER_V2_COMPLEX_KERNEL_SIZE": ("TEACHER_V2_COMPLEX_KERNEL_SIZE", int),
             "OPTICAL_TEACHER_V3_BASE_CHANNELS": ("TEACHER_V3_BASE_CHANNELS", int),
             "OPTICAL_TEACHER_V3_C2F_BLOCKS": ("TEACHER_V3_C2F_BLOCKS", int),
             "OPTICAL_TEACHER_V3_RESIDUAL_SCALE": ("TEACHER_V3_RESIDUAL_SCALE", float),
             "OPTICAL_TEACHER_V3_GATE_SPARSITY_WEIGHT": ("TEACHER_V3_GATE_SPARSITY_WEIGHT", float),
             "OPTICAL_TEACHER_V3_RESIDUAL_L1_WEIGHT": ("TEACHER_V3_RESIDUAL_L1_WEIGHT", float),
             "OPTICAL_TEACHER_V3_OUTPUT_DEVIATION_WEIGHT": ("TEACHER_V3_OUTPUT_DEVIATION_WEIGHT", float),
+            "OPTICAL_TEACHER_ANCHOR_MATCH_MODE": ("ANCHOR_MATCH_MODE", str),
+            "OPTICAL_TEACHER_ANCHOR_MATCH_IOU_THRESH": ("ANCHOR_MATCH_IOU_THRESH", float),
+            "OPTICAL_TEACHER_CENTER_PRIOR_RADIUS": ("CENTER_PRIOR_RADIUS", float),
+            "OPTICAL_TEACHER_CENTER_PRIOR_WEIGHT": ("CENTER_PRIOR_WEIGHT", float),
+            "OPTICAL_TEACHER_SIMOTA_TOP_N": ("SIMOTA_TOP_N", int),
+            "OPTICAL_TEACHER_SIMOTA_MAX_ASSIGN": ("SIMOTA_MAX_ASSIGN", int),
+            "OPTICAL_TEACHER_SIMOTA_OBJ_POS_THRESH": ("SIMOTA_OBJ_POS_THRESH", float),
             "OPTICAL_TEACHER_BATCH_SIZE": ("BATCH_SIZE", int),
             "OPTICAL_TEACHER_EPOCHS": ("EPOCHS", int),
             "OPTICAL_TEACHER_EARLY_STOP_PATIENCE": ("TEACHER_EARLY_STOP_PATIENCE", int),
@@ -350,6 +379,7 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_SLM_CIPHER_PEAK_WEIGHT": ("TEACHER_SLM_CIPHER_PEAK_WEIGHT", float),
             "OPTICAL_TEACHER_SLM_CIPHER_EDGE_WEIGHT": ("TEACHER_SLM_CIPHER_EDGE_WEIGHT", float),
             "OPTICAL_TEACHER_NUM_WORKERS": ("NUM_WORKERS", int),
+            "OPTICAL_TEACHER_AMP_DTYPE": ("AMP_DTYPE", str),
         }
         for env_name, (attr, caster) in overrides.items():
             value = os.environ.get(env_name)
@@ -363,6 +393,10 @@ class ConfigYOLOv8Anchor:
         use_sampler = os.environ.get("OPTICAL_TEACHER_USE_CLASS_BALANCED_SAMPLER")
         if use_sampler:
             cls.USE_CLASS_BALANCED_SAMPLER = use_sampler.strip().lower() in {"1", "true", "yes", "on"}
+
+        enable_amp = os.environ.get("OPTICAL_TEACHER_ENABLE_AMP")
+        if enable_amp:
+            cls.ENABLE_AMP = enable_amp.strip().lower() in {"1", "true", "yes", "on"}
 
     @classmethod
     def initialize(cls):

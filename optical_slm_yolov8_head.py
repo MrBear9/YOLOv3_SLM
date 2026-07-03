@@ -248,6 +248,17 @@ def log_config():
     log_to_file(Config, f"Output: {Config.OUTPUT_DIR}")
     log_to_file(Config, f"Teacher detector checkpoint: {Config.TEACHER_DETECTOR_CHECKPOINT}")
     log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}")
+    log_to_file(Config, f"Detector head type: {Config.DETECTOR_HEAD_TYPE}")
+    log_to_file(
+        Config,
+        f"Anchor matching: mode={Config.ANCHOR_MATCH_MODE}, ratio_thresh={Config.ANCHOR_MATCH_RATIO_THRESH}, "
+        f"neighbor_cells={Config.ASSIGN_NEIGHBOR_CELLS}, simota_iou={Config.ANCHOR_MATCH_IOU_THRESH}, "
+        f"center_radius={Config.CENTER_PRIOR_RADIUS}, top_n={Config.SIMOTA_TOP_N}, max_assign={Config.SIMOTA_MAX_ASSIGN}",
+    )
+    log_to_file(
+        Config,
+        f"Metric conf/nms/max_det: {Config.METRIC_CONF_THRESH}/{Config.METRIC_NMS_THRESH}/{Config.METRIC_MAX_DET}",
+    )
     log_to_file(Config, f"Classes: {Config.CLASS_NAMES}")
     log_to_file(
         Config,

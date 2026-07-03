@@ -215,8 +215,11 @@ def build_feature_distillation_loss(config):
     if arch in {"convteacher_v3", "v3"}:
         c = int(getattr(config, "TEACHER_V3_BASE_CHANNELS", 24))
         teacher_chs = (c, c * 2, c)
+    elif arch in {"convteacher_v2", "v2"}:
+        c = int(getattr(config, "TEACHER_V2_BASE_CHANNELS", 24))
+        teacher_chs = (c, c * 2, c)
     else:
-        # ConvTeacher / ConvTeacherV2 (deep projection)
+        # ConvTeacher (legacy deep projection)
         # feat_scale8: c1,  feat_scale4/2: c3 = c*4
         c = int(getattr(config, "TEACHER_V2_BASE_CHANNELS", 24))
         teacher_chs = (c, c * 4, c * 4)

@@ -1,5 +1,6 @@
 import os
 import warnings
+from contextlib import nullcontext
 
 import numpy as np
 import torch
@@ -70,8 +71,12 @@ def log_all_parameters():
     log_to_file(Config, f"Anchors: {Config.ANCHORS}")
     log_to_file(Config, f"Loss weights box/obj/noobj/cls: {Config.BOX_WEIGHT_BASE}/{Config.OBJ_WEIGHT_BASE}/{Config.NOOBJ_WEIGHT_BASE}/{Config.CLS_WEIGHT_BASE}")
     log_to_file(Config, f"Focal alpha/gamma: {Config.FOCAL_ALPHA}/{Config.FOCAL_GAMMA}")
-    log_to_file(Config, f"Anchor matching: ratio_thresh={Config.ANCHOR_MATCH_RATIO_THRESH}, "
-                f"neighbor_cells={Config.ASSIGN_NEIGHBOR_CELLS}")
+    log_to_file(
+        Config,
+        f"Anchor matching: mode={Config.ANCHOR_MATCH_MODE}, ratio_thresh={Config.ANCHOR_MATCH_RATIO_THRESH}, "
+        f"neighbor_cells={Config.ASSIGN_NEIGHBOR_CELLS}, simota_iou={Config.ANCHOR_MATCH_IOU_THRESH}, "
+        f"center_radius={Config.CENTER_PRIOR_RADIUS}, top_n={Config.SIMOTA_TOP_N}, max_assign={Config.SIMOTA_MAX_ASSIGN}",
+    )
     log_to_file(Config, f"Hard negative mining: ratio={Config.HARD_NEG_RATIO}, min={Config.HARD_NEG_MIN}")
     log_to_file(Config, f"Box decode range: {Config.BOX_DECODE_RANGE}")
     log_to_file(Config, f"LR teacher/detector: {Config.PHASE1_TEACHER_LR}/{Config.PHASE1_DETECTOR_LR} -> {Config.PHASE2_TEACHER_LR}/{Config.PHASE2_DETECTOR_LR} -> {Config.PHASE3_TEACHER_LR}/{Config.PHASE3_DETECTOR_LR}")
@@ -80,11 +85,17 @@ def log_all_parameters():
     log_to_file(Config, f"Output: {Config.TEACHER_OUTPUT_DIR}")
     teacher = build_teacher(Config)
     detector = build_detector_head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
+    arch_lower = str(Config.TEACHER_ARCH).strip().lower()
     log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}")
+    if arch_lower in {"convteacher_v2", "v2"}:
+        log_to_file(
+            Config,
+            f"V2 CVOCA teacher: synthetic_wavelengths={Config.TEACHER_V2_SYNTHETIC_WAVELENGTHS}, "
+            f"complex_kernel={Config.TEACHER_V2_COMPLEX_KERNEL_SIZE}",
+        )
     log_to_file(Config, f"Teacher parameters: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
     log_to_file(Config, f"Detector head type: {Config.DETECTOR_HEAD_TYPE}")
     log_to_file(Config, f"Detector parameters: {sum(p.numel() for p in detector.parameters() if p.requires_grad):,}")
-    arch_lower = str(Config.TEACHER_ARCH).strip().lower()
     if arch_lower in {"convteacher_v3", "v3"}:
         log_to_file(Config, f"V3 residual_scale={Config.TEACHER_V3_RESIDUAL_SCALE}")
         log_to_file(
@@ -96,6 +107,7 @@ def log_all_parameters():
         )
     if getattr(Config, "ENABLE_FEATURE_DISTILL", False):
         log_to_file(Config, f"Feature distillation: weight={Config.FEATURE_DISTILL_WEIGHT}")
+    log_to_file(Config, f"AMP: enabled={Config.ENABLE_AMP}, dtype={Config.AMP_DTYPE}")
     log_to_file(
         Config,
         f"Teacher cipher loss: weight={Config.TEACHER_CIPHER_LOSS_WEIGHT}, "
@@ -136,6 +148,17 @@ def train():
         log_to_file(Config, f"Using device: {device} (local_rank={local_rank}, world_size={world_size}, use_ddp={use_ddp})")
     else:
         log_to_file(Config, f"Using device: {device} (local_rank={local_rank}, use_ddp={use_ddp})")
+    amp_enabled = bool(getattr(Config, "ENABLE_AMP", True)) and device.type == "cuda"
+    amp_dtype_name = str(getattr(Config, "AMP_DTYPE", "float16")).strip().lower()
+    amp_dtype = torch.bfloat16 if amp_dtype_name in {"bf16", "bfloat16"} else torch.float16
+    amp_scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled and amp_dtype == torch.float16)
+    amp_context = (
+        lambda: torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled)
+        if device.type == "cuda"
+        else nullcontext
+    )
+    if amp_enabled:
+        log_to_file(Config, f"Using AMP autocast dtype={amp_dtype}")
     teacher = build_teacher(Config)
     loaded_teacher, teacher_message = initialize_teacher_weights(Config, teacher, device)
     log_to_file(Config, teacher_message)
@@ -245,48 +268,50 @@ def train():
             use_distill = enable_distill and distill_loss_fn is not None
             use_cipher = Config.TEACHER_CIPHER_LOSS_WEIGHT > 0
             use_slm_cipher = Config.TEACHER_SLM_CIPHER_LOSS_WEIGHT > 0
-            if use_distill:
-                teacher_features, predictions, teacher_aux, det_features = model(
-                    batch_images, return_feature=True, return_teacher_aux=True, return_det_features=True
-                )
-            elif is_v3 or use_cipher or use_slm_cipher:
-                teacher_features, predictions, teacher_aux = model(
-                    batch_images, return_feature=True, return_teacher_aux=True
-                )
-            else:
-                teacher_features, predictions = model(batch_images, return_feature=True)
-                teacher_aux = None
+            with amp_context():
+                if use_distill:
+                    teacher_features, predictions, teacher_aux, det_features = model(
+                        batch_images, return_feature=True, return_teacher_aux=True, return_det_features=True
+                    )
+                elif is_v3 or use_cipher or use_slm_cipher:
+                    teacher_features, predictions, teacher_aux = model(
+                        batch_images, return_feature=True, return_teacher_aux=True
+                    )
+                else:
+                    teacher_features, predictions = model(batch_images, return_feature=True)
+                    teacher_aux = None
 
-            loss, loss_stats = criterion(predictions, batch_targets)
+                loss, loss_stats = criterion(predictions, batch_targets)
 
-            if use_distill:
-                distill_loss, _ = distill_loss_fn(teacher_aux, det_features)
-                loss = loss + distill_loss * Config.FEATURE_DISTILL_WEIGHT
+                if use_distill:
+                    distill_loss, _ = distill_loss_fn(teacher_aux, det_features)
+                    loss = loss + distill_loss * Config.FEATURE_DISTILL_WEIGHT
 
-            if use_cipher:
-                cipher_loss, cipher_stats = teacher_cipher_loss(Config, teacher_aux)
-                loss = loss + cipher_loss
-                train_component_sums["cipher"] += cipher_stats["cipher"]
+                if use_cipher:
+                    cipher_loss, cipher_stats = teacher_cipher_loss(Config, teacher_aux)
+                    loss = loss + cipher_loss
+                    train_component_sums["cipher"] += cipher_stats["cipher"]
 
-            if use_slm_cipher:
-                slm_cipher_loss, slm_cipher_stats = teacher_slm_cipher_loss(Config, teacher_aux)
-                loss = loss + slm_cipher_loss
-                for key in ("slm_cipher", "slm_tv", "slm_hf", "slm_range", "slm_mean", "slm_peak", "slm_edge"):
-                    train_component_sums[key] += slm_cipher_stats[key]
+                if use_slm_cipher:
+                    slm_cipher_loss, slm_cipher_stats = teacher_slm_cipher_loss(Config, teacher_aux)
+                    loss = loss + slm_cipher_loss
+                    for key in ("slm_cipher", "slm_tv", "slm_hf", "slm_range", "slm_mean", "slm_peak", "slm_edge"):
+                        train_component_sums[key] += slm_cipher_stats[key]
 
-            if is_v3 and teacher_aux is not None:
-                gate_sparsity = teacher_aux["gate"].mean()
-                residual_l1 = teacher_aux["residual"].abs().mean()
-                output_deviation = (teacher_aux["det_feature"] - teacher_aux["gray"]).abs().mean()
-                loss = (
-                    loss
-                    + Config.TEACHER_V3_GATE_SPARSITY_WEIGHT * gate_sparsity
-                    + Config.TEACHER_V3_RESIDUAL_L1_WEIGHT * residual_l1
-                    + Config.TEACHER_V3_OUTPUT_DEVIATION_WEIGHT * output_deviation
-                )
+                if is_v3 and teacher_aux is not None:
+                    gate_sparsity = teacher_aux["gate"].mean()
+                    residual_l1 = teacher_aux["residual"].abs().mean()
+                    output_deviation = (teacher_aux["det_feature"] - teacher_aux["gray"]).abs().mean()
+                    loss = (
+                        loss
+                        + Config.TEACHER_V3_GATE_SPARSITY_WEIGHT * gate_sparsity
+                        + Config.TEACHER_V3_RESIDUAL_L1_WEIGHT * residual_l1
+                        + Config.TEACHER_V3_OUTPUT_DEVIATION_WEIGHT * output_deviation
+                    )
 
-            loss.backward()
-            optimizer.step()
+            amp_scaler.scale(loss).backward()
+            amp_scaler.step(optimizer)
+            amp_scaler.update()
             train_component_sums["total"] += float(loss.detach().item())
             for key in ("box", "obj", "noobj", "cls"):
                 train_component_sums[key] += loss_stats.get(key, 0.0)
