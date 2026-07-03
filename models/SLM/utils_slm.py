@@ -76,13 +76,19 @@ def load_student_checkpoint(student, checkpoint_path, device):
     }
 
 
+def _is_slm_phase_param(name):
+    """Return True for any SLM phase-related parameter (all parametrisations)."""
+    slm_keywords = ("phase_raw", "amp_raw", "phase_field", "scale_params", "mlp_field")
+    return any(kw in name for kw in slm_keywords)
+
+
 def split_student_param_groups(student):
     slm_params = []
     other_params = []
     for name, param in student.named_parameters():
         if not param.requires_grad:
             continue
-        if "phase_raw" in name or "amp_raw" in name:
+        if _is_slm_phase_param(name):
             slm_params.append(param)
         else:
             other_params.append(param)
@@ -147,6 +153,12 @@ def save_student_best(config, student, path, epoch, loss_value, extra=None):
         "loss": float(loss_value),
         "student_enable_norm": bool(getattr(student, "enable_norm", False)),
     }
+    # Save pre-computed wrapped phases so test_Phase_weight.py can extract
+    # them directly regardless of the phase parameterisation mode.
+    for layer_name in ("slm1", "slm2"):
+        slm = getattr(student, layer_name)
+        payload[f"{layer_name}_wrapped_phase"] = slm.wrapped_phase().detach().cpu()
+    # Legacy keys for backward-compatible extraction
     for key, value in student_state.items():
         if "phase_raw" in key:
             payload[key] = value.detach().cpu()
@@ -166,6 +178,11 @@ def save_detector_best(detector, path, epoch, loss_value, extra=None, student=No
         student_state = student.state_dict()
         payload["student_state_dict"] = student_state
         payload["student_enable_norm"] = bool(getattr(student, "enable_norm", False))
+        # Pre-computed wrapped phases for direct SLM extraction
+        for layer_name in ("slm1", "slm2"):
+            slm = getattr(student, layer_name)
+            payload[f"{layer_name}_wrapped_phase"] = slm.wrapped_phase().detach().cpu()
+        # Legacy keys for backward-compatible extraction
         for key, value in student_state.items():
             if "phase_raw" in key:
                 payload[key] = value.detach().cpu()

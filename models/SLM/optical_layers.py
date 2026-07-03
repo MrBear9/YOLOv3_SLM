@@ -4,6 +4,149 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Plan C: Fourier Feature Neural Field — coordinate-based smooth phase generator
+# ═══════════════════════════════════════════════════════════════════════════
+
+class FourierFeatureField(nn.Module):
+    """Implicit neural representation of phase via per-pixel MLP (1×1 convs).
+
+    Takes a coordinate grid with Fourier feature positional encoding and
+    produces a smooth phase map.  The MLP's inductive bias toward smooth
+    functions acts as a natural regulariser for optical phase patterns.
+    """
+
+    def __init__(self, resolution, hidden_dim=64, num_frequencies=6, num_layers=3):
+        super().__init__()
+        h, w = resolution
+        # Fourier feature encoding: sin/cos of powers-of-pi-scaled coords
+        in_channels = 2 + 4 * num_frequencies  # (y, x) + 2 * (sin, cos) * num_freq
+        self.num_frequencies = num_frequencies
+
+        layers = []
+        prev_dim = in_channels
+        for _ in range(num_layers - 1):
+            layers.append(nn.Conv2d(prev_dim, hidden_dim, kernel_size=1))
+            layers.append(nn.ReLU(inplace=True))
+            prev_dim = hidden_dim
+        layers.append(nn.Conv2d(prev_dim, 1, kernel_size=1))
+        self.net = nn.Sequential(*layers)
+
+        # Register a persistent coordinate grid so it is always on the right device
+        y = torch.linspace(-1.0, 1.0, h)
+        x = torch.linspace(-1.0, 1.0, w)
+        yy, xx = torch.meshgrid(y, x, indexing="ij")
+        grid_2ch = torch.stack([yy, xx], dim=0).unsqueeze(0)  # (1, 2, h, w)
+        self.register_buffer("coord_grid", grid_2ch, persistent=True)
+
+        self._init_near_zero()
+
+    def _init_near_zero(self):
+        for m in self.net.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.normal_(m.weight, mean=0.0, std=1e-4)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def _fourier_features(self, grid):
+        """Encode (y, x) coords with sin/cos at power-of-pi frequencies."""
+        features = [grid]
+        for i in range(self.num_frequencies):
+            freq = (2 ** i) * torch.pi
+            features.append(torch.sin(freq * grid))
+            features.append(torch.cos(freq * grid))
+        return torch.cat(features, dim=1)  # (B, in_channels, h, w)
+
+    def forward(self):
+        encoded = self._fourier_features(self.coord_grid)
+        return self.net(encoded)  # (1, 1, h, w)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Plan A + C: Multi-Scale Phase Pyramid + Neural Field
+# ═══════════════════════════════════════════════════════════════════════════
+
+class MultiScalePhaseField(nn.Module):
+    """Hierarchical phase parameterisation combining Plan A and Plan C.
+
+    Plan C — FourierFeatureField provides a smooth global phase base.
+    Plan A — learnable parameters at multiple resolutions add detail.
+
+    ``phase = mlp_field() + sum(upsample(scale_param_i))``
+
+    The final wrapped phase is SLM-compatible [0, 2π).
+    """
+
+    def __init__(self, config, resolution, layer_index=1):
+        super().__init__()
+        self.resolution = resolution
+        self.layer_index = layer_index
+
+        num_scales = int(getattr(config, "SLM_PHASE_NUM_SCALES", 4))
+        mlp_hidden = int(getattr(config, "SLM_PHASE_MLP_HIDDEN", 64))
+        mlp_freqs = int(getattr(config, "SLM_PHASE_MLP_NUM_FREQS", 6))
+        mlp_layers = int(getattr(config, "SLM_PHASE_MLP_LAYERS", 3))
+
+        # --- Plan C: smooth neural-field base ---
+        self.mlp_field = FourierFeatureField(
+            resolution,
+            hidden_dim=mlp_hidden,
+            num_frequencies=mlp_freqs,
+            num_layers=mlp_layers,
+        )
+
+        # --- Plan A: multi-scale learnable parameters ---
+        h, w = resolution
+        # Coarsest → finest, e.g. 80→160→320→640
+        scale_resolutions = []
+        for i in range(num_scales):
+            factor = 2 ** (num_scales - 1 - i)
+            sh = max(h // factor, 4)
+            sw = max(w // factor, 4)
+            scale_resolutions.append((sh, sw))
+        self.scale_resolutions = scale_resolutions
+
+        self.scale_params = nn.ParameterList([
+            nn.Parameter(torch.zeros(1, 1, sh, sw))
+            for sh, sw in scale_resolutions
+        ])
+
+    def set_base_phase(self, phase):
+        """Seed the finest scale with the initial phase pattern.
+
+        All coarser scales stay at zero and the MLP stays near-zero,
+        so the combined phase starts from the same point as the
+        original flat ``phase_raw`` parameter.
+
+        Works with any init mode (vortex, dh_psf, zero, etc.).
+        For zero init the finest scale stays at ~zero — the phase
+        learns structure from scratch with no range bias.
+        """
+        with torch.no_grad():
+            target_h, target_w = self.resolution
+            self.scale_params[-1].copy_(
+                F.interpolate(phase, size=(target_h, target_w),
+                              mode="bilinear", align_corners=False)
+            )
+
+    def forward(self):
+        h, w = self.resolution
+        device = self.scale_params[0].device
+
+        # Plan C: smooth base from neural field
+        phase = self.mlp_field().to(device)
+
+        # Plan A: multi-scale detail
+        for param in self.scale_params:
+            phase = phase + F.interpolate(param, size=(h, w),
+                                          mode="bilinear", align_corners=False)
+        return phase
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SLM Layer
+# ═══════════════════════════════════════════════════════════════════════════
+
 class SLMLayer(nn.Module):
     def __init__(self, config, resolution=None, mode=None, layer_index=1):
         super().__init__()
@@ -13,7 +156,22 @@ class SLMLayer(nn.Module):
         assert mode in {"phase", "amp_phase"}
         self.mode = mode
         self.layer_index = layer_index
-        self.phase_raw = nn.Parameter(self._initial_phase(resolution))
+
+        # Choose phase parameterisation
+        param_mode = str(getattr(config, "SLM_PHASE_PARAM_MODE", "direct")).lower()
+        self._phase_param_mode = param_mode
+
+        if param_mode == "multiscale_mlp":
+            self.phase_field = MultiScalePhaseField(config, resolution, layer_index=layer_index)
+            # Seed the finest scale with the chosen init pattern
+            init_phase = self._initial_phase(resolution)
+            self.phase_field.set_base_phase(init_phase)
+            self.register_parameter("phase_raw", None)
+        else:
+            # Legacy / direct mode
+            self.phase_raw = nn.Parameter(self._initial_phase(resolution))
+            self.phase_field = None
+
         if mode == "amp_phase":
             self.amp_raw = nn.Parameter(torch.rand(1, 1, *resolution))
         else:
@@ -33,7 +191,17 @@ class SLMLayer(nn.Module):
         return torch.remainder(phase, 2 * np.pi).contiguous().view(1, 1, height, width)
 
     def _initial_phase(self, resolution):
-        init_mode = str(getattr(self.config, "SLM_INIT_MODE", "random")).lower()
+        init_mode = str(getattr(self.config, "SLM_INIT_MODE", "zero")).lower()
+
+        # --- zero: flat phase, no range/diversity pressure at start ---
+        if init_mode == "zero":
+            height, width = resolution
+            noise_std = float(getattr(self.config, "SLM_INIT_NOISE_STD", 0.02))
+            phase = torch.zeros(1, 1, height, width)
+            if noise_std > 0:
+                phase = phase + torch.randn_like(phase) * noise_std
+            return torch.remainder(phase, 2 * np.pi)
+
         if init_mode in {"vortex", "vortex_checkpoint"}:
             height, width, yy, xx = self._phase_grid(resolution)
             periods = max(float(getattr(self.config, "SLM_VORTEX_PERIODS", 1.0)), 1.0)
@@ -106,8 +274,14 @@ class SLMLayer(nn.Module):
             return self._wrap_with_noise(phase, height, width)
         return torch.rand(1, 1, *resolution) * 2 * np.pi
 
+    def _raw_phase(self):
+        """Return the un-wrapped phase tensor regardless of parameterisation."""
+        if self._phase_param_mode == "multiscale_mlp" and self.phase_field is not None:
+            return self.phase_field()
+        return self.phase_raw
+
     def wrapped_phase(self):
-        return torch.remainder(self.phase_raw, 2 * np.pi)
+        return torch.remainder(self._raw_phase(), 2 * np.pi)
 
     def centered_phase(self):
         wrapped = self.wrapped_phase()

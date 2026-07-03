@@ -1,3 +1,11 @@
+'''
+@File    :   config_v8.py
+@Time    :   2026/07/03 18:09:48
+@Author  :   Mr.Bear9 
+@Github  :   https://github.com/MrBear9
+'''
+
+
 import os
 from datetime import datetime
 
@@ -51,7 +59,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_brightfield_adamw"
+    TEACHER_OUTPUT_DIR = r"output/Tv1_light_branch"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -192,6 +200,7 @@ class ConfigYOLOv8Anchor:
     TEACHER_CIPHER_STRUCTURE_WEIGHT = 0.25
     TEACHER_CIPHER_STD_FLOOR = 0.08
     TEACHER_CIPHER_GRAD_FLOOR = 0.015
+    TEACHER_INVERT_OUTPUT = True
     TEACHER_SLM_CIPHER_LOSS_WEIGHT = 0.10
     TEACHER_SLM_CIPHER_BLUR_KERNEL = 15
     TEACHER_SLM_CIPHER_TV_TARGET = 0.026
@@ -325,6 +334,7 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_CIPHER_STRUCTURE_WEIGHT": ("TEACHER_CIPHER_STRUCTURE_WEIGHT", float),
             "OPTICAL_TEACHER_CIPHER_STD_FLOOR": ("TEACHER_CIPHER_STD_FLOOR", float),
             "OPTICAL_TEACHER_CIPHER_GRAD_FLOOR": ("TEACHER_CIPHER_GRAD_FLOOR", float),
+            "OPTICAL_TEACHER_INVERT_OUTPUT": ("TEACHER_INVERT_OUTPUT", bool),
             "OPTICAL_TEACHER_SLM_CIPHER_LOSS_WEIGHT": ("TEACHER_SLM_CIPHER_LOSS_WEIGHT", float),
             "OPTICAL_TEACHER_SLM_CIPHER_BLUR_KERNEL": ("TEACHER_SLM_CIPHER_BLUR_KERNEL", int),
             "OPTICAL_TEACHER_SLM_CIPHER_TV_TARGET": ("TEACHER_SLM_CIPHER_TV_TARGET", float),

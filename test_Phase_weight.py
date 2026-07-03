@@ -70,8 +70,33 @@ def safe_name(name):
     return name.replace(".", "_").replace(":", "_").replace("/", "_").replace("\\", "_")
 
 
-def find_phase_layers(state_dict):
+def find_phase_layers(state_dict, checkpoint_top=None):
+    """Find phase tensors in state dict or checkpoint top-level keys.
+
+    Priority:
+    1. Pre-computed ``slm*_wrapped_phase`` keys at checkpoint top level
+       (saved by the updated utils_slm.save_*_best functions).
+    2. Legacy ``*_wrapped_slm_0_2pi`` keys generated from old ``phase_raw``.
+    3. Raw ``phase_raw`` tensors inside the state dict (old checkpoints).
+    """
     phase_layers = {}
+
+    # Priority 1 & 2: pre-computed wrapped phases at checkpoint top level
+    if isinstance(checkpoint_top, dict):
+        for key, value in checkpoint_top.items():
+            if not isinstance(value, torch.Tensor):
+                continue
+            # New format: slm1_wrapped_phase, slm2_wrapped_phase
+            if key.endswith("_wrapped_phase") and value.ndim in (2, 3, 4):
+                phase_layers[key] = value
+            # Legacy format: phase_raw replaced with wrapped_slm_0_2pi
+            elif "wrapped_slm_0_2pi" in key and value.ndim in (2, 3, 4):
+                phase_layers[key] = value
+
+    if phase_layers:
+        return phase_layers
+
+    # Fallback: search state dict for raw phase tensors
     keywords = ("phase_raw", "phase", "slm")
     for key, value in state_dict.items():
         if not isinstance(value, torch.Tensor):
@@ -83,6 +108,7 @@ def find_phase_layers(state_dict):
     if phase_layers:
         return phase_layers
 
+    # Last resort: find any 1×1×H×W tensor
     for key, value in state_dict.items():
         if isinstance(value, torch.Tensor) and value.ndim == 4 and value.shape[0] == 1 and value.shape[1] == 1:
             phase_layers[key] = value
@@ -178,10 +204,22 @@ def save_phase_layers(pth_file_path, output_dir="output/optical_phase_layers"):
     if isinstance(checkpoint, dict):
         print(f"Top-level keys: {list(checkpoint.keys())}")
 
-    phase_layers = find_phase_layers(state_dict)
+    phase_layers = find_phase_layers(state_dict, checkpoint_top=checkpoint)
+
     if not phase_layers:
         print("No phase-like tensor layers found.")
         return []
+
+    # Detect whether a tensor is already a wrapped phase (named slm*_wrapped_phase
+    # or containing "wrapped_slm_0_2pi")
+    def _is_already_wrapped(key, tensor_2d):
+        if key.endswith("_wrapped_phase") or "wrapped_slm_0_2pi" in key:
+            return True
+        # Heuristic: wrapped phases live in [0, 2π]; raw params can be anything
+        mn, mx = float(tensor_2d.min()), float(tensor_2d.max())
+        if 0.0 <= mn and mx <= TWO_PI + 0.01:
+            return True
+        return False
 
     saved_layers = []
     for layer_name, tensor in phase_layers.items():
@@ -190,7 +228,14 @@ def save_phase_layers(pth_file_path, output_dir="output/optical_phase_layers"):
             print(f"Skip unsupported tensor: {layer_name}, shape={tuple(tensor.shape)}")
             continue
         raw_phase = raw_phase.astype(np.float32)
-        wrapped_phase = wrap_phase(raw_phase)
+
+        already_wrapped = _is_already_wrapped(layer_name, raw_phase)
+        if already_wrapped:
+            # Pre-computed wrapped phase — already in [0, 2π)
+            wrapped_phase = np.mod(raw_phase, TWO_PI).astype(np.float32)
+        else:
+            wrapped_phase = wrap_phase(raw_phase)
+
         centered_phase = center_phase(wrapped_phase)
         base = safe_name(layer_name)
 

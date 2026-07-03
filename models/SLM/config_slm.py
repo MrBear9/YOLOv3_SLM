@@ -14,14 +14,14 @@ class ConfigSLM:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    OUTPUT_DIR = r"output/OpticalSLM_YOLOv8Head_Tv1_light_branch_slim_brightfield_slm_cipher_teacher_decoupled_phase_privacy"
+    OUTPUT_DIR = r"output/SLM_Tv1_light_branch"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/OpticalTeacherYOLO_YOLOv8Head_Tv1_light_branch_slim_brightfield_slm_cipher_privacy/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light_branch/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -52,6 +52,17 @@ class ConfigSLM:
     OPTICAL_FIELD_EPS = 1e-8
     OPTICAL_NORM_EPS = 1e-6
 
+    # -------- Phase parameterisation --------
+    # "direct": single flat phase_raw parameter (legacy / compatible)
+    # "multiscale_mlp": Plan A+C — multi-scale pyramid + neural-field MLP
+    SLM_PHASE_PARAM_MODE = "multiscale_mlp"
+    # Plan A — multi-scale pyramid levels (80→160→320→640 for 640 resolution)
+    SLM_PHASE_NUM_SCALES = 4
+    # Plan C — coordinate MLP architecture
+    SLM_PHASE_MLP_HIDDEN = 64
+    SLM_PHASE_MLP_NUM_FREQS = 6
+    SLM_PHASE_MLP_LAYERS = 3
+
     # -------- Student normalization --------
     ENABLE_STUDENT_NORM = True
     # Options: "joint_and_norm", "norm_joint_only", "always", "none".
@@ -60,12 +71,15 @@ class ConfigSLM:
     STUDENT_NORM_MODE = "percentile"
     STUDENT_NORM_PERCENTILE = 0.990
     STUDENT_OUTPUT_CLAMP_MAX = 2.5
-    STUDENT_OUTPUT_BLUR_KERNEL = 1
+    STUDENT_OUTPUT_BLUR_KERNEL = 9
 
     # -------- SLM phase init --------
-    # Options: random, vortex, dh_psf/double_helix_psf, checkpoint,
+    # Options: zero, random, vortex, dh_psf/double_helix_psf, checkpoint,
     # vortex_checkpoint, dh_psf_checkpoint/double_helix_checkpoint.
-    SLM_INIT_MODE = "vortex"
+    # "zero": flat phase (tiny noise), no range bias — lets the phase learn
+    #   freely in early stages before diversity constraints ramp up.
+    SLM_INIT_MODE = "zero"
+    SLM_INIT_NOISE_STD = 0.02
     SLM_INIT_CHECKPOINT = r"output/OpticalSLM_YOLOv8Head_student/optical_student_best.pth"
     SLM_VORTEX_CHARGE_1 = 1.0
     SLM_VORTEX_CHARGE_2 = -1.0
@@ -87,7 +101,6 @@ class ConfigSLM:
     SLM_DH_PSF_ROTATION_2 = np.pi / 2
     SLM_DH_PSF_HANDEDNESS_1 = 1.0
     SLM_DH_PSF_HANDEDNESS_2 = -1.0
-    SLM_INIT_NOISE_STD = 0.08
 
     # =========================================================================
     # TEACHER_ARCH  (must match teacher-training checkpoint)
@@ -197,7 +210,7 @@ class ConfigSLM:
     FEATURE_LOSS_PREFILTER_KERNEL = 9
     ENABLE_FEATURE_DOMAIN_ALIGNMENT = True
     # Options: "mean_std", "minmax"/"min_max", "none".
-    FEATURE_DOMAIN_ALIGN_MODE = "mean_std"
+    FEATURE_DOMAIN_ALIGN_MODE = "minmax"
 
     # -------- Privacy / optical obfuscation loss --------
     PRIVACY_CORR_TARGET = 0.15
@@ -217,9 +230,9 @@ class ConfigSLM:
     # =========================================================================
     # Stage loss weights
     # =========================================================================
-    FEATURE_LOSS_WEIGHT_PHASE_FOCUS = 0.35
+    FEATURE_LOSS_WEIGHT_PHASE_FOCUS = 1.1
     DETECTION_LOSS_WEIGHT_PHASE_FOCUS = 0.0
-    RESPONSE_LOSS_WEIGHT_PHASE_FOCUS = 0.0
+    RESPONSE_LOSS_WEIGHT_PHASE_FOCUS = 1.7
     PRIVACY_LOSS_WEIGHT_PHASE_FOCUS = 0.0
 
     FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
@@ -230,12 +243,12 @@ class ConfigSLM:
     FEATURE_LOSS_WEIGHT_JOINT = 0.08
     DETECTION_LOSS_WEIGHT_JOINT = 1.00
     RESPONSE_LOSS_WEIGHT_JOINT = 0.03
-    PRIVACY_LOSS_WEIGHT_JOINT = 0.02
+    PRIVACY_LOSS_WEIGHT_JOINT = 0.00
 
     FEATURE_LOSS_WEIGHT_NORM_JOINT = 0.05
     DETECTION_LOSS_WEIGHT_NORM_JOINT = 1.00
     RESPONSE_LOSS_WEIGHT_NORM_JOINT = 0.02
-    PRIVACY_LOSS_WEIGHT_NORM_JOINT = 0.08
+    PRIVACY_LOSS_WEIGHT_NORM_JOINT = 0.00
 
     # =========================================================================
     # Optimizer & LR schedule
@@ -398,6 +411,7 @@ class ConfigSLM:
             "OPTICAL_SLM_JOINT_FIT_EPOCHS": ("JOINT_FIT_EPOCHS", int),
             "OPTICAL_SLM_NORM_JOINT_EPOCHS": ("NORM_JOINT_EPOCHS", int),
             "OPTICAL_SLM_NUM_WORKERS": ("NUM_WORKERS", int),
+            "OPTICAL_SLM_PHASE_PARAM_MODE": ("SLM_PHASE_PARAM_MODE", str),
         }
         for env_name, (attr, caster) in overrides.items():
             value = os.environ.get(env_name)
