@@ -83,7 +83,7 @@ def save_detection_visualization_anchor_v8(config, epoch, model, dataset, save_d
 
             axes[row, 0].imshow(img_np, cmap="gray")
             axes[row, 0].set_title("Input")
-            axes[row, 1].imshow(feat_np, cmap="magma") # "magma" "gray"
+            axes[row, 1].imshow(feat_np, cmap="magma")
             axes[row, 1].set_title("Teacher feature")
             axes[row, 2].imshow(img_np, cmap="gray")
             axes[row, 2].set_title("Ground Truth + anchors")

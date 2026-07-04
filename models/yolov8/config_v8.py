@@ -89,7 +89,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v2" | "v2"  (deep semantic projection, default)
     # =========================================================================
-    TEACHER_ARCH = "convteacher_v2"
+    TEACHER_ARCH = "convteacher"
     TEACHER_V2_BASE_CHANNELS = 24
     TEACHER_V2_C2F_BLOCKS = 2
     TEACHER_V2_SYNTHETIC_WAVELENGTHS = 2
@@ -121,7 +121,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # DETECTOR_HEAD_TYPE = "light" | "yolov8_anchor"
     # =========================================================================
-    DETECTOR_HEAD_TYPE = "light"
+    DETECTOR_HEAD_TYPE = "light_branch"
 
     # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
     YOLOV8_BASE_CHANNELS = 32
@@ -216,7 +216,6 @@ class ConfigYOLOv8Anchor:
     TEACHER_CIPHER_STRUCTURE_WEIGHT = 0.25
     TEACHER_CIPHER_STD_FLOOR = 0.08
     TEACHER_CIPHER_GRAD_FLOOR = 0.015
-    TEACHER_INVERT_OUTPUT = True
     TEACHER_SLM_CIPHER_LOSS_WEIGHT = 0.10
     TEACHER_SLM_CIPHER_BLUR_KERNEL = 15
     TEACHER_SLM_CIPHER_TV_TARGET = 0.026
@@ -363,7 +362,6 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_CIPHER_STRUCTURE_WEIGHT": ("TEACHER_CIPHER_STRUCTURE_WEIGHT", float),
             "OPTICAL_TEACHER_CIPHER_STD_FLOOR": ("TEACHER_CIPHER_STD_FLOOR", float),
             "OPTICAL_TEACHER_CIPHER_GRAD_FLOOR": ("TEACHER_CIPHER_GRAD_FLOOR", float),
-            "OPTICAL_TEACHER_INVERT_OUTPUT": ("TEACHER_INVERT_OUTPUT", bool),
             "OPTICAL_TEACHER_SLM_CIPHER_LOSS_WEIGHT": ("TEACHER_SLM_CIPHER_LOSS_WEIGHT", float),
             "OPTICAL_TEACHER_SLM_CIPHER_BLUR_KERNEL": ("TEACHER_SLM_CIPHER_BLUR_KERNEL", int),
             "OPTICAL_TEACHER_SLM_CIPHER_TV_TARGET": ("TEACHER_SLM_CIPHER_TV_TARGET", float),

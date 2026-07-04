@@ -368,7 +368,17 @@ class TeacherWithDetector(nn.Module):
         need_aux = return_teacher_aux or return_det_features
         teacher_out = self.teacher(x, return_aux=need_aux)
         teacher_feature = teacher_out["det_feature"] if need_aux else teacher_out
-        det_out = self.detector(prepare_conv_tensor(self.config, teacher_feature), return_features=return_det_features)
+
+        # Invert for YOLO detector: optical features have dark targets (low values),
+        # but YOLO expects bright targets (high values).  We normalise to [0,1] and
+        # invert with detached min/max so every pixel gets a uniform gradient of
+        #  -1 / range  — no gradient concentration at extreme pixels.
+        t_min = teacher_feature.amin(dim=(2, 3), keepdim=True)
+        t_max = teacher_feature.amax(dim=(2, 3), keepdim=True)
+        t_range = (t_max - t_min).clamp(min=1e-6)
+        det_input = (t_max.detach() - teacher_feature) / t_range.detach()
+
+        det_out = self.detector(prepare_conv_tensor(self.config, det_input), return_features=return_det_features)
         if return_det_features:
             detections, det_features = det_out
         else:

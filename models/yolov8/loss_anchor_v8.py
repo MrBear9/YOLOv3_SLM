@@ -194,8 +194,8 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
         cy_px = matched_boxes[:, 1]
         gx = cx_px / torch.tensor(stride_list, device=device)
         gy = cy_px / torch.tensor(stride_list, device=device)
-        gi = gx.long().clamp(0, matched_gw - 1)
-        gj = gy.long().clamp(0, matched_gh - 1)
+        gi = gx.long().clamp_min(0).clamp_max(matched_gw - 1)
+        gj = gy.long().clamp_min(0).clamp_max(matched_gh - 1)
 
         # 展开邻居 cell
         offsets = [(0, 0)]
@@ -397,11 +397,11 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
                     "pred_boxes": pred[..., :4],
                     "pred_obj": pred[..., 4],
                     "pred_cls": pred[..., 5:],
-                    "target_boxes_abs": torch.zeros_like(pred[..., :4]),
-                    "target_obj": torch.zeros_like(pred[..., 4]),
-                    "target_cls": torch.zeros_like(pred[..., 5:]),
-                    "target_match_ratio": torch.full_like(pred[..., 4], -1.0 if use_simota else float("inf")),
-                    "target_scale_weight": torch.ones_like(pred[..., 4]),
+                    "target_boxes_abs": torch.zeros_like(pred[..., :4], dtype=torch.float32),
+                    "target_obj": torch.zeros_like(pred[..., 4], dtype=torch.float32),
+                    "target_cls": torch.zeros_like(pred[..., 5:], dtype=torch.float32),
+                    "target_match_ratio": torch.full_like(pred[..., 4], -1.0 if use_simota else float("inf"), dtype=torch.float32),
+                    "target_scale_weight": torch.ones_like(pred[..., 4], dtype=torch.float32),
                     "grid_h": grid_h,
                     "grid_w": grid_w,
                     "stride": self.strides[i],
@@ -491,10 +491,10 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
             # Positive losses
             if obj_mask.any():
                 positive_weights = target_scale_weight[obj_mask]
-                ciou = bbox_iou_xywh(pred_boxes_abs[obj_mask], target_boxes_abs[obj_mask], ciou=True)
+                ciou = bbox_iou_xywh(pred_boxes_abs[obj_mask].to(torch.float32), target_boxes_abs[obj_mask], ciou=True)
                 box_loss = weighted_mean(1.0 - ciou, positive_weights)
-                obj_loss = self.focal_loss(pred_obj[obj_mask], target_obj[obj_mask], sample_weight=positive_weights)
-                cls_loss = self.focal_loss(pred_cls[obj_mask], target_cls[obj_mask], sample_weight=positive_weights)
+                obj_loss = self.focal_loss(pred_obj[obj_mask].to(torch.float32), target_obj[obj_mask], sample_weight=positive_weights)
+                cls_loss = self.focal_loss(pred_cls[obj_mask].to(torch.float32), target_cls[obj_mask], sample_weight=positive_weights)
             else:
                 box_loss = torch.zeros((), device=device)
                 obj_loss = torch.zeros((), device=device)
@@ -502,7 +502,7 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
 
             # Hard negative mining for noobj loss
             if noobj_mask.any():
-                neg_losses = _focal_bce_unreduced(pred_obj[noobj_mask], target_obj[noobj_mask], self.focal_alpha, self.focal_gamma)
+                neg_losses = _focal_bce_unreduced(pred_obj[noobj_mask].to(torch.float32), target_obj[noobj_mask], self.focal_alpha, self.focal_gamma)
                 pos_count = int(obj_mask.sum().item())
                 k = max(hard_neg_min, hard_neg_ratio * max(pos_count, 1))
                 k = min(k, neg_losses.numel())

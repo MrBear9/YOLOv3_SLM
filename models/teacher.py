@@ -208,10 +208,6 @@ class ConvTeacher(nn.Module):
         feat_1ch = F.softplus(self.proj_out(f_refined))                # [B, 1, H/8, W/8]  — no saturation, ≥0
         feat_1ch = feat_1ch * self.out_scale + self.out_bias           # learnable affine
         det_feature = _interpolate_preserve_layout(feat_1ch, size=gray.shape[-2:], mode="bilinear", align_corners=False)
-        if getattr(self, "invert_output", False):
-            max_val = det_feature.amax(dim=(2, 3), keepdim=True)
-            min_val = det_feature.amin(dim=(2, 3), keepdim=True)
-            det_feature = max_val + min_val - det_feature
 
         if return_aux:
             return {
@@ -305,10 +301,6 @@ class ConvTeacherV3(nn.Module):
         residual = torch.tanh(self.residual_head(f))
         gate = self.gate_head(f)
         det_feature = (gray + self.residual_scale * gate * residual).clamp(0.0, 1.0)
-        if getattr(self, "invert_output", False):
-            max_val = det_feature.amax(dim=(2, 3), keepdim=True)
-            min_val = det_feature.amin(dim=(2, 3), keepdim=True)
-            det_feature = max_val + min_val - det_feature
 
         if return_aux:
             return {
@@ -484,10 +476,6 @@ class CVOCAConvTeacherV2(nn.Module):
         feat_1ch = self._normalize_intensity(raw_cipher)
         feat_1ch = torch.clamp(feat_1ch * F.softplus(self.out_scale) + self.out_bias, min=0.0)
         det_feature = _interpolate_preserve_layout(feat_1ch, size=gray.shape[-2:], mode="bilinear", align_corners=False)
-        if getattr(self, "invert_output", False):
-            max_val = det_feature.amax(dim=(2, 3), keepdim=True)
-            min_val = det_feature.amin(dim=(2, 3), keepdim=True)
-            det_feature = max_val + min_val - det_feature
 
         if return_aux:
             return {
@@ -504,26 +492,19 @@ class CVOCAConvTeacherV2(nn.Module):
 
 def build_teacher(config=None):
     arch = str(getattr(config, "TEACHER_ARCH", "convteacher_v2") if config is not None else "convteacher_v2").strip().lower()
-    invert = bool(getattr(config, "TEACHER_INVERT_OUTPUT", False) if config is not None else False)
     if arch in {"convteacher", "v1"}:
         c = int(getattr(config, "TEACHER_V1_BASE_CHANNELS", 32) if config is not None else 32)
         b = int(getattr(config, "TEACHER_V1_C2F_BLOCKS", 3) if config is not None else 3)
-        model = ConvTeacher(base_channels=c, c2f_blocks=b)
-        model.invert_output = invert
-        return model
+        return ConvTeacher(base_channels=c, c2f_blocks=b)
     if arch in {"convteacher_v2", "v2"}:
         c = int(getattr(config, "TEACHER_V2_BASE_CHANNELS", 24) if config is not None else 24)
         b = int(getattr(config, "TEACHER_V2_C2F_BLOCKS", 2) if config is not None else 2)
         w = int(getattr(config, "TEACHER_V2_SYNTHETIC_WAVELENGTHS", 3) if config is not None else 3)
         k = int(getattr(config, "TEACHER_V2_COMPLEX_KERNEL_SIZE", 5) if config is not None else 5)
-        model = CVOCAConvTeacherV2(base_channels=c, c2f_blocks=b, synthetic_wavelengths=w, complex_kernel_size=k)
-        model.invert_output = invert
-        return model
+        return CVOCAConvTeacherV2(base_channels=c, c2f_blocks=b, synthetic_wavelengths=w, complex_kernel_size=k)
     if arch in {"convteacher_v3", "v3"}:
         c = int(getattr(config, "TEACHER_V3_BASE_CHANNELS", 24) if config is not None else 24)
         b = int(getattr(config, "TEACHER_V3_C2F_BLOCKS", 2) if config is not None else 2)
         s = float(getattr(config, "TEACHER_V3_RESIDUAL_SCALE", 0.30) if config is not None else 0.30)
-        model = ConvTeacherV3(base_channels=c, c2f_blocks=b, residual_scale=s)
-        model.invert_output = invert
-        return model
+        return ConvTeacherV3(base_channels=c, c2f_blocks=b, residual_scale=s)
     raise ValueError(f"Unsupported TEACHER_ARCH: {arch}")

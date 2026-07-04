@@ -227,9 +227,9 @@ def save_slm_detection_visualization(config, epoch, teacher, student, detector, 
             student_np = enhance_feature_for_display(student_feature.squeeze().detach().cpu().numpy())
             axes[row, 0].imshow(img_np, cmap="gray")
             axes[row, 0].set_title("Input")
-            axes[row, 1].imshow(teacher_np, cmap="magma")
+            axes[row, 1].imshow(teacher_np, cmap="magma") # "magma" "gray"
             axes[row, 1].set_title("Teacher feature")
-            axes[row, 2].imshow(student_np, cmap="magma")
+            axes[row, 2].imshow(student_np, cmap="magma") # "magma" "gray"
             axes[row, 2].set_title("SLM student feature")
             axes[row, 3].imshow(img_np, cmap="gray")
             axes[row, 3].set_title("GT + Predictions")

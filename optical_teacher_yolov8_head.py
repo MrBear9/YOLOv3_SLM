@@ -301,7 +301,7 @@ def train():
                 if is_v3 and teacher_aux is not None:
                     gate_sparsity = teacher_aux["gate"].mean()
                     residual_l1 = teacher_aux["residual"].abs().mean()
-                    output_deviation = (teacher_aux["det_feature"] - teacher_aux["gray"]).abs().mean()
+                    output_deviation = ((1.0 - teacher_aux["det_feature"]) - teacher_aux["gray"]).abs().mean()
                     loss = (
                         loss
                         + Config.TEACHER_V3_GATE_SPARSITY_WEIGHT * gate_sparsity
