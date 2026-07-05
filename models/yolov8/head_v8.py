@@ -170,10 +170,10 @@ class YOLOLightHead(nn.Module):
     """Lightweight FPGA-friendly detection head.
 
     Simplified compared to YOLOv8AnchorHead:
-      - No C2f blocks → simple ResBlock instead
-      - No PAN bottom-up path → top-down FPN only
-      - No multi-branch detection heads → 1×1 Conv direct output
-      - ECA attention for lightweight channel reweighting
+      - No C2f blocks → pure ConvBNAct instead
+      - Lightweight PAN bottom-up path (no C2f, 1×1 fusion + ECA)
+      - ECA channel attention at every FPN/PAN fusion point
+      - Decoupled detection heads: [shared 3×3 → 3× branch 1×1] per scale
 
     Pure conv + decoupled heads — no residual blocks, no skip connections
     in the detection head.  Residual is only needed for deep networks.
@@ -187,9 +187,15 @@ class YOLOLightHead(nn.Module):
         c = base_ch if base_ch is not None else int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
         c2, c4, c8 = c * 2, c * 4, c * 8
 
-        # Stem: pure conv chain 1 → c → c2 → c4 → c8  (no residual)
+        # CoordConv: internally expand input channels with xy coordinate grid.
+        # The caller always passes in_channels (normally 1); the head decides
+        # whether to add 2 coord channels based on config alone.
+        self.use_coordconv = bool(getattr(config, "DETECTOR_USE_COORDCONV", False))
+        stem_in_ch = in_channels + 2 if self.use_coordconv else in_channels
+
+        # Stem: pure conv chain stem_in_ch → c → c2 → c4 → c8  (no residual)
         self.stem = nn.Sequential(
-            ConvBNAct(in_channels, c),
+            ConvBNAct(stem_in_ch, c),
             ConvBNAct(c, c2, 3, 2),
             ConvBNAct(c2, c4, 3, 2),
             ConvBNAct(c4, c8, 3, 2),
@@ -199,9 +205,16 @@ class YOLOLightHead(nn.Module):
         self.p4_path = ConvBNAct(c8, c8, 3, 2)
         self.p5_path = nn.Sequential(ConvBNAct(c8, c8, 3, 2), SPPF(c8, c8))
 
-        # Top-down FPN: simple 1×1 fusion conv (no residual, no ECA)
-        self.fuse_p4 = ConvBNAct(c8 * 2, c4, 1)
-        self.fuse_p3 = ConvBNAct(c4 + c8, c2, 1)
+        # Top-down FPN: 1×1 fusion conv + ECA channel attention
+        self.fuse_p4 = nn.Sequential(ConvBNAct(c8 * 2, c4, 1), ECABlock(c4))
+        self.fuse_p3 = nn.Sequential(ConvBNAct(c4 + c8, c2, 1), ECABlock(c2))
+
+        # Bottom-up PAN (lightweight, no C2f): ECA after each fusion
+        self.down_p3 = ConvBNAct(c2, c4, 3, 2)
+        self.pan_p4 = nn.Sequential(ConvBNAct(c4 * 2, c4, 1), ECABlock(c4))
+        self.down_p4 = ConvBNAct(c4, c8, 3, 2)
+        self.pan_p5 = nn.Sequential(ConvBNAct(c8 * 2, c8, 1), ECABlock(c8))
+
         self.head_dropout = nn.Dropout2d(0.1)
 
         # Decoupled detection heads: [shared 3×3 → 3× branch 1×1] per scale
@@ -231,19 +244,41 @@ class YOLOLightHead(nn.Module):
         return torch.cat([box_out, obj_out, cls_out], dim=2).contiguous().view(b, -1, h, w)
 
     def forward(self, x, return_features=False):
+        # CoordConv: prepend normalized [-1, 1] coordinate channels.
+        # The rest of the head sees stem_in_ch (= in_channels + 2) channels.
+        if self.use_coordconv:
+            B, _, H, W = x.shape
+            device = x.device
+            gy, gx = torch.meshgrid(
+                torch.linspace(-1, 1, H, device=device),
+                torch.linspace(-1, 1, W, device=device),
+                indexing="ij",
+            )
+            coord = torch.stack([gx, gy], dim=0).unsqueeze(0).expand(B, -1, -1, -1)
+            x = torch.cat([x, coord], dim=1)
+
+        # Stem: stem_in_ch → c → c2 → c4 → c8
         p3_feat = self.stem(x)
         p4_feat = self.p4_path(p3_feat)
         p5_feat = self.p5_path(p4_feat)
 
+        # Top-down FPN
         p5_up = F.interpolate(p5_feat, size=p4_feat.shape[-2:], mode="nearest")
         p4_fused = self.fuse_p4(torch.cat([p5_up, p4_feat], dim=1))
 
         p4_up = F.interpolate(p4_fused, size=p3_feat.shape[-2:], mode="nearest")
         p3_fused = self.fuse_p3(torch.cat([p4_up, p3_feat], dim=1))
 
+        # Bottom-up PAN
+        p3_down = self.down_p3(p3_fused)
+        p4_pan = self.pan_p4(torch.cat([p3_down, p4_fused], dim=1))
+        p4_down = self.down_p4(p4_pan)
+        p5_pan = self.pan_p5(torch.cat([p4_down, p5_feat], dim=1))
+
+        # Detection heads: P3 uses FPN output, P4/P5 use PAN-enhanced features
         pred_p3 = self._decode_head(self.head_p3_shared, self.head_p3_box, self.head_p3_obj, self.head_p3_cls, self.head_dropout(p3_fused))
-        pred_p4 = self._decode_head(self.head_p4_shared, self.head_p4_box, self.head_p4_obj, self.head_p4_cls, self.head_dropout(p4_fused))
-        pred_p5 = self._decode_head(self.head_p5_shared, self.head_p5_box, self.head_p5_obj, self.head_p5_cls, self.head_dropout(p5_feat))
+        pred_p4 = self._decode_head(self.head_p4_shared, self.head_p4_box, self.head_p4_obj, self.head_p4_cls, self.head_dropout(p4_pan))
+        pred_p5 = self._decode_head(self.head_p5_shared, self.head_p5_box, self.head_p5_obj, self.head_p5_cls, self.head_dropout(p5_pan))
 
         if return_features:
             return (pred_p3, pred_p4, pred_p5), {"s8": p3_feat, "s16": p4_feat, "s32": p5_feat}

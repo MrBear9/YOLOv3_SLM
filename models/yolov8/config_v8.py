@@ -90,10 +90,10 @@ class ConfigYOLOv8Anchor:
     # TEACHER_ARCH = "convteacher_v2" | "v2"  (deep semantic projection, default)
     # =========================================================================
     TEACHER_ARCH = "convteacher"
-    TEACHER_V2_BASE_CHANNELS = 24
-    TEACHER_V2_C2F_BLOCKS = 2
-    TEACHER_V2_SYNTHETIC_WAVELENGTHS = 2
-    TEACHER_V2_COMPLEX_KERNEL_SIZE = 3
+    TEACHER_V2_BASE_CHANNELS = 32
+    TEACHER_V2_C2F_BLOCKS = 3
+    TEACHER_V2_SYNTHETIC_WAVELENGTHS = 3
+    TEACHER_V2_COMPLEX_KERNEL_SIZE = 5
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v3" | "v3"  (residual + gate)
@@ -121,7 +121,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # DETECTOR_HEAD_TYPE = "light" | "yolov8_anchor"
     # =========================================================================
-    DETECTOR_HEAD_TYPE = "light_branch"
+    DETECTOR_HEAD_TYPE = "light"
 
     # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
     YOLOV8_BASE_CHANNELS = 32
@@ -129,6 +129,7 @@ class ConfigYOLOv8Anchor:
 
     # -------- DETECTOR_HEAD_TYPE = "light" --------
     YOLO_LIGHT_BASE_CH = 16
+    DETECTOR_USE_COORDCONV = True
 
     # =========================================================================
     # Anchors
