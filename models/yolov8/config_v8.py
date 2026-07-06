@@ -121,7 +121,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # DETECTOR_HEAD_TYPE = "light" | "yolov8_anchor"
     # =========================================================================
-    DETECTOR_HEAD_TYPE = "light"
+    DETECTOR_HEAD_TYPE = "light_branch"
 
     # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
     YOLOV8_BASE_CHANNELS = 32

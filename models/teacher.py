@@ -181,9 +181,22 @@ class ConvTeacher(nn.Module):
         )
 
         # Learnable output affine lets the teacher adapt its output
-        # distribution to the detector's needs (feature stabilization)
+        # distribution to the detector's needs (feature stabilization).
+        # out_scale is passed through softplus so the scale is always
+        # positive and bounded, preventing the output range from drifting.
         self.out_scale = nn.Parameter(torch.ones(1))
         self.out_bias = nn.Parameter(torch.zeros(1))
+
+    @staticmethod
+    def _normalize_intensity(x):
+        """Per-sample min-max normalisation to [0, 1].
+
+        Gradients flow through amin/amax (concentrated at extreme pixels),
+        which pushes the teacher to maintain strong spatial contrast.
+        """
+        low = x.amin(dim=(2, 3), keepdim=True)
+        high = x.amax(dim=(2, 3), keepdim=True)
+        return (x - low) / (high - low + 1e-6)
 
     def forward(self, x, return_aux=False):
         if x.shape[1] > 1:
@@ -206,7 +219,8 @@ class ConvTeacher(nn.Module):
 
         f_refined = self.refine(f_fused)                               # [B, c1, H/8, W/8]
         feat_1ch = F.softplus(self.proj_out(f_refined))                # [B, 1, H/8, W/8]  — no saturation, ≥0
-        feat_1ch = feat_1ch * self.out_scale + self.out_bias           # learnable affine
+        feat_1ch = self._normalize_intensity(feat_1ch)                  # per-sample [0, 1]  — forces full dynamic range
+        feat_1ch = torch.clamp(feat_1ch * F.softplus(self.out_scale) + self.out_bias, min=0.0)
         det_feature = _interpolate_preserve_layout(feat_1ch, size=gray.shape[-2:], mode="bilinear", align_corners=False)
 
         if return_aux:

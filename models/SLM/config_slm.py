@@ -33,7 +33,7 @@ class ConfigSLM:
     BATCH_SIZE = 16
     STRIDES = [8, 16, 32]
 
-    PHASE_FOCUS_EPOCHS = 45
+    PHASE_FOCUS_EPOCHS = 145
     DETECTOR_FOCUS_EPOCHS = 35
     JOINT_FIT_EPOCHS = 100
     NORM_JOINT_EPOCHS = 30
@@ -44,8 +44,8 @@ class ConfigSLM:
     # =========================================================================
     WAVELENGTH = 532e-9
     PIXEL_SIZE = 6.4e-6
-    PROP_DISTANCE_1 = 0.01
-    PROP_DISTANCE_2 = 0.02
+    PROP_DISTANCE_1 = 0.10
+    PROP_DISTANCE_2 = 0.20
     # Options: "phase", "amp_phase".
     SLM_MODE = "phase"
     RESOLUTION = (640, 640)
@@ -113,10 +113,10 @@ class ConfigSLM:
     TEACHER_V1_C2F_BLOCKS = 3
 
     # -------- TEACHER_ARCH = "convteacher_v2" --------
-    TEACHER_V2_BASE_CHANNELS = 24
-    TEACHER_V2_C2F_BLOCKS = 2
-    TEACHER_V2_SYNTHETIC_WAVELENGTHS = 2
-    TEACHER_V2_COMPLEX_KERNEL_SIZE = 3
+    TEACHER_V2_BASE_CHANNELS = 32
+    TEACHER_V2_C2F_BLOCKS = 3
+    TEACHER_V2_SYNTHETIC_WAVELENGTHS = 3
+    TEACHER_V2_COMPLEX_KERNEL_SIZE = 5
 
     # -------- TEACHER_ARCH = "convteacher_v3" --------
     TEACHER_V3_BASE_CHANNELS = 24
@@ -248,7 +248,7 @@ class ConfigSLM:
     # =========================================================================
     FEATURE_LOSS_WEIGHT_PHASE_FOCUS = 1.1
     DETECTION_LOSS_WEIGHT_PHASE_FOCUS = 0.0
-    RESPONSE_LOSS_WEIGHT_PHASE_FOCUS = 1.7
+    RESPONSE_LOSS_WEIGHT_PHASE_FOCUS = 0.0
     PRIVACY_LOSS_WEIGHT_PHASE_FOCUS = 0.0
 
     FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0

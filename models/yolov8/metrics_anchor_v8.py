@@ -1,10 +1,10 @@
 import numpy as np
 import torch
+from contextlib import nullcontext
 from tqdm import tqdm
 
-from models.geometry import bbox_iou_xywh
+from models.geometry import bbox_iou_xywh, bbox_iou_matrix_xywh
 from models.runtime import prepare_batch
-# (guidance loss removed — pure detection-driven)
 from .decode_anchor_v8 import decode_detections_anchor_v8
 
 
@@ -37,10 +37,21 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
     total_tp_op = total_fp_op = total_fn_op = 0
     op_conf_thresh = float(getattr(config, "CONF_THRESH", 0.35))
     is_main = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+
+    amp_enabled = bool(getattr(config, "ENABLE_AMP", True)) and device.type == "cuda"
+    amp_dtype_name = str(getattr(config, "AMP_DTYPE", "float16")).strip().lower()
+    amp_dtype = torch.bfloat16 if amp_dtype_name in {"bf16", "bfloat16"} else torch.float16
+    amp_ctx = (
+        torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled)
+        if device.type == "cuda"
+        else nullcontext()
+    )
+
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validation", leave=False, disable=not is_main):
             batch_images, batch_targets = prepare_batch(config, batch, device)
-            teacher_features, predictions = model(batch_images, return_feature=True)
+            with amp_ctx:
+                teacher_features, predictions = model(batch_images, return_feature=True)
             loss, loss_stats = criterion(predictions, batch_targets)
             for key in ("box", "obj", "noobj", "cls"):
                 component_totals[key] += loss_stats.get(key, 0.0)
@@ -68,45 +79,66 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
                     gt_by_class.setdefault(cls_id, []).append(gt_box)
                     gt_counts[cls_id] += 1
 
-                # --- COCO-style: all detections (conf ≥ 0.001) for mAP ---
-                matched = {cls_id: set() for cls_id in gt_by_class}
-                for det in sorted(sample_detections, key=lambda item: item[4], reverse=True):
+                dets_by_class = {}
+                for det in sample_detections:
                     cls_id = int(det[5])
-                    best_iou, best_gt_idx = 0.0, -1
-                    for gt_idx, gt_box in enumerate(gt_by_class.get(cls_id, [])):
-                        if gt_idx in matched.get(cls_id, set()):
-                            continue
-                        iou = float(bbox_iou_xywh(torch.tensor(det[:4]).float().unsqueeze(0), torch.tensor(gt_box).float().unsqueeze(0)).item())
-                        if iou > best_iou:
-                            best_iou, best_gt_idx = iou, gt_idx
-                    is_tp = best_iou >= config.METRIC_IOU_THRESHOLD
-                    metric_storage[cls_id].append((float(det[4]), 1.0 if is_tp else 0.0))
-                    if is_tp:
-                        total_tp += 1
-                        matched.setdefault(cls_id, set()).add(best_gt_idx)
-                    else:
-                        total_fp += 1
+                    dets_by_class.setdefault(cls_id, []).append(det)
 
-                # --- Operating-point: only detections with conf ≥ CONF_THRESH ---
-                op_dets = [d for d in sample_detections if float(d[4]) >= op_conf_thresh]
-                matched_op = {cls_id: set() for cls_id in gt_by_class}
-                for det in sorted(op_dets, key=lambda item: item[4], reverse=True):
-                    cls_id = int(det[5])
-                    best_iou, best_gt_idx = 0.0, -1
-                    for gt_idx, gt_box in enumerate(gt_by_class.get(cls_id, [])):
-                        if gt_idx in matched_op.get(cls_id, set()):
-                            continue
-                        iou = float(bbox_iou_xywh(torch.tensor(det[:4]).float().unsqueeze(0), torch.tensor(gt_box).float().unsqueeze(0)).item())
-                        if iou > best_iou:
-                            best_iou, best_gt_idx = iou, gt_idx
-                    if best_iou >= config.METRIC_IOU_THRESHOLD:
-                        total_tp_op += 1
-                        matched_op.setdefault(cls_id, set()).add(best_gt_idx)
-                    else:
-                        total_fp_op += 1
-                for cls_id, gt_boxes in gt_by_class.items():
-                    total_fn_op += len(gt_boxes) - len(matched_op.get(cls_id, set()))
-                    total_fn += len(gt_boxes) - len(matched.get(cls_id, set()))
+                matched_coco = {}
+                for cls_id, gt_boxes_list in gt_by_class.items():
+                    gt_boxes = torch.tensor(gt_boxes_list, dtype=torch.float32, device=device)
+                    dets = dets_by_class.get(cls_id, [])
+                    if not dets:
+                        total_fn += len(gt_boxes_list)
+                        continue
+                    dets_sorted = sorted(dets, key=lambda d: d[4], reverse=True)
+                    det_boxes = torch.from_numpy(np.stack([d[:4] for d in dets_sorted])).to(device=device, dtype=torch.float32)
+                    det_confs = [d[4] for d in dets_sorted]
+                    iou_matrix = bbox_iou_matrix_xywh(det_boxes, gt_boxes)
+                    matched_gt = set()
+                    for det_idx in range(len(dets_sorted)):
+                        ious = iou_matrix[det_idx].clone()
+                        for m in matched_gt:
+                            ious[m] = -1.0
+                        best_iou, best_gt_idx = ious.max(dim=0)
+                        best_iou = float(best_iou.item())
+                        best_gt_idx = int(best_gt_idx.item())
+                        is_tp = best_iou >= config.METRIC_IOU_THRESHOLD
+                        metric_storage[cls_id].append((float(det_confs[det_idx]), 1.0 if is_tp else 0.0))
+                        if is_tp:
+                            total_tp += 1
+                            matched_gt.add(best_gt_idx)
+                        else:
+                            total_fp += 1
+                    matched_coco[cls_id] = matched_gt
+                    total_fn += len(gt_boxes_list) - len(matched_gt)
+
+                matched_op = {}
+                for cls_id, gt_boxes_list in gt_by_class.items():
+                    gt_boxes = torch.tensor(gt_boxes_list, dtype=torch.float32, device=device)
+                    dets = dets_by_class.get(cls_id, [])
+                    op_dets = [d for d in dets if float(d[4]) >= op_conf_thresh]
+                    if not op_dets:
+                        total_fn_op += len(gt_boxes_list)
+                        continue
+                    op_dets_sorted = sorted(op_dets, key=lambda d: d[4], reverse=True)
+                    op_det_boxes = torch.from_numpy(np.stack([d[:4] for d in op_dets_sorted])).to(device=device, dtype=torch.float32)
+                    iou_matrix = bbox_iou_matrix_xywh(op_det_boxes, gt_boxes)
+                    matched_gt = set()
+                    for det_idx in range(len(op_dets_sorted)):
+                        ious = iou_matrix[det_idx].clone()
+                        for m in matched_gt:
+                            ious[m] = -1.0
+                        best_iou, best_gt_idx = ious.max(dim=0)
+                        best_iou = float(best_iou.item())
+                        best_gt_idx = int(best_gt_idx.item())
+                        if best_iou >= config.METRIC_IOU_THRESHOLD:
+                            total_tp_op += 1
+                            matched_gt.add(best_gt_idx)
+                        else:
+                            total_fp_op += 1
+                    matched_op[cls_id] = matched_gt
+                    total_fn_op += len(gt_boxes_list) - len(matched_gt)
 
     num_batches = max(len(dataloader), 1)
     avg_losses = {key: value / num_batches for key, value in component_totals.items()}
