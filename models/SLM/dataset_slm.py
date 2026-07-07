@@ -34,8 +34,7 @@ class SLMFeatureDataset(Dataset):
                     "label_path": os.path.join(labels_dir, os.path.splitext(name)[0] + ".txt"),
                 }
             )
-        self.gray = transforms.Compose([transforms.Resize((config.IMG_SIZE, config.IMG_SIZE)), transforms.Grayscale(1), transforms.ToTensor()])
-        self.rgb = transforms.Compose([transforms.Resize((config.IMG_SIZE, config.IMG_SIZE)), transforms.Grayscale(1), transforms.ToTensor()])
+        self.transform = transforms.Compose([transforms.Resize((config.IMG_SIZE, config.IMG_SIZE)), transforms.Grayscale(1), transforms.ToTensor()])
 
     def __len__(self):
         return len(self.entries)
@@ -43,8 +42,8 @@ class SLMFeatureDataset(Dataset):
     def __getitem__(self, idx):
         entry = self.entries[idx]
         img = Image.open(entry["image_path"]).convert("RGB")
-        gray_tensor = self.gray(img)
-        rgb_tensor = self.rgb(img)
+        gray_tensor = self.transform(img)
+        rgb_tensor = gray_tensor
         targets = []
         label_path = entry["label_path"]
         if os.path.exists(label_path):

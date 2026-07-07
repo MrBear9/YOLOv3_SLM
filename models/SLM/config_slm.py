@@ -44,8 +44,8 @@ class ConfigSLM:
     # =========================================================================
     WAVELENGTH = 532e-9
     PIXEL_SIZE = 6.4e-6
-    PROP_DISTANCE_1 = 0.10
-    PROP_DISTANCE_2 = 0.20
+    PROP_DISTANCE_1 = 0.10 # 10cm
+    PROP_DISTANCE_2 = 0.20 # 20cm
     # Options: "phase", "amp_phase".
     SLM_MODE = "phase"
     RESOLUTION = (640, 640)
@@ -58,6 +58,10 @@ class ConfigSLM:
     SLM_PHASE_PARAM_MODE = "multiscale_mlp"
     # Plan A — multi-scale pyramid levels (80→160→320→640 for 640 resolution)
     SLM_PHASE_NUM_SCALES = 4
+    # Plan B — overlapping block-wise learning (replaces the finest scale)
+    SLM_PHASE_USE_BLOCKWISE = True
+    SLM_PHASE_BLOCK_GRID = 5       # 5×5 = 25 blocks (set 1 to disable)
+    SLM_PHASE_BLOCK_OVERLAP = 20   # overlap pixels for boundary blending
     # Plan C — coordinate MLP architecture
     SLM_PHASE_MLP_HIDDEN = 64
     SLM_PHASE_MLP_NUM_FREQS = 6
@@ -71,7 +75,7 @@ class ConfigSLM:
     STUDENT_NORM_MODE = "percentile"
     STUDENT_NORM_PERCENTILE = 0.990
     STUDENT_OUTPUT_CLAMP_MAX = 2.5
-    STUDENT_OUTPUT_BLUR_KERNEL = 9
+    STUDENT_OUTPUT_BLUR_KERNEL = 3
 
     # -------- SLM phase init --------
     # Options: zero, random, vortex, dh_psf/double_helix_psf, checkpoint,
@@ -223,7 +227,7 @@ class ConfigSLM:
     PHASE_DIVERSITY_WEIGHT_JOINT = 0.03
     PHASE_SMOOTH_WEIGHT_NORM_JOINT = 0.2
     PHASE_DIVERSITY_WEIGHT_NORM_JOINT = 0.08
-    FEATURE_LOSS_PREFILTER_KERNEL = 9
+    FEATURE_LOSS_PREFILTER_KERNEL = 3
     ENABLE_FEATURE_DOMAIN_ALIGNMENT = True
     # Options: "mean_std", "minmax"/"min_max", "none".
     FEATURE_DOMAIN_ALIGN_MODE = "minmax"

@@ -155,13 +155,13 @@ def collect_phase_snapshot(student):
 
 
 def collect_phase_grad_norm(student):
-    total_sq = 0.0
+    total_sq = torch.zeros((), device=next(student.parameters()).device)
     for name, param in student.named_parameters():
         if "phase_raw" not in name or param.grad is None:
             continue
-        grad = param.grad.detach().float()
-        total_sq += float(torch.sum(grad * grad).item())
-    return total_sq ** 0.5
+        grad = param.grad.detach()
+        total_sq += torch.sum(grad * grad)
+    return float(total_sq.item()) ** 0.5
 
 
 def clip_phase_grad_norm(student, max_norm):
@@ -217,11 +217,6 @@ def save_current_student_checkpoint(
         mirror_extra["selection_metric"] = "phase_focus_current_optical_student"
         mirror_extra["phase_focus_mirror_checkpoint"] = path
         save_student_best(Config, student, mirror_path, display_epoch, avg_total, extra=mirror_extra)
-
-
-def zero_model_grads(*modules):
-    for module in modules:
-        module.zero_grad(set_to_none=True)
 
 
 def collect_phase_update_norm(student, snapshot):
@@ -401,12 +396,17 @@ def train():
     train_loader = DataLoader(train_dataset, **loader_kwargs)
     val_dataset = None
     val_loader = None
+    val_sampler = None
     try:
         val_dataset = SLMFeatureDataset(Config, split="val")
         if len(val_dataset) > 0:
+            if use_ddp:
+                from torch.utils.data.distributed import DistributedSampler
+                val_sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=False)
             val_kwargs = {
                 "batch_size": Config.BATCH_SIZE,
                 "shuffle": False,
+                "sampler": val_sampler,
                 "num_workers": Config.NUM_WORKERS,
                 "pin_memory": Config.PIN_MEMORY,
                 "collate_fn": slm_collate_fn,
@@ -481,18 +481,17 @@ def train():
                 train_sampler.set_epoch(global_epoch)
             student.train(stage_name != "detector_focus")
             detector.train(stage_name != "phase_focus")
-            epoch_total = 0.0
-            epoch_feature = 0.0
-            epoch_detection = 0.0
-            epoch_response = 0.0
-            epoch_privacy = 0.0
+            epoch_total_t = torch.zeros((), device=device)
+            epoch_feature_t = torch.zeros((), device=device)
+            epoch_detection_t = torch.zeros((), device=device)
+            epoch_response_t = torch.zeros((), device=device)
+            epoch_privacy_t = torch.zeros((), device=device)
             phase_snapshot = collect_phase_snapshot(student_raw)
             epoch_phase_grad_norm = 0.0
 
             for batch in tqdm(train_loader, desc=f"Epoch {global_epoch + 1}/{Config.EPOCHS} [{stage_name}]", leave=True, disable=not is_main):
                 gray, rgb, targets = prepare_batch(batch, device)
                 optimizer.zero_grad(set_to_none=True)
-                zero_model_grads(student_raw, detector_raw)
                 teacher_feature = None
                 if stage_weights["feature"] > 0 or stage_weights["response"] > 0:
                     with torch.no_grad():
@@ -533,21 +532,21 @@ def train():
                         phase_grad_norm = min(clipped_norm, Config.PHASE_GRAD_CLIP_NORM)
                 epoch_phase_grad_norm += phase_grad_norm
                 optimizer.step()
-                epoch_total += float(total_loss.detach().item())
-                epoch_feature += float(feature_loss.detach().item())
-                epoch_detection += float(detection_loss.detach().item())
-                epoch_response += float(response_loss.detach().item())
-                epoch_privacy += float(privacy_loss.detach().item())
+                epoch_total_t += total_loss.detach()
+                epoch_feature_t += feature_loss.detach()
+                epoch_detection_t += detection_loss.detach()
+                epoch_response_t += response_loss.detach()
+                epoch_privacy_t += privacy_loss.detach()
 
             if scheduler is not None:
                 scheduler.step()
 
             num_batches = max(len(train_loader), 1)
-            avg_total = epoch_total / num_batches
-            avg_feature = epoch_feature / num_batches
-            avg_detection = epoch_detection / num_batches
-            avg_response = epoch_response / num_batches
-            avg_privacy = epoch_privacy / num_batches
+            avg_total = float(epoch_total_t.item()) / num_batches
+            avg_feature = float(epoch_feature_t.item()) / num_batches
+            avg_detection = float(epoch_detection_t.item()) / num_batches
+            avg_response = float(epoch_response_t.item()) / num_batches
+            avg_privacy = float(epoch_privacy_t.item()) / num_batches
             avg_phase_grad_norm = epoch_phase_grad_norm / num_batches
             phase_update_norm, phase_update_rel = collect_phase_update_norm(student_raw, phase_snapshot)
             history["train_total"].append(avg_total)
@@ -697,11 +696,11 @@ def train():
                         },
                     )
                 best_student_map50 = max(best_student_map50, best_map50)
-                log_to_file(
-                    Config,
-                    f"Saved best detector + paired SLM student: epoch={display_epoch}, train_loss={avg_total:.6f}, "
-                    f"val_loss={val_losses['total']:.6f}, map50={best_map50:.4f}, slm_quality_passed={slm_ok}" if val_metrics is not None else f"Saved best detector + paired SLM student: epoch={display_epoch}, train_loss={avg_total:.6f}, slm_quality_passed={slm_ok}",
-                )
+                # log_to_file(
+                #     Config,
+                #     f"Saved best detector + paired SLM student: epoch={display_epoch}, train_loss={avg_total:.6f}, "
+                #     f"val_loss={val_losses['total']:.6f}, map50={best_map50:.4f}, slm_quality_passed={slm_ok}" if val_metrics is not None else f"Saved best detector + paired SLM student: epoch={display_epoch}, train_loss={avg_total:.6f}, slm_quality_passed={slm_ok}",
+                # )
 
             if is_main and global_epoch % Config.VIS_INTERVAL == 0:
                 save_slm_detection_visualization(
@@ -719,18 +718,18 @@ def train():
                 save_training_curves(history, Config.OUTPUT_DIR)
                 save_slm_component_curves(history, Config.OUTPUT_DIR)
 
-            log_to_file(
-                Config,
-                f"Epoch {display_epoch:03d} [{stage_name}] total={avg_total:.6f} "
-                f"feature={avg_feature:.6f} detection={avg_detection:.6f} "
-                f"response={avg_response:.6f} privacy={avg_privacy:.6f} "
-                f"phase_grad={avg_phase_grad_norm:.6e} phase_update={phase_update_norm:.6e} "
-                f"phase_update_rel={phase_update_rel:.6e} "
-                f"slm_std={slm_stats['slm1_wrapped_std']:.3f}/{slm_stats['slm2_wrapped_std']:.3f} "
-                f"slm_circ={slm_stats['slm1_circular_std']:.3f}/{slm_stats['slm2_circular_std']:.3f} "
-                f"slm_near={slm_stats['slm1_near_boundary_ratio']:.3f}/{slm_stats['slm2_near_boundary_ratio']:.3f} "
-                f"slm_span={slm_stats['slm1_wrapped_span']:.3f}/{slm_stats['slm2_wrapped_span']:.3f}"
-            )
+            # log_to_file(
+            #     Config,
+            #     f"Epoch {display_epoch:03d} [{stage_name}] total={avg_total:.6f} "
+            #     f"feature={avg_feature:.6f} detection={avg_detection:.6f} "
+            #     f"response={avg_response:.6f} privacy={avg_privacy:.6f} "
+            #     f"phase_grad={avg_phase_grad_norm:.6e} phase_update={phase_update_norm:.6e} "
+            #     f"phase_update_rel={phase_update_rel:.6e} "
+            #     f"slm_std={slm_stats['slm1_wrapped_std']:.3f}/{slm_stats['slm2_wrapped_std']:.3f} "
+            #     f"slm_circ={slm_stats['slm1_circular_std']:.3f}/{slm_stats['slm2_circular_std']:.3f} "
+            #     f"slm_near={slm_stats['slm1_near_boundary_ratio']:.3f}/{slm_stats['slm2_near_boundary_ratio']:.3f} "
+            #     f"slm_span={slm_stats['slm1_wrapped_span']:.3f}/{slm_stats['slm2_wrapped_span']:.3f}"
+            # )
             log_epoch_table_row(
                 Config,
                 epoch=global_epoch,

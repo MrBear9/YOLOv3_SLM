@@ -39,6 +39,10 @@ class FourierFeatureField(nn.Module):
         grid_2ch = torch.stack([yy, xx], dim=0).unsqueeze(0)  # (1, 2, h, w)
         self.register_buffer("coord_grid", grid_2ch, persistent=True)
 
+        # Precompute Fourier features as a buffer (deterministic, never changes)
+        encoded = self._fourier_features(grid_2ch, num_frequencies)
+        self.register_buffer("fourier_encoded", encoded, persistent=False)
+
         self._init_near_zero()
 
     def _init_near_zero(self):
@@ -48,31 +52,33 @@ class FourierFeatureField(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def _fourier_features(self, grid):
+    @staticmethod
+    def _fourier_features(grid, num_frequencies):
         """Encode (y, x) coords with sin/cos at power-of-pi frequencies."""
         features = [grid]
-        for i in range(self.num_frequencies):
+        for i in range(num_frequencies):
             freq = (2 ** i) * torch.pi
             features.append(torch.sin(freq * grid))
             features.append(torch.cos(freq * grid))
         return torch.cat(features, dim=1)  # (B, in_channels, h, w)
 
     def forward(self):
-        encoded = self._fourier_features(self.coord_grid)
-        return self.net(encoded)  # (1, 1, h, w)
+        return self.net(self.fourier_encoded)  # (1, 1, h, w)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Plan A + C: Multi-Scale Phase Pyramid + Neural Field
+# Plan A + B + C: Multi-Scale Pyramid + Block-wise + Neural Field
 # ═══════════════════════════════════════════════════════════════════════════
 
 class MultiScalePhaseField(nn.Module):
-    """Hierarchical phase parameterisation combining Plan A and Plan C.
+    """Hierarchical phase parameterisation combining Plans A, B and C.
 
     Plan C — FourierFeatureField provides a smooth global phase base.
     Plan A — learnable parameters at multiple resolutions add detail.
+    Plan B — the finest scale is split into overlapping blocks that learn
+            independently, then stitched with linear feathering.
 
-    ``phase = mlp_field() + sum(upsample(scale_param_i))``
+    ``phase = mlp_field() + sum(upsample(global_scales)) + block_stitch(blocks)``
 
     The final wrapped phase is SLM-compatible [0, 2π).
     """
@@ -95,11 +101,25 @@ class MultiScalePhaseField(nn.Module):
             num_layers=mlp_layers,
         )
 
-        # --- Plan A: multi-scale learnable parameters ---
+        # --- Plan B config ---
+        self.use_blockwise = bool(getattr(config, "SLM_PHASE_USE_BLOCKWISE", True))
+        block_grid = int(getattr(config, "SLM_PHASE_BLOCK_GRID", 4))
+        block_overlap = int(getattr(config, "SLM_PHASE_BLOCK_OVERLAP", 16))
         h, w = resolution
-        # Coarsest → finest, e.g. 80→160→320→640
+
+        # --- Plan A: global multi-scale parameters (coarse → medium-fine) ---
+        # The finest scale is handled by Plan B when blockwise is enabled.
+        if self.use_blockwise:
+            # Global scales: exclude the finest, it's replaced by blocks
+            global_scales_count = max(num_scales - 1, 1)
+        else:
+            global_scales_count = num_scales
+
         scale_resolutions = []
-        for i in range(num_scales):
+        for i in range(global_scales_count):
+            # Use num_scales (not global_scales_count) so the coarsest factor
+            # stays the same regardless of blockwise — blocks replace the
+            # finest scale, not duplicate it.
             factor = 2 ** (num_scales - 1 - i)
             sh = max(h // factor, 4)
             sw = max(w // factor, 4)
@@ -111,35 +131,143 @@ class MultiScalePhaseField(nn.Module):
             for sh, sw in scale_resolutions
         ])
 
+        # --- Plan B: overlapping block-wise parameters (finest scale) ---
+        if self.use_blockwise:
+            self.block_grid = (block_grid, block_grid)
+            self.block_overlap = block_overlap
+
+            stride_h = (h - block_overlap) / block_grid
+            stride_w = (w - block_overlap) / block_grid
+            self._block_stride = (stride_h, stride_w)
+            block_h = int(stride_h) + block_overlap
+            block_w = int(stride_w) + block_overlap
+            self._block_size = (block_h, block_w)
+
+            n_blocks = block_grid * block_grid
+            self.blocks = nn.ParameterList([
+                nn.Parameter(torch.zeros(1, 1, block_h, block_w))
+                for _ in range(n_blocks)
+            ])
+        else:
+            self.blocks = None
+
+        # Cache feather weights and slice coordinates (deterministic, never changes)
+        if self.use_blockwise and self.blocks is not None:
+            self._cache_feather_weights()
+
+    def _cache_feather_weights(self):
+        """Pre-compute deterministic feather weights and slice coordinates for all blocks."""
+        H, W = self.resolution
+        n_h, n_w = self.block_grid
+        stride_h, stride_w = self._block_stride
+        block_h, block_w = self._block_size
+        device = self.scale_params[0].device
+
+        feather_weights = []
+        slices = []
+        for idx in range(len(self.blocks)):
+            i, j = divmod(idx, n_w)
+            y_start = int(i * stride_h)
+            x_start = int(j * stride_w)
+            y_end = min(y_start + block_h, H)
+            x_end = min(x_start + block_w, W)
+            bh, bw = y_end - y_start, x_end - x_start
+            slices.append((y_start, y_end, x_start, x_end, bh, bw))
+            feather_weights.append(self._build_feather_weights(bh, bw, i, j, device))
+        self._feather_weights = feather_weights
+        self._feather_slices = slices
+
+    def _build_feather_weights(self, y_len, x_len, i, j, device=None):
+        """Linear ramp weights that fade to zero at overlapping edges."""
+        if device is None:
+            device = self.scale_params[0].device
+        wy = torch.ones(y_len, device=device)
+        wx = torch.ones(x_len, device=device)
+        ov = self.block_overlap
+        n_h, n_w = self.block_grid
+
+        if i > 0:
+            wy[:ov] = torch.linspace(0, 1, ov, device=device)
+        if i < n_h - 1:
+            wy[-ov:] = torch.linspace(1, 0, ov, device=device)
+        if j > 0:
+            wx[:ov] = torch.linspace(0, 1, ov, device=device)
+        if j < n_w - 1:
+            wx[-ov:] = torch.linspace(1, 0, ov, device=device)
+        return wy[:, None] * wx[None, :]
+
+    def _stitch_blocks(self):
+        """Stitch overlapping blocks into a single phase map with blending."""
+        H, W = self.resolution
+        device = self.blocks[0].device
+        phase = torch.zeros(1, 1, H, W, device=device)
+        weight = torch.zeros(1, 1, H, W, device=device)
+
+        for idx, block_param in enumerate(self.blocks):
+            y_start, y_end, x_start, x_end, bh, bw = self._feather_slices[idx]
+            w = self._feather_weights[idx]
+            if w.device != device:
+                w = w.to(device)
+                self._feather_weights[idx] = w
+
+            # Upsample block param to target tile size (handles edge blocks)
+            upsampled = F.interpolate(block_param, size=(bh, bw),
+                                      mode="bilinear", align_corners=False)
+
+            phase[:, :, y_start:y_end, x_start:x_end] += upsampled * w[None, None, :, :]
+            weight[:, :, y_start:y_end, x_start:x_end] += w[None, None, :, :]
+
+        return phase / (weight + 1e-8)
+
     def set_base_phase(self, phase):
-        """Seed the finest scale with the initial phase pattern.
+        """Seed the finest-scale parameters with the initial phase pattern.
 
-        All coarser scales stay at zero and the MLP stays near-zero,
-        so the combined phase starts from the same point as the
-        original flat ``phase_raw`` parameter.
-
-        Works with any init mode (vortex, dh_psf, zero, etc.).
-        For zero init the finest scale stays at ~zero — the phase
-        learns structure from scratch with no range bias.
+        In blockwise mode each block is initialised from the corresponding
+        spatial crop of the base phase.  All coarser scales stay at zero
+        and the MLP stays near-zero, so the combined phase starts from
+        the same point as the original flat ``phase_raw`` parameter.
         """
+        target_h, target_w = self.resolution
         with torch.no_grad():
-            target_h, target_w = self.resolution
-            self.scale_params[-1].copy_(
-                F.interpolate(phase, size=(target_h, target_w),
-                              mode="bilinear", align_corners=False)
-            )
+            if self.use_blockwise and self.blocks is not None:
+                n_h, n_w = self.block_grid
+                stride_h, stride_w = self._block_stride
+                block_h, block_w = self._block_size
+                base = F.interpolate(phase, size=(target_h, target_w),
+                                     mode="bilinear", align_corners=False)
+                for idx, block_param in enumerate(self.blocks):
+                    i, j = divmod(idx, n_w)
+                    y_start = int(i * stride_h)
+                    x_start = int(j * stride_w)
+                    y_end = min(y_start + block_h, target_h)
+                    x_end = min(x_start + block_w, target_w)
+                    crop = base[:, :, y_start:y_end, x_start:x_end]
+                    block_param.copy_(
+                        F.interpolate(crop, size=block_param.shape[2:],
+                                      mode="bilinear", align_corners=False)
+                    )
+            else:
+                self.scale_params[-1].copy_(
+                    F.interpolate(phase, size=(target_h, target_w),
+                                  mode="bilinear", align_corners=False)
+                )
 
     def forward(self):
         h, w = self.resolution
         device = self.scale_params[0].device
 
         # Plan C: smooth base from neural field
-        phase = self.mlp_field().to(device)
+        phase = self.mlp_field()
 
-        # Plan A: multi-scale detail
+        # Plan A: global multi-scale detail
         for param in self.scale_params:
             phase = phase + F.interpolate(param, size=(h, w),
                                           mode="bilinear", align_corners=False)
+
+        # Plan B: block-wise finest-scale detail
+        if self.use_blockwise and self.blocks is not None:
+            phase = phase + self._stitch_blocks()
+
         return phase
 
 

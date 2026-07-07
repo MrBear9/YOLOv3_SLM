@@ -46,7 +46,8 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
 
     with torch.no_grad():
         stage_weights = config.get_stage_loss_weights(stage_name)
-        for batch in tqdm(dataloader, desc="SLM validation", leave=False):
+        is_main = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+        for batch in tqdm(dataloader, desc="SLM validation", leave=False, disable=not is_main):
             gray, teacher_input, targets = _move_batch_to_device(config, batch, device)
             teacher_feature = None
             if stage_weights["feature"] > 0 or stage_weights["response"] > 0:

@@ -15,6 +15,18 @@ def extract_state_dict(checkpoint):
 
 def load_matching_state(module, state_dict, prefixes=()):
     target_state = module.state_dict()
+
+    # Collect non-persistent buffer keys across all submodules — these are
+    # recomputed in __init__ and must never be loaded from a checkpoint
+    # (they may have wrong shapes if the config changed since the checkpoint
+    # was saved).
+    non_persistent = set()
+    for prefix, submodule in module.named_modules():
+        if hasattr(submodule, '_non_persistent_buffers_set'):
+            for buf_name in submodule._non_persistent_buffers_set:
+                full_name = f"{prefix}.{buf_name}" if prefix else buf_name
+                non_persistent.add(full_name)
+
     compatible = {}
     for raw_key, value in state_dict.items():
         key = raw_key[7:] if raw_key.startswith("module.") else raw_key
@@ -22,6 +34,8 @@ def load_matching_state(module, state_dict, prefixes=()):
             if key.startswith(prefix):
                 key = key[len(prefix):]
                 break
+        if key in non_persistent:
+            continue
         if key in target_state and target_state[key].shape == value.shape:
             compatible[key] = value
     if compatible:
@@ -130,7 +144,7 @@ def collect_slm_statistics(student):
     for layer_name in ("slm1", "slm2"):
         slm = getattr(student, layer_name)
         wrapped = slm.wrapped_phase().detach().float()
-        centered = slm.centered_phase().detach().float()
+        centered = torch.atan2(torch.sin(wrapped), torch.cos(wrapped))
         wrapped_flat = wrapped.flatten(1)
         resultant = torch.sqrt(torch.mean(torch.cos(wrapped_flat), dim=1) ** 2 + torch.mean(torch.sin(wrapped_flat), dim=1) ** 2)
         circular_std = torch.sqrt(torch.clamp(-2.0 * torch.log(torch.clamp(resultant, min=1e-8)), min=0.0)).mean()
