@@ -67,16 +67,16 @@ class FourierFeatureField(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Plan A + B + C: Multi-Scale Pyramid + Block-wise + Neural Field
+# Plan A + B+ + C: Multi-Scale Pyramid + Block-wise (with mini-pyramid) + Neural Field
 # ═══════════════════════════════════════════════════════════════════════════
 
 class MultiScalePhaseField(nn.Module):
-    """Hierarchical phase parameterisation combining Plans A, B and C.
+    """Hierarchical phase parameterisation combining Plans A, B+ and C.
 
     Plan C — FourierFeatureField provides a smooth global phase base.
-    Plan A — learnable parameters at multiple resolutions add detail.
-    Plan B — the finest scale is split into overlapping blocks that learn
-            independently, then stitched with linear feathering.
+    Plan A — learnable parameters at multiple resolutions add global detail.
+    Plan B+ — the finest scale is split into overlapping blocks, each with
+             its own mini-pyramid (coarse → fine), stitched with feathering.
 
     ``phase = mlp_field() + sum(upsample(global_scales)) + block_stitch(blocks)``
 
@@ -144,12 +144,29 @@ class MultiScalePhaseField(nn.Module):
             self._block_size = (block_h, block_w)
 
             n_blocks = block_grid * block_grid
-            self.blocks = nn.ParameterList([
-                nn.Parameter(torch.zeros(1, 1, block_h, block_w))
-                for _ in range(n_blocks)
-            ])
+            self._n_blocks = n_blocks
+
+            # --- Plan B+: mini-pyramid inside each block ---
+            # Each block gets its own coarse→fine scale decomposition so that
+            # different spatial regions can learn different frequency mixes.
+            # block_inner_scales=1  →  single scale (legacy, same as before)
+            # block_inner_scales=2  →  coarse (//4) + fine (//1)   lightweight
+            block_inner_scales = int(getattr(config, "SLM_PHASE_BLOCK_INNER_SCALES", 2))
+            self._block_inner_scales = max(block_inner_scales, 1)
+
+            factors = [2 ** (self._block_inner_scales - k) for k in range(self._block_inner_scales - 1)] + [1]
+            self._block_inner_resolutions = [
+                (max(block_h // f, 2), max(block_w // f, 2)) for f in factors
+            ]
+
+            self.blocks = nn.ParameterList()
+            for _ in range(n_blocks):
+                for sh, sw in self._block_inner_resolutions:
+                    self.blocks.append(nn.Parameter(torch.zeros(1, 1, sh, sw)))
         else:
             self.blocks = None
+            self._n_blocks = 0
+            self._block_inner_scales = 1
 
         # Cache feather weights and slice coordinates (deterministic, never changes)
         if self.use_blockwise and self.blocks is not None:
@@ -165,7 +182,7 @@ class MultiScalePhaseField(nn.Module):
 
         feather_weights = []
         slices = []
-        for idx in range(len(self.blocks)):
+        for idx in range(self._n_blocks):
             i, j = divmod(idx, n_w)
             y_start = int(i * stride_h)
             x_start = int(j * stride_w)
@@ -197,24 +214,38 @@ class MultiScalePhaseField(nn.Module):
         return wy[:, None] * wx[None, :]
 
     def _stitch_blocks(self):
-        """Stitch overlapping blocks into a single phase map with blending."""
+        """Stitch overlapping blocks into a single phase map with blending.
+
+        Each block's inner pyramid scales are summed (after upsampling to the
+        tile size) before feather-blending into the output.  This lets each
+        block express coarse trend + fine detail independently.
+        """
         H, W = self.resolution
         device = self.blocks[0].device
         phase = torch.zeros(1, 1, H, W, device=device)
         weight = torch.zeros(1, 1, H, W, device=device)
+        n_inner = self._block_inner_scales
 
-        for idx, block_param in enumerate(self.blocks):
-            y_start, y_end, x_start, x_end, bh, bw = self._feather_slices[idx]
-            w = self._feather_weights[idx]
+        for block_idx in range(self._n_blocks):
+            y_start, y_end, x_start, x_end, bh, bw = self._feather_slices[block_idx]
+
+            # Sum inner pyramid scales for this block
+            block_phase = None
+            for k in range(n_inner):
+                param = self.blocks[block_idx * n_inner + k]
+                upsampled = F.interpolate(param, size=(bh, bw),
+                                          mode="bilinear", align_corners=False)
+                if block_phase is None:
+                    block_phase = upsampled
+                else:
+                    block_phase = block_phase + upsampled
+
+            w = self._feather_weights[block_idx]
             if w.device != device:
                 w = w.to(device)
-                self._feather_weights[idx] = w
+                self._feather_weights[block_idx] = w
 
-            # Upsample block param to target tile size (handles edge blocks)
-            upsampled = F.interpolate(block_param, size=(bh, bw),
-                                      mode="bilinear", align_corners=False)
-
-            phase[:, :, y_start:y_end, x_start:x_end] += upsampled * w[None, None, :, :]
+            phase[:, :, y_start:y_end, x_start:x_end] += block_phase * w[None, None, :, :]
             weight[:, :, y_start:y_end, x_start:x_end] += w[None, None, :, :]
 
         return phase / (weight + 1e-8)
@@ -222,10 +253,11 @@ class MultiScalePhaseField(nn.Module):
     def set_base_phase(self, phase):
         """Seed the finest-scale parameters with the initial phase pattern.
 
-        In blockwise mode each block is initialised from the corresponding
-        spatial crop of the base phase.  All coarser scales stay at zero
-        and the MLP stays near-zero, so the combined phase starts from
-        the same point as the original flat ``phase_raw`` parameter.
+        In blockwise mode each block's inner pyramid is initialised from the
+        corresponding spatial crop: the finest scale gets the crop directly
+        and coarser scales get downsampled versions.  All global scales stay
+        at zero and the MLP stays near-zero, so the combined phase starts
+        from the same point as the original flat ``phase_raw`` parameter.
         """
         target_h, target_w = self.resolution
         with torch.no_grad():
@@ -233,19 +265,24 @@ class MultiScalePhaseField(nn.Module):
                 n_h, n_w = self.block_grid
                 stride_h, stride_w = self._block_stride
                 block_h, block_w = self._block_size
+                n_inner = self._block_inner_scales
                 base = F.interpolate(phase, size=(target_h, target_w),
                                      mode="bilinear", align_corners=False)
-                for idx, block_param in enumerate(self.blocks):
-                    i, j = divmod(idx, n_w)
+                inner_res = self._block_inner_resolutions
+                for block_idx in range(self._n_blocks):
+                    i, j = divmod(block_idx, n_w)
                     y_start = int(i * stride_h)
                     x_start = int(j * stride_w)
                     y_end = min(y_start + block_h, target_h)
                     x_end = min(x_start + block_w, target_w)
                     crop = base[:, :, y_start:y_end, x_start:x_end]
-                    block_param.copy_(
-                        F.interpolate(crop, size=block_param.shape[2:],
-                                      mode="bilinear", align_corners=False)
-                    )
+                    # Initialise each inner scale from the crop at its native resolution
+                    for k in range(n_inner):
+                        param = self.blocks[block_idx * n_inner + k]
+                        param.copy_(
+                            F.interpolate(crop, size=inner_res[k],
+                                          mode="bilinear", align_corners=False)
+                        )
             else:
                 self.scale_params[-1].copy_(
                     F.interpolate(phase, size=(target_h, target_w),

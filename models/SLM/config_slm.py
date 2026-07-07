@@ -56,12 +56,13 @@ class ConfigSLM:
     # "direct": single flat phase_raw parameter (legacy / compatible)
     # "multiscale_mlp": Plan A+C — multi-scale pyramid + neural-field MLP
     SLM_PHASE_PARAM_MODE = "multiscale_mlp"
-    # Plan A — multi-scale pyramid levels (80→160→320→640 for 640 resolution)
-    SLM_PHASE_NUM_SCALES = 4
+    # Plan A — multi-scale pyramid levels (80→160→320 for 640 resolution)
+    SLM_PHASE_NUM_SCALES = 3
     # Plan B — overlapping block-wise learning (replaces the finest scale)
     SLM_PHASE_USE_BLOCKWISE = True
     SLM_PHASE_BLOCK_GRID = 5       # 5×5 = 25 blocks (set 1 to disable)
     SLM_PHASE_BLOCK_OVERLAP = 20   # overlap pixels for boundary blending
+    SLM_PHASE_BLOCK_INNER_SCALES = 2  # mini-pyramid layers inside each block (1 = single scale)
     # Plan C — coordinate MLP architecture
     SLM_PHASE_MLP_HIDDEN = 64
     SLM_PHASE_MLP_NUM_FREQS = 6
