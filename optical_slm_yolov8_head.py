@@ -35,7 +35,7 @@ from models.runtime import (
     wrap_data_parallel,
 )
 from models.teacher import build_teacher
-from models.training_utils import save_training_curves
+from models.training_utils import add_tensorboard_scalar, create_tensorboard_writer, save_training_curves
 from models.yolov8.head_v8 import build_detector_head
 from models.yolov8.loss_anchor_v8 import YOLOv3AnchorLossForV8Head
 
@@ -144,6 +144,50 @@ def save_slm_component_curves(history, output_dir):
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "training_curves_components.png"), dpi=130)
     plt.close(fig)
+
+
+def write_slm_tensorboard_scalars(
+    writer,
+    step,
+    stage_name,
+    train_losses,
+    val_losses=None,
+    val_metrics=None,
+    slm_stats=None,
+    phase_grad_norm=None,
+    phase_update_norm=None,
+    phase_update_rel=None,
+    lr=None,
+):
+    if writer is None:
+        return
+    for key, value in train_losses.items():
+        add_tensorboard_scalar(writer, f"Loss/{stage_name}/train_{key}", value, step)
+        add_tensorboard_scalar(writer, f"Loss/All_Stages/train_{key}", value, step)
+    if val_losses is not None:
+        for key, value in val_losses.items():
+            add_tensorboard_scalar(writer, f"Loss/{stage_name}/val_{key}", value, step)
+            add_tensorboard_scalar(writer, f"Loss/All_Stages/val_{key}", value, step)
+    if val_metrics is not None:
+        for key in ("precision", "recall", "f1", "map50", "precision_op", "recall_op", "f1_op"):
+            add_tensorboard_scalar(writer, f"Metrics/{stage_name}/{key}", val_metrics.get(key), step)
+            add_tensorboard_scalar(writer, f"Metrics/All_Stages/{key}", val_metrics.get(key), step)
+    if slm_stats is not None:
+        for key in (
+            "slm1_wrapped_std",
+            "slm2_wrapped_std",
+            "slm1_circular_std",
+            "slm2_circular_std",
+            "slm1_near_boundary_ratio",
+            "slm2_near_boundary_ratio",
+            "slm1_wrapped_span",
+            "slm2_wrapped_span",
+        ):
+            add_tensorboard_scalar(writer, f"SLM/{stage_name}/{key}", slm_stats.get(key), step)
+    add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_grad_norm", phase_grad_norm, step)
+    add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_update_norm", phase_update_norm, step)
+    add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_update_rel", phase_update_rel, step)
+    add_tensorboard_scalar(writer, f"LR/{stage_name}", lr, step)
 
 
 def collect_phase_snapshot(student):
@@ -449,6 +493,7 @@ def train():
     global_epoch = 0
     deployment_norm_mode = Config.STUDENT_NORM_MODE
     init_epoch_log_table(Config)
+    tensorboard_writer = create_tensorboard_writer(Config, Config.OUTPUT_DIR, log_to_file) if is_main else None
 
     for stage_name, stage_epochs in stage_schedule():
         if stage_epochs <= 0:
@@ -598,6 +643,28 @@ def train():
                             "precision", "recall", "f1", "map50",
                             "precision_op", "recall_op", "f1_op"):
                     history[key].append(np.nan)
+            current_lr = max(group["lr"] for group in optimizer.param_groups)
+
+            if is_main:
+                write_slm_tensorboard_scalars(
+                    tensorboard_writer,
+                    display_epoch,
+                    stage_name,
+                    {
+                        "total": avg_total,
+                        "feature": avg_feature,
+                        "detection": avg_detection,
+                        "response": avg_response,
+                        "privacy": avg_privacy,
+                    },
+                    val_losses=val_losses,
+                    val_metrics=val_metrics,
+                    slm_stats=slm_stats,
+                    phase_grad_norm=avg_phase_grad_norm,
+                    phase_update_norm=phase_update_norm,
+                    phase_update_rel=phase_update_rel,
+                    lr=current_lr,
+                )
 
             if is_main:
                 save_current_student_checkpoint(
@@ -714,10 +781,6 @@ def train():
                     prefix=vis_prefix,
                     device=device,
                 )
-            if is_main:
-                save_training_curves(history, Config.OUTPUT_DIR)
-                save_slm_component_curves(history, Config.OUTPUT_DIR)
-
             # log_to_file(
             #     Config,
             #     f"Epoch {display_epoch:03d} [{stage_name}] total={avg_total:.6f} "
@@ -740,7 +803,7 @@ def train():
                 recall=val_metrics["recall"] if val_metrics is not None else None,
                 f1_score=val_metrics["f1"] if val_metrics is not None else None,
                 map50=val_metrics["map50"] if val_metrics is not None else None,
-                lr=max(group["lr"] for group in optimizer.param_groups),
+                lr=current_lr,
                 best_status=Config.EPOCH_TABLE_BEST_MARK if detector_score_is_best else "",
             )
             # 每个 epoch 结束后同步所有 rank
@@ -822,6 +885,8 @@ def train():
     if is_main:
         save_training_curves(history, Config.OUTPUT_DIR)
         save_slm_component_curves(history, Config.OUTPUT_DIR)
+        if tensorboard_writer is not None:
+            tensorboard_writer.close()
     log_to_file(Config, "=" * 80)
     log_to_file(Config, "Training complete")
     log_to_file(Config, f"Recommended inference checkpoint: {Config.get_detector_best_path()}")

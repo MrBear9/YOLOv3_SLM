@@ -86,19 +86,9 @@ def save_detection_visualization_anchor_v8(config, epoch, model, dataset, save_d
             axes[row, 1].imshow(feat_np, cmap="magma")
             axes[row, 1].set_title("Teacher feature")
             axes[row, 2].imshow(img_np, cmap="gray")
-            axes[row, 2].set_title("Ground Truth + anchors")
+            axes[row, 2].set_title("Ground Truth")
             axes[row, 3].imshow(img_np, cmap="gray")
             axes[row, 3].set_title("Predictions")
-
-            target_indices_for_anchor_overlay = []
-            if len(targets) > 0 and config.VIS_SHOW_BEST_MATCHED_ANCHORS:
-                target_areas = [
-                    float(targets[target_idx][3].item() * config.IMG_SIZE)
-                    * float(targets[target_idx][4].item() * config.IMG_SIZE)
-                    for target_idx in range(len(targets))
-                ]
-                overlay_count = min(config.VIS_MAX_GT_ANCHOR_OVERLAYS, len(targets))
-                target_indices_for_anchor_overlay = sorted(range(len(targets)), key=lambda idx: target_areas[idx], reverse=True)[:overlay_count]
 
             for target_idx in range(len(targets)):
                 cls_id, cx, cy, w, h = targets[target_idx].tolist()
@@ -110,21 +100,20 @@ def save_detection_visualization_anchor_v8(config, epoch, model, dataset, save_d
                 y1 = cy_px - h_px / 2
                 axes[row, 2].add_patch(plt.Rectangle((x1, y1), w_px, h_px, fill=False, edgecolor="lime", linewidth=1.8))
                 axes[row, 2].text(x1, y1 - 4, config.CLASS_NAMES[int(cls_id)], color="lime", fontsize=8)
-                if target_idx in target_indices_for_anchor_overlay:
-                    draw_best_matching_anchor_boxes(config, axes[row, 2], cx_px, cy_px, w_px, h_px)
 
             for det in detections:
                 cx, cy, w, h, conf, cls_id = det
                 x1 = cx - w / 2
                 y1 = cy - h / 2
                 color = plt.cm.tab20(int(cls_id) / max(config.NUM_CLASSES, 1))
-                axes[row, 3].add_patch(plt.Rectangle((x1, y1), w, h, fill=False, edgecolor=color, linewidth=1.6))
+                axes[row, 3].add_patch(plt.Rectangle((x1, y1), w, h, fill=False, edgecolor=color, linewidth=2.6))
                 axes[row, 3].text(
                     x1,
                     y1 - 5,
                     f"{config.CLASS_NAMES[int(cls_id)]}: {conf:.2f}",
                     color=color,
                     fontsize=8,
+                    fontweight="bold",
                     bbox=dict(boxstyle="round,pad=0.25", facecolor="black", alpha=0.35),
                 )
 

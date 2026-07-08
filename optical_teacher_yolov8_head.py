@@ -29,7 +29,9 @@ from models.teacher_guidance import (
     teacher_slm_cipher_loss,
 )
 from models.training_utils import (
+    add_tensorboard_scalar,
     build_optimizer_from_model,
+    create_tensorboard_writer,
     initialize_teacher_weights,
     save_training_curves,
     set_detector_trainable,
@@ -127,6 +129,20 @@ def log_all_parameters():
         f"edge_limit={Config.TEACHER_SLM_CIPHER_EDGE_LIMIT}",
     )
     log_to_file(Config, "=" * 80)
+
+
+def write_teacher_tensorboard_scalars(writer, step, train_losses, val_losses=None, val_metrics=None, lr=None):
+    if writer is None:
+        return
+    for key, value in train_losses.items():
+        add_tensorboard_scalar(writer, f"Loss/train_{key}", value, step)
+    if val_losses is not None:
+        for key, value in val_losses.items():
+            add_tensorboard_scalar(writer, f"Loss/val_{key}", value, step)
+    if val_metrics is not None:
+        for key in ("precision", "recall", "f1", "map50", "precision_op", "recall_op", "f1_op"):
+            add_tensorboard_scalar(writer, f"Metrics/{key}", val_metrics.get(key), step)
+    add_tensorboard_scalar(writer, "LR/current", lr, step)
 
 
 def train():
@@ -232,6 +248,7 @@ def train():
     log_to_file(Config, "Training YOLOv8-style head with legacy YOLOv3 anchor loss")
     log_to_file(Config, "=" * 60)
     init_epoch_log_table(Config)
+    tensorboard_writer = create_tensorboard_writer(Config, Config.TEACHER_OUTPUT_DIR, log_to_file) if is_main else None
 
     for epoch in range(Config.EPOCHS):
         last_epoch = epoch
@@ -335,6 +352,15 @@ def train():
         else:
             for key in ("val_total", "precision", "recall", "f1", "map50", "precision_op", "recall_op", "f1_op"):
                 history[key].append(np.nan)
+        if is_main:
+            write_teacher_tensorboard_scalars(
+                tensorboard_writer,
+                epoch + 1,
+                avg_train,
+                val_losses=val_losses,
+                val_metrics=val_metrics,
+                lr=current_lr,
+            )
 
         is_best = False
         if val_metrics is not None and val_metrics["map50"] > best_map50 + Config.TEACHER_EARLY_STOP_MIN_DELTA:
@@ -393,9 +419,6 @@ def train():
             f"peak={avg_train['slm_peak']:.4f} "
             f"edge={avg_train['slm_edge']:.4f}",
         )
-        if is_main:
-            save_training_curves(history, Config.TEACHER_OUTPUT_DIR)
-
         # 每个 epoch 结束后同步所有 rank（唯一 barrier，确保所有 rank 完成本 epoch 的全部工作后再进入下一 epoch）
         if use_ddp:
             torch.distributed.barrier()
@@ -440,6 +463,10 @@ def train():
     log_to_file(Config, f"Final detector model saved to: {model_save_path}")
     log_to_file(Config, f"Teacher output directory: {Config.TEACHER_OUTPUT_DIR}")
     log_to_file(Config, "=" * 60)
+    if is_main:
+        save_training_curves(history, Config.TEACHER_OUTPUT_DIR)
+        if tensorboard_writer is not None:
+            tensorboard_writer.close()
 
     if use_ddp:
         cleanup_distributed()

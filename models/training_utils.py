@@ -94,6 +94,33 @@ def _valid_history_points(values):
     return xs, ys
 
 
+def create_tensorboard_writer(config, output_dir, log_fn=None):
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except Exception as exc:
+        if log_fn is not None:
+            log_fn(config, f"TensorBoard logging disabled: {exc}")
+        return None
+
+    log_dir = os.path.join(output_dir, "tensorboard")
+    writer = SummaryWriter(log_dir)
+    if log_fn is not None:
+        log_fn(config, f"TensorBoard log directory: {log_dir}")
+    return writer
+
+
+def add_tensorboard_scalar(writer, tag, value, step):
+    if writer is None or value is None:
+        return
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return
+    if np.isnan(numeric_value) or np.isinf(numeric_value):
+        return
+    writer.add_scalar(tag, numeric_value, step)
+
+
 def save_training_curves(history, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
