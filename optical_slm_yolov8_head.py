@@ -541,7 +541,11 @@ def train():
                 if stage_weights["feature"] > 0 or stage_weights["response"] > 0:
                     with torch.no_grad():
                         teacher_feature = teacher(rgb)
-                student_feature = student(gray)
+                if stage_name == "detector_focus":
+                    with torch.no_grad():
+                        student_feature = student_raw(gray)
+                else:
+                    student_feature = student(gray)
 
                 zero = torch.zeros((), device=device, dtype=student_feature.dtype)
                 if stage_weights["feature"] > 0:

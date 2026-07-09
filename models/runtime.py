@@ -113,6 +113,7 @@ def wrap_data_parallel(config, module, module_name="module", find_unused_paramet
         module = nn.parallel.DistributedDataParallel(
             module, device_ids=[device.index], output_device=device.index,
             find_unused_parameters=find_unused_parameters,
+            broadcast_buffers=False,
             gradient_as_bucket_view=True,
         )
         world_size = torch.distributed.get_world_size()

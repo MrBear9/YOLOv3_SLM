@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -460,20 +462,70 @@ class SLMLayer(nn.Module):
 
 
 class ASMPropagation(nn.Module):
-    def __init__(self, config, distance, wavelength=None, pixel_size=None, resolution=None):
+    """Angular Spectrum Method (ASM) propagation with band-limited filtering.
+
+    Implements the transfer-function approach:
+        U_out = IFFT{ FFT{U_in} · H }
+        H(fx,fy) = exp(j·2π·z·√(1/λ² − fx² − fy²))
+
+    Improvements over the naive version:
+      1. Matsushima (2009) band-limited filter — correctly suppresses
+         evanescent waves instead of clamping k² to zero.
+      2. Zero-padding to 2× size — converts circular convolution into a
+         linear convolution, eliminating wrap-around artefacts at edges.
+      3. norm='ortho' — energy-preserving FFT convention.
+    """
+
+    def __init__(self, config, distance, wavelength=None, pixel_size=None,
+                 resolution=None, linear_conv=True):
         super().__init__()
+        self._linear_conv = linear_conv
+
         wavelength = config.WAVELENGTH if wavelength is None else wavelength
         pixel_size = config.PIXEL_SIZE if pixel_size is None else pixel_size
         resolution = config.RESOLUTION if resolution is None else resolution
-        fx = torch.fft.fftfreq(resolution[0], pixel_size)
-        fy = torch.fft.fftfreq(resolution[1], pixel_size)
+
+        H, W = resolution
+        dy = dx = pixel_size
+
+        # --- padded resolution for linear convolution ---
+        if linear_conv:
+            H_pad, W_pad = H * 2, W * 2
+        else:
+            H_pad, W_pad = H, W
+
+        # physical field size AFTER padding (matsushima filter uses padded extent)
+        y_len = H_pad * dy
+        x_len = W_pad * dx
+
+        # --- spatial-frequency grids  (FFT order, cycles / m) ---
+        fx = torch.fft.fftfreq(H_pad, dx)
+        fy = torch.fft.fftfreq(W_pad, dy)
         fx_grid, fy_grid = torch.meshgrid(fx, fy, indexing="ij")
-        k2 = 1 / wavelength ** 2 - fx_grid ** 2 - fy_grid ** 2
-        k2 = torch.clamp(k2, min=0)
-        self.register_buffer("H", torch.exp(1j * 2 * np.pi * distance * torch.sqrt(k2)))
+
+        # --- transfer-function exponent (distance-independent) ---
+        k2 = 1.0 / wavelength ** 2 - fx_grid ** 2 - fy_grid ** 2
+
+        # Matsushima 2009 band-limited ASM filter:
+        # maximum spatial frequency that can propagate without aliasing
+        fx_max = 1.0 / math.sqrt((2.0 * distance / x_len) ** 2 + 1.0) / wavelength
+        fy_max = 1.0 / math.sqrt((2.0 * distance / y_len) ** 2 + 1.0) / wavelength
+        H_filter = ((fx_grid.abs() < fx_max) & (fy_grid.abs() < fy_max)).to(k2.dtype)
+
+        # build transfer function: propagate waves inside the band, zero outside
+        k2_pos = torch.clamp(k2, min=0.0)
+        H_prop = torch.exp(1j * 2.0 * np.pi * distance * torch.sqrt(k2_pos))
+        H_prop = H_prop * H_filter          # ← band-limit (not clamp!)
+
+        self.register_buffer("H", H_prop)
 
     def forward(self, field):
-        return torch.fft.ifft2(torch.fft.fft2(field) * self.H)
+        if self._linear_conv:
+            H, W = field.shape[-2], field.shape[-1]
+            field = F.pad(field, [0, W, 0, H])          # zero-pad to 2×
+            out = torch.fft.ifft2(torch.fft.fft2(field, norm="ortho") * self.H, norm="ortho")
+            return out[..., :H, :W]                      # crop back
+        return torch.fft.ifft2(torch.fft.fft2(field, norm="ortho") * self.H, norm="ortho")
 
 
 class OpticalStudent(nn.Module):
