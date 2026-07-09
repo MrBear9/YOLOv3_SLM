@@ -1,5 +1,8 @@
-"""Model package for optical teacher detector experiments.
+"""models - Optical teacher detector training framework."""
 
-Import concrete modules directly, for example:
-    from models.yolov8.config_v8 import ConfigYOLOv8Anchor
-"""
+__version__ = "0.1.0"
+
+
+from .teacher_train_loop import train
+
+__all__ = ["train"]
