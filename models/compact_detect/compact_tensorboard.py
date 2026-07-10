@@ -30,6 +30,7 @@ def write_tensorboard_model_summary(writer, student, detector, sample_shape):
         f"SLM init mode: {getattr(Config, 'SLM_INIT_MODE', 'unknown')}",
         f"Visualization seed: {getattr(Config, 'VIS_SEED', 'unknown')}",
         f"Teacher feature warmup epochs: {getattr(Config, 'COMPACT_TEACHER_WARMUP_EPOCHS', 0)}",
+        f"Teacher feature warmup subset size: {getattr(Config, 'COMPACT_TEACHER_WARMUP_SUBSET_SIZE', 0)}",
         f"Teacher feature warmup raw student: {getattr(Config, 'COMPACT_TEACHER_WARMUP_RAW_STUDENT', True)}",
         "Output tensors: heatmap=(B,C,H/4,W/4), wh=(B,2,H/4,W/4), offset=(B,2,H/4,W/4)",
     ])

@@ -111,7 +111,7 @@ class ConfigSLM:
     # TEACHER_ARCH  (must match teacher-training checkpoint)
     # Options: "convteacher"/"v1", "convteacher_v2"/"v2", "convteacher_v3"/"v3".
     # =========================================================================
-    TEACHER_ARCH = "convteacher_v2"
+    TEACHER_ARCH = "convteacher"
 
     # -------- TEACHER_ARCH = "convteacher" / "v1" --------
     TEACHER_V1_BASE_CHANNELS = 32
@@ -215,8 +215,8 @@ class ConfigSLM:
     LOSS_LOW1_WEIGHT = 0.20
     LOSS_LOW2_WEIGHT = 0.10
     LOSS_SSIM_WEIGHT = 0.30
-    LOSS_GRAD_WEIGHT = 0.25
-    LOSS_FREQ_WEIGHT = 0.05
+    LOSS_GRAD_WEIGHT = 0.35
+    LOSS_FREQ_WEIGHT = 0.25
     LOSS_PEARSON_WEIGHT = 0.40
     LOSS_PHASE_SMOOTH_WEIGHT = 0.000
     LOSS_PHASE_DIVERSITY_WEIGHT = 0.015

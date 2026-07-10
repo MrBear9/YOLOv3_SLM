@@ -11,7 +11,7 @@ from contextlib import nullcontext
 import os
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from models.SLM.dataset_slm import SLMFeatureDataset, slm_collate_fn
@@ -42,6 +42,15 @@ from .config import ConfigCompactDetect as Config
 from .losses import CenterDetectionLoss
 from .metrics import evaluate_center_detector
 from .model import CompactOpticalDetector, OpticalCompactDetector
+
+
+def build_warmup_subset(dataset):
+    subset_size = int(getattr(Config, "COMPACT_TEACHER_WARMUP_SUBSET_SIZE", 0))
+    if subset_size <= 0 or bool(getattr(Config, "SINGLE_IMAGE_TRAINING", False)) or subset_size >= len(dataset):
+        return dataset
+    generator = torch.Generator().manual_seed(int(getattr(Config, "VIS_SEED", 20260709)))
+    indices = torch.randperm(len(dataset), generator=generator)[:subset_size].tolist()
+    return Subset(dataset, indices)
 
 
 def train():
@@ -80,10 +89,13 @@ def train():
 
     train_dataset = SLMFeatureDataset(Config, split="train")
     val_dataset = SLMFeatureDataset(Config, split="val")
+    warmup_dataset = build_warmup_subset(train_dataset) if warmup_epochs > 0 else train_dataset
     train_sampler = None
+    warmup_sampler = None
     val_sampler = None
     if use_ddp:
         from torch.utils.data.distributed import DistributedSampler
+        warmup_sampler = DistributedSampler(warmup_dataset, shuffle=True, drop_last=False)
         train_sampler = DistributedSampler(
             train_dataset,
             shuffle=True,
@@ -99,6 +111,12 @@ def train():
     if Config.NUM_WORKERS > 0:
         loader_kwargs["persistent_workers"] = Config.PERSISTENT_WORKERS
         loader_kwargs["prefetch_factor"] = Config.PREFETCH_FACTOR
+    warmup_loader = DataLoader(
+        warmup_dataset,
+        shuffle=warmup_sampler is None,
+        sampler=warmup_sampler,
+        **loader_kwargs,
+    )
     train_loader = DataLoader(train_dataset, shuffle=train_sampler is None, sampler=train_sampler, **loader_kwargs)
     val_loader = DataLoader(val_dataset, shuffle=False, sampler=val_sampler, **loader_kwargs)
 
@@ -143,6 +161,12 @@ def train():
     detector_params = sum(p.numel() for p in detector_raw.parameters())
     total_params = sum(p.numel() for p in model_for_count.parameters())
     log_to_file(Config, f"Train images: {len(train_dataset)}, val images: {len(val_dataset)}")
+    if warmup_epochs > 0 and len(warmup_dataset) != len(train_dataset):
+        log_to_file(
+            Config,
+            f"Compact teacher warmup subset: {len(warmup_dataset)}/{len(train_dataset)} images "
+            f"(seed={getattr(Config, 'VIS_SEED', 'unknown')})",
+        )
     if bool(getattr(Config, "SINGLE_IMAGE_TRAINING", False)):
         log_to_file(
             Config,
@@ -177,8 +201,10 @@ def train():
     for epoch in range(Config.EPOCHS):
         in_teacher_warmup = epoch < warmup_epochs
         phase_name = "teacher_warmup" if in_teacher_warmup else "compact"
-        if train_sampler is not None:
-            train_sampler.set_epoch(epoch)
+        current_loader = warmup_loader if in_teacher_warmup else train_loader
+        current_sampler = warmup_sampler if in_teacher_warmup else train_sampler
+        if current_sampler is not None:
+            current_sampler.set_epoch(epoch)
         student.train(bool(Config.COMPACT_TRAIN_STUDENT))
         detector.train(not in_teacher_warmup)
         set_trainable(detector, not in_teacher_warmup)
@@ -190,7 +216,7 @@ def train():
         )
         epoch_stats_t = {key: torch.zeros((), device=device) for key in stat_keys}
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{Config.EPOCHS} [{phase_name}]", leave=True, disable=not is_main):
+        for batch in tqdm(current_loader, desc=f"Epoch {epoch + 1}/{Config.EPOCHS} [{phase_name}]", leave=True, disable=not is_main):
             images = batch["gray_tensor"].to(device, non_blocking=Config.PIN_MEMORY)
             optimizer.zero_grad(set_to_none=True)
             if in_teacher_warmup:
@@ -228,7 +254,7 @@ def train():
                 epoch_stats_t[key] += torch.as_tensor(stats.get(key, 0.0), device=device)
 
         scheduler.step()
-        batch_count_t = torch.tensor(float(max(len(train_loader), 1)), device=device)
+        batch_count_t = torch.tensor(float(max(len(current_loader), 1)), device=device)
         if dist.is_initialized():
             dist.all_reduce(epoch_loss_t, op=dist.ReduceOp.SUM)
             dist.all_reduce(batch_count_t, op=dist.ReduceOp.SUM)
