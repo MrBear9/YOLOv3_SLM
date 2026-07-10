@@ -41,6 +41,14 @@ def normalize_feature_map(feature):
     return ((feature - flat_min) / (flat_max - flat_min + 1e-6)).clamp(0, 1)
 
 
+def feature_to_gray_batch(feature):
+    if feature.dim() == 3:
+        feature = feature.unsqueeze(1)
+    if feature.size(1) > 1:
+        feature = feature.mean(dim=1, keepdim=True)
+    return normalize_feature_map(feature)
+
+
 def phase_to_tensorboard_image(phase):
     phase = phase.detach().float().cpu()
     phase = torch.remainder(phase, 2 * np.pi)
@@ -72,6 +80,26 @@ def forward_student_with_norm(student, images, enable_norm):
         return student(images)
     finally:
         student_module.enable_norm = previous
+
+
+@torch.no_grad()
+def add_tensorboard_teacher_feature(writer, step, dataset, teacher, device, max_images=None):
+    if writer is None or dataset is None or teacher is None or len(dataset) == 0:
+        return
+    if max_images is None:
+        max_images = int(getattr(Config, "VIS_MAX_IMAGES", 4))
+    was_training = teacher.training
+    teacher.eval()
+    sample_indices = select_visualization_indices(len(dataset), max_images)
+    items = [dataset[idx] for idx in sample_indices]
+    teacher_inputs = torch.stack([item["rgb_tensor"] for item in items], dim=0).to(device, non_blocking=Config.PIN_MEMORY)
+    fp32_ctx = torch.amp.autocast(device_type="cuda", enabled=False) if device.type == "cuda" else nullcontext()
+    with fp32_ctx:
+        teacher_feature = teacher(teacher_inputs.float())
+    teacher_grid = torch.cat([feature for feature in feature_to_gray_batch(teacher_feature)], dim=2)
+    writer.add_image("Visualization/teacher_feature_gray", teacher_grid, step)
+    writer.flush()
+    teacher.train(was_training)
 
 
 @torch.no_grad()
@@ -122,9 +150,6 @@ def add_tensorboard_visualization(writer, step, dataset, student, detector, devi
         rendered.append(torch.from_numpy(np.asarray(canvas).copy()).permute(2, 0, 1).float() / 255.0)
     grid = torch.cat(rendered, dim=2)
     writer.add_image("Visualization/val_gt_green_pred_red", grid, step)
-
-    input_grid = torch.cat([item["gray_tensor"].detach().cpu().clamp(0, 1) for item in items], dim=2)
-    writer.add_image("Visualization/input_gray", input_grid, step)
 
     optical_gray_grid = torch.cat([f for f in normalize_feature_map(raw_optical_features)], dim=2)
     writer.add_image("Visualization/optical_modulated_output_gray", optical_gray_grid, step)

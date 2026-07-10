@@ -37,7 +37,7 @@ from .compact_utils import (
     load_teacher_feature_checkpoint,
     save_checkpoint,
 )
-from .compact_vis import add_tensorboard_visualization, save_compact_visualization_png
+from .compact_vis import add_tensorboard_teacher_feature, add_tensorboard_visualization, save_compact_visualization_png
 from .config import ConfigCompactDetect as Config
 from .losses import CenterDetectionLoss
 from .metrics import evaluate_center_detector
@@ -84,7 +84,11 @@ def train():
     val_sampler = None
     if use_ddp:
         from torch.utils.data.distributed import DistributedSampler
-        train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=True)
+        train_sampler = DistributedSampler(
+            train_dataset,
+            shuffle=True,
+            drop_last=not bool(getattr(Config, "SINGLE_IMAGE_TRAINING", False)),
+        )
         val_sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=False)
     loader_kwargs = {
         "batch_size": Config.BATCH_SIZE,
@@ -139,6 +143,12 @@ def train():
     detector_params = sum(p.numel() for p in detector_raw.parameters())
     total_params = sum(p.numel() for p in model_for_count.parameters())
     log_to_file(Config, f"Train images: {len(train_dataset)}, val images: {len(val_dataset)}")
+    if bool(getattr(Config, "SINGLE_IMAGE_TRAINING", False)):
+        log_to_file(
+            Config,
+            f"Compact single-image training enabled: image={Config.SINGLE_IMAGE_PATH}, "
+            f"label={Config.SINGLE_IMAGE_LABEL_PATH or 'auto'}, train_repeat={Config.SINGLE_IMAGE_REPEAT}",
+        )
     log_to_file(Config, f"Compact detector parameters: {detector_params:,}")
     log_to_file(Config, f"Student parameters: {student_params:,}, combined train route: {total_params:,}")
 
@@ -148,6 +158,7 @@ def train():
     tensorboard_writer = create_tensorboard_writer(Config, Config.OUTPUT_DIR, log_to_file) if is_main else None
     if is_main:
         write_tensorboard_model_summary(tensorboard_writer, student_raw, detector_raw, (1, 1, Config.IMG_SIZE, Config.IMG_SIZE))
+        add_tensorboard_teacher_feature(tensorboard_writer, 0, val_dataset, teacher, device)
         add_tensorboard_visualization(tensorboard_writer, 0, val_dataset, student, detector, device)
         save_compact_visualization_png(0, val_dataset, student, detector, device)
     if dist.is_initialized():

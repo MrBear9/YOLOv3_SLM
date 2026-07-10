@@ -70,13 +70,18 @@ class ConfigCompactDetect(ConfigSLM):
     VAL_INTERVAL = 1
     VIS_SEED = 20260709
     VIS_INTERVAL = 1
-    VIS_MAX_IMAGES = 4
+    VIS_MAX_IMAGES = 2
     VIS_FILE_INTERVAL = 10
     VIS_FILE_MAX_IMAGES = 3
     SAVE_INTERVAL = 20
     ENABLE_AMP = True
     AMP_DTYPE = "float16"
     ENABLE_CHANNELS_LAST = False
+
+    SINGLE_IMAGE_TRAINING = False
+    SINGLE_IMAGE_PATH = r"data\military\test\images\train_025317.jpg"
+    SINGLE_IMAGE_LABEL_PATH = r"data\military\test\labels\train_025317.txt"
+    SINGLE_IMAGE_REPEAT = 1000
 
     EPOCH_TABLE_EPOCH_WIDTH = 8
     EPOCH_TABLE_PHASE_WIDTH = 14
@@ -113,6 +118,9 @@ class ConfigCompactDetect(ConfigSLM):
             "OPTICAL_COMPACT_VIS_MAX_IMAGES": ("VIS_MAX_IMAGES", int),
             "OPTICAL_COMPACT_VIS_FILE_INTERVAL": ("VIS_FILE_INTERVAL", int),
             "OPTICAL_COMPACT_VIS_FILE_MAX_IMAGES": ("VIS_FILE_MAX_IMAGES", int),
+            "OPTICAL_COMPACT_SINGLE_IMAGE_PATH": ("SINGLE_IMAGE_PATH", str),
+            "OPTICAL_COMPACT_SINGLE_IMAGE_LABEL_PATH": ("SINGLE_IMAGE_LABEL_PATH", str),
+            "OPTICAL_COMPACT_SINGLE_IMAGE_REPEAT": ("SINGLE_IMAGE_REPEAT", int),
         }
         for env_name, (attr, caster) in overrides.items():
             value = os.environ.get(env_name)
@@ -124,6 +132,9 @@ class ConfigCompactDetect(ConfigSLM):
         warmup_raw = os.environ.get("OPTICAL_COMPACT_TEACHER_WARMUP_RAW_STUDENT")
         if warmup_raw:
             cls.COMPACT_TEACHER_WARMUP_RAW_STUDENT = warmup_raw.strip().lower() in {"1", "true", "yes", "on"}
+        single_image = os.environ.get("OPTICAL_COMPACT_SINGLE_IMAGE_TRAINING")
+        if single_image:
+            cls.SINGLE_IMAGE_TRAINING = single_image.strip().lower() in {"1", "true", "yes", "on"}
 
     @classmethod
     def initialize(cls):
@@ -133,6 +144,8 @@ class ConfigCompactDetect(ConfigSLM):
         cls.TEACHER_DETECTOR_CHECKPOINT = resolve_project_path(cls.TEACHER_DETECTOR_CHECKPOINT)
         cls.SLM_INIT_CHECKPOINT = resolve_project_path(cls.SLM_INIT_CHECKPOINT)
         cls.COMPACT_PRETRAINED_STUDENT = resolve_project_path(cls.COMPACT_PRETRAINED_STUDENT)
+        cls.SINGLE_IMAGE_PATH = resolve_project_path(cls.SINGLE_IMAGE_PATH)
+        cls.SINGLE_IMAGE_LABEL_PATH = resolve_project_path(cls.SINGLE_IMAGE_LABEL_PATH)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
         os.makedirs(cls.OUTPUT_DIR, exist_ok=True)
         cls.LOG_ROOT_DIR = os.path.join(cls.OUTPUT_DIR, "logs")

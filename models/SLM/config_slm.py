@@ -57,16 +57,16 @@ class ConfigSLM:
     # "multiscale_mlp": Plan A+C — multi-scale pyramid + neural-field MLP
     SLM_PHASE_PARAM_MODE = "multiscale_mlp"
     # Plan A — multi-scale pyramid levels (80→160→320 for 640 resolution)
-    SLM_PHASE_NUM_SCALES = 3
+    SLM_PHASE_NUM_SCALES = 5
     # Plan B — overlapping block-wise learning (replaces the finest scale)
     SLM_PHASE_USE_BLOCKWISE = True
-    SLM_PHASE_BLOCK_GRID = 5       # 5×5 = 25 blocks (set 1 to disable)
-    SLM_PHASE_BLOCK_OVERLAP = 20   # overlap pixels for boundary blending
-    SLM_PHASE_BLOCK_INNER_SCALES = 2  # mini-pyramid layers inside each block (1 = single scale)
+    SLM_PHASE_BLOCK_GRID = 6       # 6×6 = 36 blocks (set 1 to disable)
+    SLM_PHASE_BLOCK_OVERLAP = 8   # overlap pixels for boundary blending
+    SLM_PHASE_BLOCK_INNER_SCALES = 3  # mini-pyramid layers inside each block (1 = single scale)
     # Plan C — coordinate MLP architecture
-    SLM_PHASE_MLP_HIDDEN = 64
-    SLM_PHASE_MLP_NUM_FREQS = 6
-    SLM_PHASE_MLP_LAYERS = 3
+    SLM_PHASE_MLP_HIDDEN = 32
+    SLM_PHASE_MLP_NUM_FREQS = 10
+    SLM_PHASE_MLP_LAYERS = 2
 
     # -------- Student normalization --------
     ENABLE_STUDENT_NORM = True
@@ -83,7 +83,7 @@ class ConfigSLM:
     # vortex_checkpoint, dh_psf_checkpoint/double_helix_checkpoint.
     # "zero": flat phase (tiny noise), no range bias — lets the phase learn
     #   freely in early stages before diversity constraints ramp up.
-    SLM_INIT_MODE = "zero"
+    SLM_INIT_MODE = "vortex"
     SLM_INIT_NOISE_STD = 0.02
     SLM_INIT_CHECKPOINT = r"output/OpticalSLM_YOLOv8Head_student/optical_student_best.pth"
     SLM_VORTEX_CHARGE_1 = 1.0
@@ -218,8 +218,8 @@ class ConfigSLM:
     LOSS_GRAD_WEIGHT = 0.25
     LOSS_FREQ_WEIGHT = 0.05
     LOSS_PEARSON_WEIGHT = 0.40
-    LOSS_PHASE_SMOOTH_WEIGHT = 0.3
-    LOSS_PHASE_DIVERSITY_WEIGHT = 0.15
+    LOSS_PHASE_SMOOTH_WEIGHT = 0.000
+    LOSS_PHASE_DIVERSITY_WEIGHT = 0.015
     PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.003
     PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS = 0.03
     PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS = 0.0
@@ -318,7 +318,7 @@ class ConfigSLM:
     VIS_DPI = 130
     # Options: "val", "train".
     VIS_DATASET_SPLIT = "val"
-    VIS_SEED = 20260504
+    VIS_SEED = 20260710
     VIS_CONF_THRESH = 0.5
     VIS_NMS_THRESH = 0.35
     VIS_MAX_DET = 5

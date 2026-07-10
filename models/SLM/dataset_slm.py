@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import torch
 from PIL import Image
@@ -10,11 +11,54 @@ import yaml
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def resolve_data_path(path):
+    if not path or os.path.isabs(path):
+        return path
+    return os.path.join(PROJECT_ROOT, path)
+
+
+def infer_label_path(image_path):
+    image_path = Path(image_path)
+    label_name = image_path.with_suffix(".txt").name
+    candidates = []
+    parent_parts = list(image_path.parent.parts)
+    for idx in range(len(parent_parts) - 1, -1, -1):
+        if parent_parts[idx].lower() == "images":
+            candidates.append(Path(*parent_parts[:idx], "labels", *parent_parts[idx + 1:]) / label_name)
+            break
+    if image_path.parent.name.lower() == "images":
+        candidates.append(image_path.parent.parent / "labels" / label_name)
+    candidates.append(image_path.with_suffix(".txt"))
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return str(candidates[0])
+
+
 class SLMFeatureDataset(Dataset):
     def __init__(self, config, split="train"):
         self.config = config
         with open(config.YAML_PATH, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
+        if bool(getattr(config, "SINGLE_IMAGE_TRAINING", False)):
+            image_path = resolve_data_path(getattr(config, "SINGLE_IMAGE_PATH", ""))
+            if not image_path:
+                raise ValueError("SINGLE_IMAGE_TRAINING is enabled, but SINGLE_IMAGE_PATH is empty.")
+            if not os.path.isfile(image_path):
+                raise FileNotFoundError(f"Single-image training file not found: {image_path}")
+            label_path = resolve_data_path(getattr(config, "SINGLE_IMAGE_LABEL_PATH", ""))
+            if not label_path:
+                label_path = infer_label_path(image_path)
+            repeat = max(int(getattr(config, "SINGLE_IMAGE_REPEAT", 1)), 1) if split == "train" else 1
+            self.entries = [
+                {
+                    "image_path": image_path,
+                    "label_path": label_path,
+                }
+                for _ in range(repeat)
+            ]
+            self.transform = transforms.Compose([transforms.Resize((config.IMG_SIZE, config.IMG_SIZE)), transforms.Grayscale(1), transforms.ToTensor()])
+            return
         root = cfg.get("path", ".")
         if not os.path.isabs(root):
             root = os.path.join(PROJECT_ROOT, root)
