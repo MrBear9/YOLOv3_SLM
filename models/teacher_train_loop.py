@@ -53,6 +53,54 @@ from models.yolov8.visualization_anchor_v8 import save_detection_visualization_a
 warnings.filterwarnings("ignore", message="Grad strides do not match bucket view strides")
 
 
+def _module_param_count(module, trainable_only=False):
+    params = module.parameters()
+    if trainable_only:
+        params = (p for p in params if p.requires_grad)
+    return sum(p.numel() for p in params)
+
+
+def _write_teacher_tensorboard_model_summary(writer, model):
+    if writer is None:
+        return
+    model_core = unwrap_module(model)
+    teacher = model_core.teacher
+    detector = model_core.detector
+    teacher_lines = [f"- teacher.{name}: {_module_param_count(child):,}" for name, child in teacher.named_children()]
+    detector_lines = [f"- detector.{name}: {_module_param_count(child):,}" for name, child in detector.named_children()]
+    flow_text = "\n".join([
+        "Teacher detection training route",
+        "",
+        "RGB image -> Teacher -> teacher feature -> detector",
+        "",
+        "Training output:",
+        "teacher feature plus YOLOv8-style detector predictions",
+        "",
+        f"Teacher architecture: {Config.TEACHER_ARCH}",
+        f"Detector head type: {Config.DETECTOR_HEAD_TYPE}",
+        f"Input tensor: (B, 3, {Config.IMG_SIZE}, {Config.IMG_SIZE})",
+        f"Detection strides: {Config.STRIDES}",
+        f"AMP enabled: {Config.ENABLE_AMP}",
+        f"Feature distillation enabled: {getattr(Config, 'ENABLE_FEATURE_DISTILL', False)}",
+    ])
+    param_text = "\n".join([
+        f"TeacherWithDetector parameters: {_module_param_count(model_core):,}",
+        f"Teacher parameters: {_module_param_count(teacher):,}",
+        f"Detector parameters: {_module_param_count(detector):,}",
+        "",
+        f"Teacher trainable parameters now: {_module_param_count(teacher, trainable_only=True):,}",
+        f"Detector trainable parameters now: {_module_param_count(detector, trainable_only=True):,}",
+        "",
+        "Teacher module parameters:",
+        *teacher_lines,
+        "",
+        "Detector module parameters:",
+        *detector_lines,
+    ])
+    writer.add_text("Model/data_flow", flow_text, 0)
+    writer.add_text("Model/parameters", param_text, 0)
+
+
 def train():
     local_rank, use_ddp = init_distributed_mode(Config)
     is_main = local_rank == 0
@@ -157,6 +205,8 @@ def train():
     log_to_file(Config, "=" * 60)
     init_epoch_log_table(Config)
     tensorboard_writer = create_tensorboard_writer(Config, Config.TEACHER_OUTPUT_DIR, log_to_file) if is_main else None
+    if is_main:
+        _write_teacher_tensorboard_model_summary(tensorboard_writer, model)
 
     for epoch in range(Config.EPOCHS):
         last_epoch = epoch
