@@ -59,7 +59,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/Tv1_light_branch"
+    TEACHER_OUTPUT_DIR = r"output/Tv1_light"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -121,7 +121,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # DETECTOR_HEAD_TYPE = "light" | "yolov8_anchor"
     # =========================================================================
-    DETECTOR_HEAD_TYPE = "light_branch"
+    DETECTOR_HEAD_TYPE = "light"
 
     # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
     YOLOV8_BASE_CHANNELS = 32
@@ -147,10 +147,8 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Anchor assignment
     # =========================================================================
-    # Options: "auto", "ratio", "yolo7_simota".
-    # "auto" keeps ratio matching for legacy heads and enables YOLOv7-style
-    # SimOTA matching for DETECTOR_HEAD_TYPE="light".
-    ANCHOR_MATCH_MODE = "auto"
+    # Choose explicitly between "ratio" and "yolo7_simota" before training.
+    ANCHOR_MATCH_MODE = "yolo7_simota"
     ANCHOR_MATCH_RATIO_THRESH = 3.5   # ratio-based (max w/h ratio)
     ASSIGN_NEIGHBOR_CELLS = True       # extra grid cells near boundaries
     NOOBJ_IGNORE_IOU = 0.68
@@ -211,12 +209,6 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Teacher ciphertext regularization
     # =========================================================================
-    TEACHER_CIPHER_LOSS_WEIGHT = 0.0
-    TEACHER_CIPHER_CORR_TARGET = 0.18
-    TEACHER_CIPHER_SSIM_TARGET = 0.24
-    TEACHER_CIPHER_STRUCTURE_WEIGHT = 0.25
-    TEACHER_CIPHER_STD_FLOOR = 0.08
-    TEACHER_CIPHER_GRAD_FLOOR = 0.015
     TEACHER_SLM_CIPHER_LOSS_WEIGHT = 0.10
     TEACHER_SLM_CIPHER_BLUR_KERNEL = 15
     TEACHER_SLM_CIPHER_TV_TARGET = 0.026
@@ -357,12 +349,6 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_EPOCHS": ("EPOCHS", int),
             "OPTICAL_TEACHER_EARLY_STOP_PATIENCE": ("TEACHER_EARLY_STOP_PATIENCE", int),
             "OPTICAL_TEACHER_EARLY_STOP_MIN_DELTA": ("TEACHER_EARLY_STOP_MIN_DELTA", float),
-            "OPTICAL_TEACHER_CIPHER_LOSS_WEIGHT": ("TEACHER_CIPHER_LOSS_WEIGHT", float),
-            "OPTICAL_TEACHER_CIPHER_CORR_TARGET": ("TEACHER_CIPHER_CORR_TARGET", float),
-            "OPTICAL_TEACHER_CIPHER_SSIM_TARGET": ("TEACHER_CIPHER_SSIM_TARGET", float),
-            "OPTICAL_TEACHER_CIPHER_STRUCTURE_WEIGHT": ("TEACHER_CIPHER_STRUCTURE_WEIGHT", float),
-            "OPTICAL_TEACHER_CIPHER_STD_FLOOR": ("TEACHER_CIPHER_STD_FLOOR", float),
-            "OPTICAL_TEACHER_CIPHER_GRAD_FLOOR": ("TEACHER_CIPHER_GRAD_FLOOR", float),
             "OPTICAL_TEACHER_SLM_CIPHER_LOSS_WEIGHT": ("TEACHER_SLM_CIPHER_LOSS_WEIGHT", float),
             "OPTICAL_TEACHER_SLM_CIPHER_BLUR_KERNEL": ("TEACHER_SLM_CIPHER_BLUR_KERNEL", int),
             "OPTICAL_TEACHER_SLM_CIPHER_TV_TARGET": ("TEACHER_SLM_CIPHER_TV_TARGET", float),

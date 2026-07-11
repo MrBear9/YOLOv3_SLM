@@ -79,13 +79,6 @@ def log_all_parameters():
     log_to_file(Config, f"AMP: enabled={Config.ENABLE_AMP}, dtype={Config.AMP_DTYPE}")
     log_to_file(
         Config,
-        f"Teacher cipher loss: weight={Config.TEACHER_CIPHER_LOSS_WEIGHT}, "
-        f"corr_target={Config.TEACHER_CIPHER_CORR_TARGET}, "
-        f"ssim_target={Config.TEACHER_CIPHER_SSIM_TARGET}, "
-        f"structure_weight={Config.TEACHER_CIPHER_STRUCTURE_WEIGHT}",
-    )
-    log_to_file(
-        Config,
         f"Teacher SLM-cipher loss: weight={Config.TEACHER_SLM_CIPHER_LOSS_WEIGHT}, "
         f"blur_kernel={Config.TEACHER_SLM_CIPHER_BLUR_KERNEL}, "
         f"tv_target={Config.TEACHER_SLM_CIPHER_TV_TARGET}, "

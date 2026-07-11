@@ -32,7 +32,6 @@ from models.runtime import (
 from models.teacher import build_teacher
 from models.teacher_guidance import (
     build_feature_distillation_loss,
-    teacher_cipher_loss,
     teacher_slm_cipher_loss,
 )
 from models.teacher_logging import bootstrap_runtime, log_all_parameters, write_teacher_tensorboard_scalars
@@ -219,7 +218,6 @@ def train():
             "obj": 0.0,
             "noobj": 0.0,
             "cls": 0.0,
-            "cipher": 0.0,
             "slm_cipher": 0.0,
             "slm_tv": 0.0,
             "slm_hf": 0.0,
@@ -241,14 +239,13 @@ def train():
             batch_images, batch_targets = prepare_batch(Config, batch, device)
             optimizer.zero_grad()
             use_distill = enable_distill and distill_loss_fn is not None
-            use_cipher = Config.TEACHER_CIPHER_LOSS_WEIGHT > 0
             use_slm_cipher = Config.TEACHER_SLM_CIPHER_LOSS_WEIGHT > 0
             with amp_context():
                 if use_distill:
                     teacher_features, predictions, teacher_aux, det_features = model(
                         batch_images, return_feature=True, return_teacher_aux=True, return_det_features=True
                     )
-                elif is_v3 or use_cipher or use_slm_cipher:
+                elif is_v3 or use_slm_cipher:
                     teacher_features, predictions, teacher_aux = model(
                         batch_images, return_feature=True, return_teacher_aux=True
                     )
@@ -261,11 +258,6 @@ def train():
                 if use_distill:
                     distill_loss, _ = distill_loss_fn(teacher_aux, det_features)
                     loss = loss + distill_loss * Config.FEATURE_DISTILL_WEIGHT
-
-                if use_cipher:
-                    cipher_loss, cipher_stats = teacher_cipher_loss(Config, teacher_aux)
-                    loss = loss + cipher_loss
-                    train_component_sums["cipher"] += cipher_stats["cipher"]
 
                 if use_slm_cipher:
                     slm_cipher_loss, slm_cipher_stats = teacher_slm_cipher_loss(Config, teacher_aux)
@@ -371,7 +363,7 @@ def train():
         log_to_file(
             Config,
             f"Epoch {epoch + 1:03d} [{phase}] components "
-            f"cipher={avg_train['cipher']:.4f} slm_cipher={avg_train['slm_cipher']:.4f} "
+            f"slm_cipher={avg_train['slm_cipher']:.4f} "
             f"tv={avg_train['slm_tv']:.4f} hf={avg_train['slm_hf']:.4f} "
             f"range={avg_train['slm_range']:.4f} mean={avg_train['slm_mean']:.4f} "
             f"peak={avg_train['slm_peak']:.4f} "

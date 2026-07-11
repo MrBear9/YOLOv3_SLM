@@ -86,13 +86,12 @@ class YOLOv3AnchorLossForV8Head(nn.Module):
         return weights["phase"]
 
     def _resolve_anchor_match_mode(self):
-        mode = str(getattr(self.config, "ANCHOR_MATCH_MODE", "auto")).strip().lower()
-        head_type = str(getattr(self.config, "DETECTOR_HEAD_TYPE", "")).strip().lower()
-        if mode in {"auto", "default", ""}:
-            return "yolo7_simota" if head_type in {"light", "yolo_light"} else "ratio"
-        if mode in {"simota", "yolo7", "yolo7_simota", "neighbor_simota", "ota"}:
-            return "yolo7_simota"
-        return "ratio"
+        mode = str(getattr(self.config, "ANCHOR_MATCH_MODE", "ratio")).strip().lower()
+        if mode not in {"ratio", "yolo7_simota"}:
+            raise ValueError(
+                f"Unsupported ANCHOR_MATCH_MODE={mode!r}; choose 'ratio' or 'yolo7_simota'."
+            )
+        return mode
 
     def _get_size_weight(self, width, height):
         area = float(width * height)

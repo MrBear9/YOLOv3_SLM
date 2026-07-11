@@ -49,45 +49,6 @@ def _neighbor_total_variation(x):
     return 0.5 * (grad_x + grad_y)
 
 
-def teacher_cipher_loss(config, teacher_aux):
-    weight = float(getattr(config, "TEACHER_CIPHER_LOSS_WEIGHT", 0.0))
-    if weight <= 0 or teacher_aux is None:
-        device = teacher_aux["det_feature"].device if teacher_aux is not None else "cpu"
-        zero = torch.zeros((), device=device)
-        return zero, {"cipher": 0.0, "cipher_corr": 0.0, "cipher_ssim": 0.0, "cipher_std": 0.0, "cipher_grad": 0.0}
-
-    eps = float(getattr(config, "OPTICAL_FIELD_EPS", 1e-8))
-    norm_eps = float(getattr(config, "OPTICAL_NORM_EPS", 1e-6))
-    feature = teacher_aux["det_feature"].float()
-    gray = teacher_aux["gray"].float().clamp(min=0)
-    feature_view = _max_normalize(feature, norm_eps)
-    gray_view = _max_normalize(gray, norm_eps)
-
-    corr_abs = _pearson_abs(feature_view, gray_view, eps)
-    ssim_sim = _ssim_similarity(feature_view, gray_view, eps)
-    corr_target = float(getattr(config, "TEACHER_CIPHER_CORR_TARGET", 0.18))
-    ssim_target = float(getattr(config, "TEACHER_CIPHER_SSIM_TARGET", 0.24))
-    privacy_raw = F.relu(corr_abs - corr_target) + F.relu(ssim_sim - ssim_target)
-
-    feat_std = feature_view.std(dim=(2, 3), unbiased=False).mean()
-    grad_x = (feature_view[:, :, :, 1:] - feature_view[:, :, :, :-1]).abs().mean()
-    grad_y = (feature_view[:, :, 1:, :] - feature_view[:, :, :-1, :]).abs().mean()
-    grad_mean = 0.5 * (grad_x + grad_y)
-    std_floor = float(getattr(config, "TEACHER_CIPHER_STD_FLOOR", 0.08))
-    grad_floor = float(getattr(config, "TEACHER_CIPHER_GRAD_FLOOR", 0.015))
-    structure_weight = float(getattr(config, "TEACHER_CIPHER_STRUCTURE_WEIGHT", 0.25))
-    structure_raw = F.relu(std_floor - feat_std) + F.relu(grad_floor - grad_mean)
-
-    raw = privacy_raw + structure_weight * structure_raw
-    return raw * weight, {
-        "cipher": float(raw.detach().item()),
-        "cipher_corr": float(corr_abs.detach().item()),
-        "cipher_ssim": float(ssim_sim.detach().item()),
-        "cipher_std": float(feat_std.detach().item()),
-        "cipher_grad": float(grad_mean.detach().item()),
-    }
-
-
 def teacher_slm_cipher_loss(config, teacher_aux):
     weight = float(getattr(config, "TEACHER_SLM_CIPHER_LOSS_WEIGHT", 0.0))
     if weight <= 0 or teacher_aux is None:
@@ -227,9 +188,6 @@ def build_feature_distillation_loss(config):
     # Detector feature channels  {s8, s16, s32}
     head_type = str(getattr(config, "DETECTOR_HEAD_TYPE", "yolov8_anchor")).strip().lower()
     if head_type in {"light", "yolo_light"}:
-        lc = int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
-        detector_chs = (lc * 8, lc * 8, lc * 8)
-    elif head_type in {"light_branch", "branch_light", "yolo_light_branch"}:
         lc = int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
         detector_chs = (lc * 8, lc * 8, lc * 8)
     else:

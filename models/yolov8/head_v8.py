@@ -12,7 +12,6 @@ from models.teacher import build_teacher
 
 from .detection_heads import (
     EnhancedYOLOv8AnchorHead,
-    YOLOBranchLightHead,
     YOLOLightHead,
     YOLOv8AnchorHead,
 )
@@ -25,13 +24,9 @@ def build_detector_head(config, in_channels=1, out_channels=None):
       - "yolov8_anchor" (default): EnhancedYOLOv8AnchorHead with ECA + deeper branches
       - "yolov8_anchor_legacy": original YOLOv8AnchorHead (kept for comparison)
       - "light" / "yolo_light": YOLOLightHead
-      - "light_branch" / "branch_light" / "yolo_light_branch": YOLOBranchLightHead
     """
     head_type = str(getattr(config, "DETECTOR_HEAD_TYPE", "yolov8_anchor")).strip().lower()
     out_channels = config.get_detector_output_channels() if out_channels is None else out_channels
-    if head_type in {"light_branch", "branch_light", "yolo_light_branch"}:
-        base_ch = int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
-        return YOLOBranchLightHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch)
     if head_type in {"light", "yolo_light"}:
         base_ch = int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
         return YOLOLightHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch)
@@ -39,8 +34,12 @@ def build_detector_head(config, in_channels=1, out_channels=None):
     c2f_blocks = int(getattr(config, "YOLOV8_C2F_BLOCKS", 3))
     if head_type in {"yolov8_anchor_legacy", "legacy"}:
         return YOLOv8AnchorHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch, c2f_blocks=c2f_blocks)
-    # Default: enhanced anchor head with ECA attention + deeper detection branches
-    return EnhancedYOLOv8AnchorHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch, c2f_blocks=c2f_blocks)
+    if head_type in {"yolov8_anchor", "enhanced"}:
+        return EnhancedYOLOv8AnchorHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch, c2f_blocks=c2f_blocks)
+    raise ValueError(
+        f"Unsupported DETECTOR_HEAD_TYPE={head_type!r}; choose 'light', "
+        "'yolov8_anchor', or 'yolov8_anchor_legacy'."
+    )
 
 
 class TeacherWithDetector(nn.Module):

@@ -14,14 +14,14 @@ class ConfigSLM:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    OUTPUT_DIR = r"output/SLM_Tv1_light_branch"
+    OUTPUT_DIR = r"output/SLM_Tv1_light"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light_branch/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -130,7 +130,7 @@ class ConfigSLM:
 
     # =========================================================================
     # DETECTOR_HEAD_TYPE  (must match teacher-training checkpoint)
-    # Options: "light_branch", "light", "yolov8_anchor".
+    # Options: "light", "yolov8_anchor".
     # =========================================================================
     DETECTOR_HEAD_TYPE = "light"
 
@@ -157,10 +157,8 @@ class ConfigSLM:
     # =========================================================================
     # Anchor assignment
     # =========================================================================
-    # Options: "auto", "ratio", "yolo7_simota".
-    # "auto" keeps ratio matching for legacy heads and enables YOLOv7-style
-    # SimOTA matching for DETECTOR_HEAD_TYPE="light".
-    ANCHOR_MATCH_MODE = "auto"
+    # Choose explicitly between "ratio" and "yolo7_simota" before training.
+    ANCHOR_MATCH_MODE = "yolo7_simota"
     ANCHOR_MATCH_RATIO_THRESH = 3.5
     ASSIGN_NEIGHBOR_CELLS = True
     NOOBJ_IGNORE_IOU = 0.68
