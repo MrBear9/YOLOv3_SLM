@@ -75,8 +75,8 @@ class ConfigYOLOv8Anchor:
     BATCH_SIZE = 16
     STRIDES = [8, 16, 32]
 
-    STAGE1_LOCATE_EPOCHS = 60
-    STAGE2_TEXTURE_EPOCHS = 80
+    STAGE1_LOCATE_EPOCHS = 40
+    STAGE2_TEXTURE_EPOCHS = 20
     STAGE3_BALANCE_EPOCHS = 200
     EPOCHS = STAGE1_LOCATE_EPOCHS + STAGE2_TEXTURE_EPOCHS + STAGE3_BALANCE_EPOCHS
 
@@ -130,6 +130,7 @@ class ConfigYOLOv8Anchor:
     # -------- DETECTOR_HEAD_TYPE = "light" --------
     YOLO_LIGHT_BASE_CH = 16
     DETECTOR_USE_COORDCONV = True
+    DETECTOR_INVERT_FEATURE = True   # invert teacher feature (dark→bright) before detector
 
     # =========================================================================
     # Anchors
@@ -338,6 +339,7 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_V3_GATE_SPARSITY_WEIGHT": ("TEACHER_V3_GATE_SPARSITY_WEIGHT", float),
             "OPTICAL_TEACHER_V3_RESIDUAL_L1_WEIGHT": ("TEACHER_V3_RESIDUAL_L1_WEIGHT", float),
             "OPTICAL_TEACHER_V3_OUTPUT_DEVIATION_WEIGHT": ("TEACHER_V3_OUTPUT_DEVIATION_WEIGHT", float),
+            "OPTICAL_DETECTOR_INVERT_FEATURE": ("DETECTOR_INVERT_FEATURE", bool),
             "OPTICAL_TEACHER_ANCHOR_MATCH_MODE": ("ANCHOR_MATCH_MODE", str),
             "OPTICAL_TEACHER_ANCHOR_MATCH_IOU_THRESH": ("ANCHOR_MATCH_IOU_THRESH", float),
             "OPTICAL_TEACHER_CENTER_PRIOR_RADIUS": ("CENTER_PRIOR_RADIUS", float),

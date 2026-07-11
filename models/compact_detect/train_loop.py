@@ -46,11 +46,23 @@ from .model import CompactOpticalDetector, OpticalCompactDetector
 
 def build_warmup_subset(dataset):
     subset_size = int(getattr(Config, "COMPACT_TEACHER_WARMUP_SUBSET_SIZE", 0))
-    if subset_size <= 0 or bool(getattr(Config, "SINGLE_IMAGE_TRAINING", False)) or subset_size >= len(dataset):
+    if subset_size <= 0 or bool(getattr(Config, "SINGLE_IMAGE_TRAINING", False)):
         return dataset
-    generator = torch.Generator().manual_seed(int(getattr(Config, "VIS_SEED", 20260709)))
-    indices = torch.randperm(len(dataset), generator=generator)[:subset_size].tolist()
-    return Subset(dataset, indices)
+    repeat = max(int(getattr(Config, "COMPACT_TEACHER_WARMUP_SUBSET_REPEAT", 1)), 1)
+    if subset_size >= len(dataset):
+        indices = list(range(len(dataset)))
+    else:
+        generator = torch.Generator().manual_seed(int(getattr(Config, "VIS_SEED", 20260709)))
+        indices = torch.randperm(len(dataset), generator=generator)[:subset_size].tolist()
+    return Subset(dataset, indices * repeat)
+
+
+def build_warmup_visualization_subset(warmup_dataset):
+    """Remove repeated indices so visualization samples distinct warmup images."""
+    if not isinstance(warmup_dataset, Subset):
+        return warmup_dataset
+    unique_indices = list(dict.fromkeys(int(index) for index in warmup_dataset.indices))
+    return Subset(warmup_dataset.dataset, unique_indices)
 
 
 def train():
@@ -72,9 +84,10 @@ def train():
     device = get_runtime_device(Config)
 
     warmup_epochs = max(int(getattr(Config, "COMPACT_TEACHER_WARMUP_EPOCHS", 0)), 0)
+    compact_teacher_weight = max(float(getattr(Config, "COMPACT_TEACHER_FEATURE_WEIGHT", 0.0)), 0.0)
     teacher = None
     feature_criterion = None
-    if warmup_epochs > 0:
+    if warmup_epochs > 0 or compact_teacher_weight > 0:
         teacher = build_teacher(Config).to(device)
         teacher_info = load_teacher_feature_checkpoint(teacher, Config.TEACHER_DETECTOR_CHECKPOINT, device)
         set_trainable(teacher, False)
@@ -84,12 +97,14 @@ def train():
         log_to_file(
             Config,
             f"Compact teacher warmup: epochs={warmup_epochs}, weight={Config.COMPACT_TEACHER_WARMUP_WEIGHT}, "
-            f"raw_student={Config.COMPACT_TEACHER_WARMUP_RAW_STUDENT}",
+            f"raw_student={Config.COMPACT_TEACHER_WARMUP_RAW_STUDENT}; "
+            f"compact feature weight={compact_teacher_weight}",
         )
 
     train_dataset = SLMFeatureDataset(Config, split="train")
     val_dataset = SLMFeatureDataset(Config, split="val")
     warmup_dataset = build_warmup_subset(train_dataset) if warmup_epochs > 0 else train_dataset
+    warmup_visualization_dataset = build_warmup_visualization_subset(warmup_dataset)
     train_sampler = None
     warmup_sampler = None
     val_sampler = None
@@ -162,10 +177,12 @@ def train():
     total_params = sum(p.numel() for p in model_for_count.parameters())
     log_to_file(Config, f"Train images: {len(train_dataset)}, val images: {len(val_dataset)}")
     if warmup_epochs > 0 and len(warmup_dataset) != len(train_dataset):
+        warmup_repeat = max(int(getattr(Config, "COMPACT_TEACHER_WARMUP_SUBSET_REPEAT", 1)), 1)
         log_to_file(
             Config,
             f"Compact teacher warmup subset: {len(warmup_dataset)}/{len(train_dataset)} images "
-            f"(seed={getattr(Config, 'VIS_SEED', 'unknown')})",
+            f"(subset_size={Config.COMPACT_TEACHER_WARMUP_SUBSET_SIZE}, repeat={warmup_repeat}, "
+            f"seed={getattr(Config, 'VIS_SEED', 'unknown')})",
         )
     if bool(getattr(Config, "SINGLE_IMAGE_TRAINING", False)):
         log_to_file(
@@ -182,9 +199,17 @@ def train():
     tensorboard_writer = create_tensorboard_writer(Config, Config.OUTPUT_DIR, log_to_file) if is_main else None
     if is_main:
         write_tensorboard_model_summary(tensorboard_writer, student_raw, detector_raw, (1, 1, Config.IMG_SIZE, Config.IMG_SIZE))
-        add_tensorboard_teacher_feature(tensorboard_writer, 0, val_dataset, teacher, device)
-        add_tensorboard_visualization(tensorboard_writer, 0, val_dataset, student, detector, device)
-        save_compact_visualization_png(0, val_dataset, student, detector, device)
+        initial_visualization_dataset = warmup_visualization_dataset if warmup_epochs > 0 else val_dataset
+        initial_prefix = "warmup" if warmup_epochs > 0 else "val"
+        add_tensorboard_teacher_feature(
+            tensorboard_writer, 0, initial_visualization_dataset, teacher, device, prefix=initial_prefix
+        )
+        add_tensorboard_visualization(
+            tensorboard_writer, 0, initial_visualization_dataset, student, detector, device, prefix=initial_prefix
+        )
+        save_compact_visualization_png(
+            0, initial_visualization_dataset, student, detector, device, prefix=initial_prefix
+        )
     if dist.is_initialized():
         dist.barrier()
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(Config.EPOCHS, 1), eta_min=1e-6)
@@ -212,7 +237,7 @@ def train():
         stat_keys = (
             ("feature_total", "full", "low1", "low2", "ssim", "grad", "freq", "pearson", "slm_smooth", "slm_diversity")
             if in_teacher_warmup
-            else ("heatmap", "wh", "offset")
+            else ("heatmap", "wh", "offset", "feature_total")
         )
         epoch_stats_t = {key: torch.zeros((), device=device) for key in stat_keys}
 
@@ -240,6 +265,19 @@ def train():
                     features = student(images)
                     pred = detector(features)
                     loss, stats = criterion(pred, targets)
+                if compact_teacher_weight > 0:
+                    rgb = batch["rgb_tensor"].to(device, non_blocking=Config.PIN_MEMORY)
+                    if Config.ENABLE_CHANNELS_LAST and torch.cuda.is_available():
+                        rgb = rgb.contiguous(memory_format=torch.channels_last)
+                    fp32_ctx = torch.amp.autocast(device_type="cuda", enabled=False) if device.type == "cuda" else nullcontext()
+                    with fp32_ctx:
+                        with torch.no_grad():
+                            teacher_feature = teacher(rgb.float())
+                        compact_feature_loss, feature_stats = feature_criterion(
+                            features.float(), teacher_feature.detach(), unwrap_module(student), stage_name="phase_focus"
+                        )
+                    loss = loss + compact_teacher_weight * compact_feature_loss
+                    stats["feature_total"] = feature_stats["feature_total"]
             scaler.scale(loss).backward()
             if Config.COMPACT_GRAD_CLIP_NORM and Config.COMPACT_GRAD_CLIP_NORM > 0:
                 scaler.unscale_(optimizer)
@@ -268,9 +306,23 @@ def train():
         if not in_teacher_warmup and (epoch + 1) % Config.VAL_INTERVAL == 0:
             val_losses, val_metrics = evaluate_center_detector(Config, student, detector, val_loader, criterion, device)
         if is_main and Config.VIS_INTERVAL > 0 and (epoch + 1) % Config.VIS_INTERVAL == 0:
-            add_tensorboard_visualization(tensorboard_writer, epoch + 1, val_dataset, student, detector, device)
+            visualization_dataset = warmup_visualization_dataset if in_teacher_warmup else val_dataset
+            visualization_prefix = "warmup" if in_teacher_warmup else "val"
+            add_tensorboard_visualization(
+                tensorboard_writer,
+                epoch + 1,
+                visualization_dataset,
+                student,
+                detector,
+                device,
+                prefix=visualization_prefix,
+            )
         if is_main and Config.VIS_FILE_INTERVAL > 0 and (epoch + 1) % Config.VIS_FILE_INTERVAL == 0:
-            save_compact_visualization_png(epoch + 1, val_dataset, student, detector, device)
+            visualization_dataset = warmup_visualization_dataset if in_teacher_warmup else val_dataset
+            visualization_prefix = "warmup" if in_teacher_warmup else "val"
+            save_compact_visualization_png(
+                epoch + 1, visualization_dataset, student, detector, device, prefix=visualization_prefix
+            )
         if dist.is_initialized():
             dist.barrier()
 

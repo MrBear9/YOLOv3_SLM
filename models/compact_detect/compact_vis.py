@@ -83,7 +83,7 @@ def forward_student_with_norm(student, images, enable_norm):
 
 
 @torch.no_grad()
-def add_tensorboard_teacher_feature(writer, step, dataset, teacher, device, max_images=None):
+def add_tensorboard_teacher_feature(writer, step, dataset, teacher, device, max_images=None, prefix="val"):
     if writer is None or dataset is None or teacher is None or len(dataset) == 0:
         return
     if max_images is None:
@@ -97,13 +97,13 @@ def add_tensorboard_teacher_feature(writer, step, dataset, teacher, device, max_
     with fp32_ctx:
         teacher_feature = teacher(teacher_inputs.float())
     teacher_grid = torch.cat([feature for feature in feature_to_gray_batch(teacher_feature)], dim=2)
-    writer.add_image("Visualization/teacher_feature_gray", teacher_grid, step)
+    writer.add_image(f"Visualization/{prefix}_teacher_feature_gray", teacher_grid, step)
     writer.flush()
     teacher.train(was_training)
 
 
 @torch.no_grad()
-def add_tensorboard_visualization(writer, step, dataset, student, detector, device, max_images=None):
+def add_tensorboard_visualization(writer, step, dataset, student, detector, device, max_images=None, prefix="val"):
     if writer is None or dataset is None or len(dataset) == 0:
         return
     if max_images is None:
@@ -149,10 +149,10 @@ def add_tensorboard_visualization(writer, step, dataset, student, detector, devi
             draw_box(draw, det[:4], (255, 70, 70), label)
         rendered.append(torch.from_numpy(np.asarray(canvas).copy()).permute(2, 0, 1).float() / 255.0)
     grid = torch.cat(rendered, dim=2)
-    writer.add_image("Visualization/val_gt_green_pred_red", grid, step)
+    writer.add_image(f"Visualization/{prefix}_gt_green_pred_red", grid, step)
 
     optical_gray_grid = torch.cat([f for f in normalize_feature_map(raw_optical_features)], dim=2)
-    writer.add_image("Visualization/optical_modulated_output_gray", optical_gray_grid, step)
+    writer.add_image(f"Visualization/{prefix}_optical_modulated_output_gray", optical_gray_grid, step)
 
     student_module = unwrap_module(student)
     phase_images = []

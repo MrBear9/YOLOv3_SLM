@@ -255,11 +255,10 @@ class MultiScalePhaseField(nn.Module):
     def set_base_phase(self, phase):
         """Seed the finest-scale parameters with the initial phase pattern.
 
-        In blockwise mode each block's inner pyramid is initialised from the
-        corresponding spatial crop: the finest scale gets the crop directly
-        and coarser scales get downsampled versions.  All global scales stay
-        at zero and the MLP stays near-zero, so the combined phase starts
-        from the same point as the original flat ``phase_raw`` parameter.
+        In blockwise mode only the finest inner scale receives the spatial
+        crop. Coarser scales start at zero so summing the pyramid preserves
+        the requested initial phase instead of multiplying it by the number
+        of inner scales.
         """
         target_h, target_w = self.resolution
         with torch.no_grad():
@@ -278,13 +277,16 @@ class MultiScalePhaseField(nn.Module):
                     y_end = min(y_start + block_h, target_h)
                     x_end = min(x_start + block_w, target_w)
                     crop = base[:, :, y_start:y_end, x_start:x_end]
-                    # Initialise each inner scale from the crop at its native resolution
+                    # Keep the seed in one scale; the other scales remain free residuals.
                     for k in range(n_inner):
                         param = self.blocks[block_idx * n_inner + k]
-                        param.copy_(
-                            F.interpolate(crop, size=inner_res[k],
-                                          mode="bilinear", align_corners=False)
-                        )
+                        if k == n_inner - 1:
+                            param.copy_(
+                                F.interpolate(crop, size=inner_res[k],
+                                              mode="bilinear", align_corners=False)
+                            )
+                        else:
+                            param.zero_()
             else:
                 self.scale_params[-1].copy_(
                     F.interpolate(phase, size=(target_h, target_w),
