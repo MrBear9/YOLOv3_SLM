@@ -323,6 +323,9 @@ class ConfigSLM:
     VIS_SHOW_BEST_MATCHED_ANCHORS = False
     VIS_MAX_GT_ANCHOR_OVERLAYS = 2
 
+    # Repeat each train-set entry for tiny subset experiments; validation is unchanged.
+    TRAIN_DATASET_REPEAT = 1
+
     # =========================================================================
     # Data loading
     # =========================================================================
@@ -439,6 +442,7 @@ class ConfigSLM:
             "OPTICAL_SLM_LR_SCHEDULER": ("LR_SCHEDULER", str),
             "OPTICAL_SLM_ETA_MIN": ("ETA_MIN", float),
             "OPTICAL_SLM_BATCH_SIZE": ("BATCH_SIZE", int),
+            "OPTICAL_SLM_TRAIN_DATASET_REPEAT": ("TRAIN_DATASET_REPEAT", int),
             "OPTICAL_SLM_PHASE_FOCUS_EPOCHS": ("PHASE_FOCUS_EPOCHS", int),
             "OPTICAL_SLM_DETECTOR_FOCUS_EPOCHS": ("DETECTOR_FOCUS_EPOCHS", int),
             "OPTICAL_SLM_JOINT_FIT_EPOCHS": ("JOINT_FIT_EPOCHS", int),

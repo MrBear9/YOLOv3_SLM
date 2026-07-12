@@ -19,6 +19,7 @@ from models.SLM.slm_utils import (
 from models.SLM.slm_train_epoch import run_epoch
 from models.SLM.slm_train_setup import setup_training
 from models.SLM.utils_slm import collect_slm_statistics, save_detector_best, save_student_best
+from models.monitoring import snapshot_parameters
 from models.runtime import (
     cleanup_distributed,
     init_distributed_mode,
@@ -41,6 +42,11 @@ def train():
     best_map50 = -1.0
     best_student_map50 = -1.0
     global_epoch = 0
+
+    # 初始化参数快照用于变化追踪
+    if is_main:
+        snapshot_parameters(ctx["student"])
+        snapshot_parameters(ctx["detector"])
     deployment_norm_mode = Config.STUDENT_NORM_MODE
     init_epoch_log_table(Config)
 

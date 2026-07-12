@@ -4,6 +4,8 @@ Contains run_epoch() which executes one training epoch (with optional
 validation) and returns updated best-model tracking values.
 """
 
+from contextlib import nullcontext
+
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -25,7 +27,46 @@ from models.SLM.utils_slm import (
     save_detector_best,
     save_student_best,
 )
+from models.monitoring import (
+    snapshot_parameters,
+    write_confusion_matrix,
+    write_gradient_monitoring,
+    write_parameter_monitoring,
+)
 from models.runtime import log_epoch_table_row, log_to_file
+
+
+def _collect_slm_val_detections(config, student, detector, val_loader, device):
+    """Collect all validation detections and targets for confusion matrix."""
+    from models.yolov8.decode_anchor_v8 import decode_detections_anchor_v8
+
+    student.eval()
+    detector.eval()
+    all_dets = []
+    all_targets = []
+    amp_enabled = bool(getattr(config, "ENABLE_AMP", True)) and device.type == "cuda"
+    amp_dtype = torch.bfloat16 if str(getattr(config, "AMP_DTYPE", "float16")).lower() in {"bf16", "bfloat16"} else torch.float16
+    amp_ctx = torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled) if device.type == "cuda" else nullcontext()
+    with torch.no_grad():
+        for batch in val_loader:
+            gray = batch["gray_tensor"].to(device, non_blocking=config.PIN_MEMORY)
+            if config.ENABLE_CHANNELS_LAST and torch.cuda.is_available():
+                gray = gray.contiguous(memory_format=torch.channels_last)
+            with amp_ctx:
+                student_feature = student(gray) if hasattr(student, '__call__') else student
+                predictions = detector(student_feature)
+            detections = decode_detections_anchor_v8(
+                config, predictions,
+                conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
+                nms_thresh=getattr(config, "METRIC_NMS_THRESH", config.NMS_THRESH),
+                max_det=getattr(config, "METRIC_MAX_DET", config.MAX_DET),
+            )
+            targets = batch["targets"]
+            for i, dets in enumerate(detections):
+                all_dets.append(np.array(dets) if not isinstance(dets, np.ndarray) else dets)
+                gt = targets[i]
+                all_targets.append(gt.cpu().numpy() if isinstance(gt, torch.Tensor) else gt)
+    return all_dets, all_targets
 
 
 def run_epoch(
@@ -210,6 +251,21 @@ def run_epoch(
             phase_update_rel=phase_update_rel,
             lr=current_lr,
         )
+        # ── 梯度 & 参数监测 ──
+        write_gradient_monitoring(tensorboard_writer, student, display_epoch, prefix="Grad/Student")
+        write_gradient_monitoring(tensorboard_writer, detector, display_epoch, prefix="Grad/Detector")
+        write_parameter_monitoring(tensorboard_writer, student, display_epoch, prefix="Param/Student")
+        write_parameter_monitoring(tensorboard_writer, detector, display_epoch, prefix="Param/Detector")
+        # ── 混淆矩阵（每个验证 epoch）──
+        if val_loader is not None and (global_epoch + 1) % Config.VAL_INTERVAL == 0:
+            cm_dets, cm_targets = _collect_slm_val_detections(Config, student, detector, val_loader, device)
+            write_confusion_matrix(
+                tensorboard_writer, cm_dets, cm_targets,
+                Config.NUM_CLASSES, Config.CLASS_NAMES, display_epoch,
+                iou_threshold=Config.METRIC_IOU_THRESHOLD,
+                conf_threshold=getattr(Config, "METRIC_CONF_THRESH", Config.CONF_THRESH),
+                prefix="ConfusionMatrix",
+            )
 
     if is_main:
         save_current_student_checkpoint(

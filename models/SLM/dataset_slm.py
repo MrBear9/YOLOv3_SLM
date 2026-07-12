@@ -78,6 +78,9 @@ class SLMFeatureDataset(Dataset):
                     "label_path": os.path.join(labels_dir, os.path.splitext(name)[0] + ".txt"),
                 }
             )
+        if split == "train":
+            repeat = max(int(getattr(config, "TRAIN_DATASET_REPEAT", 1)), 1)
+            self.entries *= repeat
         self.transform = transforms.Compose([transforms.Resize((config.IMG_SIZE, config.IMG_SIZE)), transforms.Grayscale(1), transforms.ToTensor()])
 
     def __len__(self):

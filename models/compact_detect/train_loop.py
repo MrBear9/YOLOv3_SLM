@@ -8,6 +8,7 @@ Contains the train() function. Supporting helpers live in:
 
 from contextlib import nullcontext
 
+import numpy as np
 import os
 import torch
 import torch.distributed as dist
@@ -29,6 +30,12 @@ from models.runtime import (
     unwrap_module,
 )
 from models.training_utils import create_tensorboard_writer
+from models.monitoring import (
+    snapshot_parameters,
+    write_confusion_matrix,
+    write_gradient_monitoring,
+    write_parameter_monitoring,
+)
 
 from .compact_tensorboard import write_tensorboard_model_summary, write_tensorboard_scalars
 from .compact_utils import (
@@ -42,6 +49,37 @@ from .config import ConfigCompactDetect as Config
 from .losses import CenterDetectionLoss
 from .metrics import evaluate_center_detector
 from .model import CompactOpticalDetector, OpticalCompactDetector
+
+
+def _collect_compact_val_detections(config, student, detector, val_loader, device):
+    """Collect all validation detections and targets for confusion matrix."""
+    from .decode import decode_center_detections
+
+    student.eval()
+    detector.eval()
+    all_dets = []
+    all_targets = []
+    amp_enabled = bool(getattr(config, "ENABLE_AMP", True)) and device.type == "cuda"
+    amp_dtype = torch.bfloat16 if str(config.AMP_DTYPE).lower() in {"bf16", "bfloat16"} else torch.float16
+    amp_ctx = torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled) if device.type == "cuda" else nullcontext()
+    with torch.no_grad():
+        for batch in val_loader:
+            images = batch["gray_tensor"].to(device, non_blocking=config.PIN_MEMORY)
+            with amp_ctx:
+                features = student(images)
+                pred = detector(features)
+            detections = decode_center_detections(
+                config, pred,
+                conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
+                nms_thresh=getattr(config, "METRIC_NMS_THRESH", config.NMS_THRESH),
+                max_det=getattr(config, "METRIC_MAX_DET", config.MAX_DET),
+            )
+            targets = batch["targets"]
+            for i, dets in enumerate(detections):
+                all_dets.append(dets if isinstance(dets, np.ndarray) else np.array(dets))
+                gt = targets[i]
+                all_targets.append(gt.cpu().numpy() if isinstance(gt, torch.Tensor) else gt)
+    return all_dets, all_targets
 
 
 def build_warmup_subset(dataset):
@@ -199,6 +237,8 @@ def train():
     tensorboard_writer = create_tensorboard_writer(Config, Config.OUTPUT_DIR, log_to_file) if is_main else None
     if is_main:
         write_tensorboard_model_summary(tensorboard_writer, student_raw, detector_raw, (1, 1, Config.IMG_SIZE, Config.IMG_SIZE))
+        snapshot_parameters(student_raw)  # 初始化参数快照用于变化追踪
+        snapshot_parameters(detector_raw)
         initial_visualization_dataset = warmup_visualization_dataset if warmup_epochs > 0 else val_dataset
         initial_prefix = "warmup" if warmup_epochs > 0 else "val"
         add_tensorboard_teacher_feature(
@@ -343,6 +383,21 @@ def train():
 
         if is_main:
             write_tensorboard_scalars(tensorboard_writer, epoch + 1, train_loss, epoch_stats, val_losses=val_losses, val_metrics=val_metrics, lr=current_lr)
+            # ── 梯度 & 参数监测 ──
+            write_gradient_monitoring(tensorboard_writer, student_raw, epoch + 1, prefix="Grad/Student")
+            write_gradient_monitoring(tensorboard_writer, detector_raw, epoch + 1, prefix="Grad/Detector")
+            write_parameter_monitoring(tensorboard_writer, student_raw, epoch + 1, prefix="Param/Student")
+            write_parameter_monitoring(tensorboard_writer, detector_raw, epoch + 1, prefix="Param/Detector")
+            # ── 混淆矩阵（每个验证 epoch）──
+            if not in_teacher_warmup and val_metrics is not None and (epoch + 1) % max(Config.VIS_INTERVAL, 1) == 0:
+                cm_dets, cm_targets = _collect_compact_val_detections(Config, student, detector, val_loader, device)
+                write_confusion_matrix(
+                    tensorboard_writer, cm_dets, cm_targets,
+                    Config.NUM_CLASSES, Config.CLASS_NAMES, epoch + 1,
+                    iou_threshold=getattr(Config, "METRIC_IOU_THRESHOLD", 0.5),
+                    conf_threshold=getattr(Config, "METRIC_CONF_THRESH", Config.CONF_THRESH),
+                    prefix="ConfusionMatrix",
+                )
             log_epoch_table_row(
                 Config,
                 epoch=epoch,

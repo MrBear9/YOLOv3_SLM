@@ -42,6 +42,12 @@ from models.training_utils import (
     save_training_curves,
     set_detector_trainable,
 )
+from models.monitoring import (
+    snapshot_parameters,
+    write_confusion_matrix,
+    write_gradient_monitoring,
+    write_parameter_monitoring,
+)
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 from models.yolov8.head_v8 import TeacherWithDetector, build_detector_head
 from models.yolov8.loss_anchor_v8 import YOLOv3AnchorLossForV8Head
@@ -98,6 +104,39 @@ def _write_teacher_tensorboard_model_summary(writer, model):
     ])
     writer.add_text("Model/data_flow", flow_text, 0)
     writer.add_text("Model/parameters", param_text, 0)
+
+
+def _collect_teacher_val_detections(config, model, val_loader, device):
+    """Collect all validation detections and targets for confusion matrix."""
+    from models.runtime import prepare_batch
+    from models.yolov8.decode_anchor_v8 import decode_detections_anchor_v8
+
+    model.eval()
+    all_dets = []
+    all_targets = []
+    amp_enabled = bool(getattr(config, "ENABLE_AMP", True)) and device.type == "cuda"
+    amp_dtype_name = str(getattr(config, "AMP_DTYPE", "float16")).strip().lower()
+    amp_dtype = torch.bfloat16 if amp_dtype_name in {"bf16", "bfloat16"} else torch.float16
+    amp_ctx = (
+        torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled)
+        if device.type == "cuda"
+        else nullcontext()
+    )
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc="Collecting detections for CM", leave=False, disable=True):
+            batch_images, batch_targets = prepare_batch(config, batch, device)
+            with amp_ctx:
+                _, predictions = model(batch_images, return_feature=True)
+            detections = decode_detections_anchor_v8(
+                config, predictions,
+                conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
+                nms_thresh=getattr(config, "METRIC_NMS_THRESH", config.NMS_THRESH),
+                max_det=getattr(config, "METRIC_MAX_DET", config.MAX_DET),
+            )
+            for i, dets in enumerate(detections):
+                all_dets.append(np.array(dets) if not isinstance(dets, np.ndarray) else dets)
+                all_targets.append(batch_targets[i].cpu().numpy() if isinstance(batch_targets[i], torch.Tensor) else batch_targets[i])
+    return all_dets, all_targets
 
 
 def train():
@@ -204,6 +243,7 @@ def train():
     tensorboard_writer = create_tensorboard_writer(Config, Config.TEACHER_OUTPUT_DIR, log_to_file) if is_main else None
     if is_main:
         _write_teacher_tensorboard_model_summary(tensorboard_writer, model)
+        snapshot_parameters(model)  # 初始化参数快照用于变化追踪
 
     for epoch in range(Config.EPOCHS):
         last_epoch = epoch
@@ -309,6 +349,19 @@ def train():
                 val_metrics=val_metrics,
                 lr=current_lr,
             )
+            # ── 梯度 & 参数监测 ──
+            write_gradient_monitoring(tensorboard_writer, model, epoch + 1, prefix="Grad")
+            write_parameter_monitoring(tensorboard_writer, model, epoch + 1, prefix="Param")
+            # ── 混淆矩阵（每 VIS_INTERVAL 个 epoch 或验证时）──
+            if val_loader is not None and (epoch + 1) % max(Config.VIS_INTERVAL, 1) == 0:
+                cm_dets, cm_targets = _collect_teacher_val_detections(Config, model, val_loader, device)
+                write_confusion_matrix(
+                    tensorboard_writer, cm_dets, cm_targets,
+                    Config.NUM_CLASSES, Config.CLASS_NAMES, epoch + 1,
+                    iou_threshold=Config.METRIC_IOU_THRESHOLD,
+                    conf_threshold=getattr(Config, "METRIC_CONF_THRESH", Config.CONF_THRESH),
+                    prefix="ConfusionMatrix",
+                )
 
         is_best = False
         if val_metrics is not None and val_metrics["map50"] > best_map50 + Config.TEACHER_EARLY_STOP_MIN_DELTA:
