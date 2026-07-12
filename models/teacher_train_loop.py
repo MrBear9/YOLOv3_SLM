@@ -147,7 +147,7 @@ def train():
 
     distill_loss_fn = None
     enable_distill = bool(getattr(Config, "ENABLE_FEATURE_DISTILL", False))
-    if enable_distill and is_v3:
+    if enable_distill:
         distill_loss_fn = build_feature_distillation_loss(Config).to(device)
         log_to_file(Config, f"Feature distillation enabled, weight={Config.FEATURE_DISTILL_WEIGHT}")
 
@@ -185,8 +185,6 @@ def train():
     vis_dataset = val_dataset if Config.VIS_DATASET_SPLIT == "val" and val_dataset is not None and len(val_dataset) > 0 else train_dataset
     vis_prefix = "val" if vis_dataset is val_dataset else "train"
     vis_dir = os.path.join(Config.TEACHER_OUTPUT_DIR, "visualizations")
-    teacher_best_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "teacher_best.pth")
-    teacher_final_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "teacher_final.pth")
     joint_best_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "teacher_detector_best.pth")
     joint_final_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "teacher_detector_final.pth")
 
@@ -324,21 +322,18 @@ def train():
                 best_loss = avg_train["total"]
             if is_main:
                 model_core = unwrap_module(model)
-                torch.save(model_core.detector.state_dict(), os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_best.pth"))
-                if Config.SAVE_TEACHER_WEIGHTS:
-                    torch.save(model_core.teacher.state_dict(), teacher_best_path)
-                    torch.save(
-                        {
-                            "teacher_state_dict": model_core.teacher.state_dict(),
-                            "detector_state_dict": model_core.detector.state_dict(),
-                            "epoch": epoch,
-                            "loss": avg_train["total"],
-                            "val_map50": best_map50 if val_metrics is not None else None,
-                            "teacher_arch": Config.TEACHER_ARCH,
-                            "head_type": "yolov8_style_head_yolov3_anchor_loss",
-                        },
-                        joint_best_path,
-                    )
+                torch.save(
+                    {
+                        "teacher_state_dict": model_core.teacher.state_dict(),
+                        "detector_state_dict": model_core.detector.state_dict(),
+                        "epoch": epoch,
+                        "loss": avg_train["total"],
+                        "val_map50": best_map50 if val_metrics is not None else None,
+                        "teacher_arch": Config.TEACHER_ARCH,
+                        "head_type": "yolov8_style_head_yolov3_anchor_loss",
+                    },
+                    joint_best_path,
+                )
             no_improve_epochs = 0
         elif val_metrics is not None:
             no_improve_epochs += Config.VAL_INTERVAL
@@ -387,30 +382,24 @@ def train():
 
     if is_main:
         model_core = unwrap_module(model)
-        model_save_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_final.pth")
-        torch.save(model_core.detector.state_dict(), model_save_path)
-        if Config.SAVE_TEACHER_WEIGHTS:
-            torch.save(model_core.teacher.state_dict(), teacher_final_path)
-            torch.save(
-                {
-                    "teacher_state_dict": model_core.teacher.state_dict(),
-                    "detector_state_dict": model_core.detector.state_dict(),
-                    "epoch": last_epoch,
-                    "loss": history["train_total"][-1] if history["train_total"] else None,
-                    "val_map50": best_map50 if best_map50 >= 0 else None,
-                    "teacher_arch": Config.TEACHER_ARCH,
-                    "head_type": "yolov8_style_head_yolov3_anchor_loss",
-                },
-                joint_final_path,
-            )
-    else:
-        model_save_path = os.path.join(Config.TEACHER_OUTPUT_DIR, "detector_final.pth")
+        torch.save(
+            {
+                "teacher_state_dict": model_core.teacher.state_dict(),
+                "detector_state_dict": model_core.detector.state_dict(),
+                "epoch": last_epoch,
+                "loss": history["train_total"][-1] if history["train_total"] else None,
+                "val_map50": best_map50 if best_map50 >= 0 else None,
+                "teacher_arch": Config.TEACHER_ARCH,
+                "head_type": "yolov8_style_head_yolov3_anchor_loss",
+            },
+            joint_final_path,
+        )
 
     append_plain_log(Config, Config.get_epoch_table_separator())
     log_to_file(Config, "=" * 60)
     log_to_file(Config, "Training complete")
-    log_to_file(Config, f"Best detector model saved to: {os.path.join(Config.TEACHER_OUTPUT_DIR, 'detector_best.pth')}")
-    log_to_file(Config, f"Final detector model saved to: {model_save_path}")
+    log_to_file(Config, f"Best model saved to: {joint_best_path}")
+    log_to_file(Config, f"Final model saved to: {joint_final_path}")
     log_to_file(Config, f"Teacher output directory: {Config.TEACHER_OUTPUT_DIR}")
     log_to_file(Config, "=" * 60)
     if is_main:

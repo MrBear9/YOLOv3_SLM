@@ -168,24 +168,25 @@ class EnhancedYOLOv8AnchorHead(nn.Module):
 
 
 class YOLOLightHead(nn.Module):
-    """Lightweight FPGA-friendly detection head.
+    """Lightweight FPGA-friendly detection head (方案 A — slimmed).
 
-    Simplified compared to YOLOv8AnchorHead:
-      - No C2f blocks → pure ConvBNAct instead
-      - Lightweight PAN bottom-up path (no C2f, 1×1 fusion + ECA)
-      - ECA channel attention at every FPN/PAN fusion point
-      - Decoupled detection heads: [shared 3×3 → 3× branch 1×1] per scale
+    Compared to the original YOLOLightHead:
+      - Base channel halved: 16 → 8  (total params ~657K → ~166K, -75%)
+      - Stem: 1→8→16→32→64 (pure serial, no residual)
+      - Multi-scale P3 fusion preserved (s2/s4/s8 → fused)
+      - FPN + lightweight PAN with ECA
+      - Detection heads: direct 1×1 projections, NO shared 3×3 conv
+        (FPN features already carry sufficient spatial context)
 
-    Pure conv + decoupled heads — no residual blocks, no skip connections
-    in the detection head.  Residual is only needed for deep networks.
-    A shallow detection head benefits from clean gradient paths.
+    Pure conv — no residual blocks, no skip connections, no shared
+    spatial mixing before task projections.
     """
 
     def __init__(self, config, in_channels=1, out_channels=None, base_ch=None):
         super().__init__()
         self.config = config
         out_channels = config.get_detector_output_channels() if out_channels is None else out_channels
-        c = base_ch if base_ch is not None else int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
+        c = base_ch if base_ch is not None else int(getattr(config, "YOLO_LIGHT_BASE_CH", 8))
         c2, c4, c8 = c * 2, c * 4, c * 8
 
         # CoordConv: internally expand input channels with xy coordinate grid.
@@ -223,30 +224,32 @@ class YOLOLightHead(nn.Module):
 
         self.head_dropout = nn.Dropout2d(0.1)
 
-        # Decoupled detection heads: [shared 3×3 → 3× branch 1×1] per scale
-        hc = c2
-        self.head_p3_shared = ConvBNAct(c2, hc, 3)
-        self.head_p3_box = nn.Conv2d(hc, 3 * 4, 1)
-        self.head_p3_obj = nn.Conv2d(hc, 3 * 1, 1)
-        self.head_p3_cls = nn.Conv2d(hc, out_channels - 3 * 5, 1)
+        # 方案A: direct 1×1 projections — no shared 3×3 conv.
+        # FPN/PAN features already carry sufficient spatial context from
+        # the stem and multi-scale fusion; each task branch reads directly
+        # from its scale's features.
+        # P3 head (in=c2, ~16ch)
+        self.head_p3_box = nn.Conv2d(c2, 3 * 4, 1)
+        self.head_p3_obj = nn.Conv2d(c2, 3 * 1, 1)
+        self.head_p3_cls = nn.Conv2d(c2, out_channels - 3 * 5, 1)
 
-        self.head_p4_shared = ConvBNAct(c4, hc, 3)
-        self.head_p4_box = nn.Conv2d(hc, 3 * 4, 1)
-        self.head_p4_obj = nn.Conv2d(hc, 3 * 1, 1)
-        self.head_p4_cls = nn.Conv2d(hc, out_channels - 3 * 5, 1)
+        # P4 head (in=c4, ~32ch)
+        self.head_p4_box = nn.Conv2d(c4, 3 * 4, 1)
+        self.head_p4_obj = nn.Conv2d(c4, 3 * 1, 1)
+        self.head_p4_cls = nn.Conv2d(c4, out_channels - 3 * 5, 1)
 
-        self.head_p5_shared = ConvBNAct(c8, hc, 3)
-        self.head_p5_box = nn.Conv2d(hc, 3 * 4, 1)
-        self.head_p5_obj = nn.Conv2d(hc, 3 * 1, 1)
-        self.head_p5_cls = nn.Conv2d(hc, out_channels - 3 * 5, 1)
+        # P5 head (in=c8, ~64ch)
+        self.head_p5_box = nn.Conv2d(c8, 3 * 4, 1)
+        self.head_p5_obj = nn.Conv2d(c8, 3 * 1, 1)
+        self.head_p5_cls = nn.Conv2d(c8, out_channels - 3 * 5, 1)
 
     @staticmethod
-    def _decode_head(shared, box, obj, cls_conv, feat):
+    def _decode_head(box, obj, cls_conv, feat):
+        """Direct 1×1 projection — no shared spatial mixing (方案A)."""
         b, _, h, w = feat.shape
-        f = shared(feat)
-        box_out = box(f).contiguous().view(b, 3, 4, h, w)
-        obj_out = obj(f).contiguous().view(b, 3, 1, h, w)
-        cls_out = cls_conv(f).contiguous().view(b, 3, -1, h, w)
+        box_out = box(feat).contiguous().view(b, 3, 4, h, w)
+        obj_out = obj(feat).contiguous().view(b, 3, 1, h, w)
+        cls_out = cls_conv(feat).contiguous().view(b, 3, -1, h, w)
         return torch.cat([box_out, obj_out, cls_out], dim=2).contiguous().view(b, -1, h, w)
 
     def forward(self, x, return_features=False):
@@ -287,10 +290,10 @@ class YOLOLightHead(nn.Module):
         p4_down = self.down_p4(p4_pan)
         p5_pan = self.pan_p5(torch.cat([p4_down, p5_feat], dim=1))
 
-        # Detection heads: P3 uses FPN output, P4/P5 use PAN-enhanced features
-        pred_p3 = self._decode_head(self.head_p3_shared, self.head_p3_box, self.head_p3_obj, self.head_p3_cls, self.head_dropout(p3_fused))
-        pred_p4 = self._decode_head(self.head_p4_shared, self.head_p4_box, self.head_p4_obj, self.head_p4_cls, self.head_dropout(p4_pan))
-        pred_p5 = self._decode_head(self.head_p5_shared, self.head_p5_box, self.head_p5_obj, self.head_p5_cls, self.head_dropout(p5_pan))
+        # Detection heads — direct 1×1 per scale (方案A)
+        pred_p3 = self._decode_head(self.head_p3_box, self.head_p3_obj, self.head_p3_cls, self.head_dropout(p3_fused))
+        pred_p4 = self._decode_head(self.head_p4_box, self.head_p4_obj, self.head_p4_cls, self.head_dropout(p4_pan))
+        pred_p5 = self._decode_head(self.head_p5_box, self.head_p5_obj, self.head_p5_cls, self.head_dropout(p5_pan))
 
         if return_features:
             return (pred_p3, pred_p4, pred_p5), {"s8": p3_feat, "s16": p4_feat, "s32": p5_feat}

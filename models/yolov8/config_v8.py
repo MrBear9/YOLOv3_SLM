@@ -76,9 +76,8 @@ class ConfigYOLOv8Anchor:
     STRIDES = [8, 16, 32]
 
     STAGE1_LOCATE_EPOCHS = 40
-    STAGE2_TEXTURE_EPOCHS = 20
-    STAGE3_BALANCE_EPOCHS = 200
-    EPOCHS = STAGE1_LOCATE_EPOCHS + STAGE2_TEXTURE_EPOCHS + STAGE3_BALANCE_EPOCHS
+    STAGE2_BALANCE_EPOCHS = 200
+    EPOCHS = STAGE1_LOCATE_EPOCHS + STAGE2_BALANCE_EPOCHS
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher" | "v1"  (deeper semantic projection)
@@ -116,7 +115,6 @@ class ConfigYOLOv8Anchor:
     TEACHER_INIT_MODE = "scratch"
     TEACHER_INIT_CHECKPOINT = r"output/OpticalTeacherYOLO/teacher_final.pth"
     FREEZE_TEACHER = False
-    SAVE_TEACHER_WEIGHTS = True
 
     # =========================================================================
     # DETECTOR_HEAD_TYPE = "light" | "yolov8_anchor"
@@ -128,7 +126,7 @@ class ConfigYOLOv8Anchor:
     YOLOV8_C2F_BLOCKS = 3
 
     # -------- DETECTOR_HEAD_TYPE = "light" --------
-    YOLO_LIGHT_BASE_CH = 16
+    YOLO_LIGHT_BASE_CH = 8  # 方案A: halved from 16
     DETECTOR_USE_COORDCONV = True
     DETECTOR_INVERT_FEATURE = True   # invert teacher feature (dark→bright) before detector
 
@@ -208,21 +206,24 @@ class ConfigYOLOv8Anchor:
     FEATURE_DISTILL_WEIGHT = 0.18
 
     # =========================================================================
-    # Teacher ciphertext regularization
+    # Teacher ciphertext regularization (weakened)
+    #   TV/HF: relaxed to allow more texture detail for SLM modulation
+    #   Range/Mean: kept as floor to prevent all-dark output
+    #   Peak/Edge: relaxed to allow localized brightness for target highlighting
     # =========================================================================
-    TEACHER_SLM_CIPHER_LOSS_WEIGHT = 0.10
+    TEACHER_SLM_CIPHER_LOSS_WEIGHT = 0.04
     TEACHER_SLM_CIPHER_BLUR_KERNEL = 15
-    TEACHER_SLM_CIPHER_TV_TARGET = 0.026
-    TEACHER_SLM_CIPHER_HF_TARGET = 0.045
+    TEACHER_SLM_CIPHER_TV_TARGET = 0.045
+    TEACHER_SLM_CIPHER_HF_TARGET = 0.075
     TEACHER_SLM_CIPHER_RANGE_FLOOR = 0.28
     TEACHER_SLM_CIPHER_MEAN_FLOOR = 0.52
-    TEACHER_SLM_CIPHER_PEAK_LIMIT = 0.78
-    TEACHER_SLM_CIPHER_EDGE_LIMIT = 0.62
-    TEACHER_SLM_CIPHER_TV_WEIGHT = 1.0
-    TEACHER_SLM_CIPHER_HF_WEIGHT = 1.2
+    TEACHER_SLM_CIPHER_PEAK_LIMIT = 0.88
+    TEACHER_SLM_CIPHER_EDGE_LIMIT = 0.75
+    TEACHER_SLM_CIPHER_TV_WEIGHT = 0.5
+    TEACHER_SLM_CIPHER_HF_WEIGHT = 0.6
     TEACHER_SLM_CIPHER_RANGE_WEIGHT = 0.6
-    TEACHER_SLM_CIPHER_MEAN_WEIGHT = 1.4
-    TEACHER_SLM_CIPHER_PEAK_WEIGHT = 1.2
+    TEACHER_SLM_CIPHER_MEAN_WEIGHT = 0.8
+    TEACHER_SLM_CIPHER_PEAK_WEIGHT = 0.6
     TEACHER_SLM_CIPHER_EDGE_WEIGHT = 0.4
     OPTICAL_FIELD_EPS = 1e-8
     OPTICAL_NORM_EPS = 1e-6
@@ -232,10 +233,8 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     PHASE1_TEACHER_LR = 4e-4
     PHASE1_DETECTOR_LR = 3e-4
-    PHASE2_TEACHER_LR = 5e-5
-    PHASE2_DETECTOR_LR = 2e-4
-    PHASE3_TEACHER_LR = 1.5e-4
-    PHASE3_DETECTOR_LR = 1e-4
+    PHASE2_TEACHER_LR = 1.5e-4
+    PHASE2_DETECTOR_LR = 1e-4
     LEARNING_RATE = 3e-4
     WEIGHT_DECAY = 1e-3
     OPTIMIZER = "AdamW"
@@ -431,7 +430,7 @@ class ConfigYOLOv8Anchor:
                 "phase": "locate_gt",
                 "box_weight": cls.BOX_WEIGHT_BASE * 1.35,
                 "obj_weight": cls.OBJ_WEIGHT_BASE * 1.15,
-                "noobj_weight": cls.NOOBJ_WEIGHT_BASE,
+                "noobj_weight": cls.NOOBJ_WEIGHT_BASE * 0.4,
                 "cls_weight": cls.CLS_WEIGHT_BASE * 1.43,
                 "size_weights": {
                     "small": cls.SMALL_OBJ_WEIGHT,
@@ -441,34 +440,19 @@ class ConfigYOLOv8Anchor:
                 "teacher_lr": cls.PHASE1_TEACHER_LR,
                 "detector_lr": cls.PHASE1_DETECTOR_LR,
             }
-        if epoch < cls.STAGE1_LOCATE_EPOCHS + cls.STAGE2_TEXTURE_EPOCHS:
-            return {
-                "phase": "texture_detail",
-                "box_weight": cls.BOX_WEIGHT_BASE * 1.02,
-                "obj_weight": cls.OBJ_WEIGHT_BASE,
-                "noobj_weight": cls.NOOBJ_WEIGHT_BASE * 0.92,
-                "cls_weight": cls.CLS_WEIGHT_BASE * 1.35,
-                "size_weights": {
-                    "small": 1.05,
-                    "medium": 1.0,
-                    "large": 1.10,
-                },
-                "teacher_lr": cls.PHASE2_TEACHER_LR,
-                "detector_lr": cls.PHASE2_DETECTOR_LR,
-            }
         return {
             "phase": "balance_refine",
             "box_weight": cls.BOX_WEIGHT_BASE,
             "obj_weight": cls.OBJ_WEIGHT_BASE,
-            "noobj_weight": cls.NOOBJ_WEIGHT_BASE * 1.08,
+            "noobj_weight": cls.NOOBJ_WEIGHT_BASE * 0.3,
             "cls_weight": cls.CLS_WEIGHT_BASE * 1.12,
             "size_weights": {
                 "small": 1.0,
                 "medium": 1.0,
                 "large": 1.0,
             },
-            "teacher_lr": cls.PHASE3_TEACHER_LR,
-            "detector_lr": cls.PHASE3_DETECTOR_LR,
+            "teacher_lr": cls.PHASE2_TEACHER_LR,
+            "detector_lr": cls.PHASE2_DETECTOR_LR,
         }
 
     @classmethod

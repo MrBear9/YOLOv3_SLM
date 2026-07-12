@@ -28,7 +28,7 @@ def build_detector_head(config, in_channels=1, out_channels=None):
     head_type = str(getattr(config, "DETECTOR_HEAD_TYPE", "yolov8_anchor")).strip().lower()
     out_channels = config.get_detector_output_channels() if out_channels is None else out_channels
     if head_type in {"light", "yolo_light"}:
-        base_ch = int(getattr(config, "YOLO_LIGHT_BASE_CH", 16))
+        base_ch = int(getattr(config, "YOLO_LIGHT_BASE_CH", 8))
         return YOLOLightHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch)
     base_ch = int(getattr(config, "YOLOV8_BASE_CHANNELS", 32))
     c2f_blocks = int(getattr(config, "YOLOV8_C2F_BLOCKS", 3))

@@ -139,7 +139,7 @@ class ConfigSLM:
     YOLOV8_C2F_BLOCKS = 3
 
     # -------- DETECTOR_HEAD_TYPE = "light" --------
-    YOLO_LIGHT_BASE_CH = 16
+    YOLO_LIGHT_BASE_CH = 8  # 方案A: halved from 16
 
     # =========================================================================
     # Anchors
