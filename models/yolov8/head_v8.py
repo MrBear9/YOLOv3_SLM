@@ -30,6 +30,12 @@ def build_detector_head(config, in_channels=1, out_channels=None):
     if head_type in {"light", "yolo_light"}:
         base_ch = int(getattr(config, "YOLO_LIGHT_BASE_CH", 8))
         return YOLOLightHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch)
+    if head_type in {"compact", "center_detect"}:
+        from models.compact_detect.model import CompactOpticalDetector, CompactOpticalDetectorV2
+        version = str(getattr(config, "COMPACT_MODEL_VERSION", "v2")).strip().lower()
+        if version in {"v2", "2"}:
+            return CompactOpticalDetectorV2(config, in_channels=in_channels)
+        return CompactOpticalDetector(config, in_channels=in_channels)
     base_ch = int(getattr(config, "YOLOV8_BASE_CHANNELS", 32))
     c2f_blocks = int(getattr(config, "YOLOV8_C2F_BLOCKS", 3))
     if head_type in {"yolov8_anchor_legacy", "legacy"}:
@@ -38,7 +44,7 @@ def build_detector_head(config, in_channels=1, out_channels=None):
         return EnhancedYOLOv8AnchorHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch, c2f_blocks=c2f_blocks)
     raise ValueError(
         f"Unsupported DETECTOR_HEAD_TYPE={head_type!r}; choose 'light', "
-        "'yolov8_anchor', or 'yolov8_anchor_legacy'."
+        "'compact', 'yolov8_anchor', or 'yolov8_anchor_legacy'."
     )
 
 

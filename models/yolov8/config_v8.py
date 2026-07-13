@@ -130,6 +130,33 @@ class ConfigYOLOv8Anchor:
     DETECTOR_USE_COORDCONV = True
     DETECTOR_INVERT_FEATURE = True   # invert teacher feature (dark→bright) before detector
 
+    # -------- DETECTOR_HEAD_TYPE = "compact" | "center_detect" --------
+    # Anchor-free center-point detector (CompactOpticalDetector).
+    # Uses heatmap + box-size + center-offset heads; CenterDetectionLoss.
+    # COMPACT_MODEL_VERSION: "v1" (109K params) or "v2" (138K, with ECA+FPN).
+    COMPACT_MODEL_VERSION = "v1"
+    COMPACT_BASE_CH = 16
+    COMPACT_HEAD_CH = 32
+    COMPACT_DILATIONS = (1, 2, 4)
+    COMPACT_DETECTOR_LR = 3e-4
+    COMPACT_WEIGHT_DECAY = 3e-5
+    COMPACT_GRAD_CLIP_NORM = 5.0
+    HEATMAP_LOSS_WEIGHT = 1.0
+    WH_LOSS_WEIGHT = 0.08
+    OFFSET_LOSS_WEIGHT = 1.0
+    MIN_HEATMAP_RADIUS = 1
+    HEATMAP_RADIUS_SCALE = 0.35
+    # Compact decode/metric thresholds (separate from anchor-head counterparts)
+    COMPACT_CONF_THRESH = 0.30
+    COMPACT_NMS_THRESH = 0.45
+    COMPACT_MAX_DET = 100
+    COMPACT_DECODE_PRE_NMS_TOPK = 400
+    COMPACT_METRIC_CONF_THRESH = 0.01
+    COMPACT_METRIC_NMS_THRESH = 0.50
+    COMPACT_METRIC_MAX_DET = 100
+    COMPACT_METRIC_PRE_NMS_TOPK = 300
+    COMPACT_METRIC_IOU_THRESHOLD = 0.5
+
     # =========================================================================
     # Anchors
     # =========================================================================
@@ -366,6 +393,21 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_SLM_CIPHER_EDGE_WEIGHT": ("TEACHER_SLM_CIPHER_EDGE_WEIGHT", float),
             "OPTICAL_TEACHER_NUM_WORKERS": ("NUM_WORKERS", int),
             "OPTICAL_TEACHER_AMP_DTYPE": ("AMP_DTYPE", str),
+            "OPTICAL_COMPACT_BASE_CH": ("COMPACT_BASE_CH", int),
+            "OPTICAL_COMPACT_HEAD_CH": ("COMPACT_HEAD_CH", int),
+            "OPTICAL_COMPACT_DETECTOR_LR": ("COMPACT_DETECTOR_LR", float),
+            "OPTICAL_COMPACT_WEIGHT_DECAY": ("COMPACT_WEIGHT_DECAY", float),
+            "OPTICAL_COMPACT_CONF_THRESH": ("COMPACT_CONF_THRESH", float),
+            "OPTICAL_COMPACT_NMS_THRESH": ("COMPACT_NMS_THRESH", float),
+            "OPTICAL_COMPACT_MAX_DET": ("COMPACT_MAX_DET", int),
+            "OPTICAL_COMPACT_METRIC_CONF_THRESH": ("COMPACT_METRIC_CONF_THRESH", float),
+            "OPTICAL_COMPACT_METRIC_NMS_THRESH": ("COMPACT_METRIC_NMS_THRESH", float),
+            "OPTICAL_COMPACT_METRIC_MAX_DET": ("COMPACT_METRIC_MAX_DET", int),
+            "OPTICAL_COMPACT_METRIC_PRE_NMS_TOPK": ("COMPACT_METRIC_PRE_NMS_TOPK", int),
+            "OPTICAL_COMPACT_METRIC_IOU_THRESHOLD": ("COMPACT_METRIC_IOU_THRESHOLD", float),
+            "OPTICAL_COMPACT_HEATMAP_LOSS_WEIGHT": ("HEATMAP_LOSS_WEIGHT", float),
+            "OPTICAL_COMPACT_WH_LOSS_WEIGHT": ("WH_LOSS_WEIGHT", float),
+            "OPTICAL_COMPACT_OFFSET_LOSS_WEIGHT": ("OFFSET_LOSS_WEIGHT", float),
         }
         for env_name, (attr, caster) in overrides.items():
             value = os.environ.get(env_name)

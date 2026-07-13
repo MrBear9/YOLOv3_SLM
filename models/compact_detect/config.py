@@ -41,8 +41,11 @@ class ConfigCompactDetect(ConfigSLM):
     COMPACT_BASE_CH = 16
     COMPACT_DILATIONS = (1, 2, 4)
     COMPACT_HEAD_CH = 32
-    COMPACT_PRETRAINED_STUDENT = r""
-    COMPACT_TRAIN_STUDENT = True
+    COMPACT_MODEL_VERSION = "v1"           # "v1" (109K) or "v2" (144K, ECA+FPN)
+    COMPACT_PRETRAINED_STUDENT = r""       # pretrained OpticalStudent SLM phase
+    COMPACT_PRETRAINED_DETECTOR = r""      # pretrained CompactOpticalDetector weights
+    COMPACT_TRAIN_STUDENT = True            # trainable during teacher warmup (feature matching)
+    COMPACT_JOINT_TRAIN_STUDENT = False     # also trainable during detection phase (grad through detector→student)
     COMPACT_TEACHER_WARMUP_EPOCHS = 10
     COMPACT_TEACHER_WARMUP_WEIGHT = 5.0
     COMPACT_TEACHER_FEATURE_WEIGHT = 0.1
@@ -113,6 +116,8 @@ class ConfigCompactDetect(ConfigSLM):
             "OPTICAL_COMPACT_PHASE_LR": ("COMPACT_PHASE_LR", float),
             "OPTICAL_COMPACT_DETECTOR_LR": ("COMPACT_DETECTOR_LR", float),
             "OPTICAL_COMPACT_PRETRAINED_STUDENT": ("COMPACT_PRETRAINED_STUDENT", str),
+            "OPTICAL_COMPACT_PRETRAINED_DETECTOR": ("COMPACT_PRETRAINED_DETECTOR", str),
+            "OPTICAL_COMPACT_MODEL_VERSION": ("COMPACT_MODEL_VERSION", str),
             "OPTICAL_COMPACT_CONF_THRESH": ("CONF_THRESH", float),
             "OPTICAL_COMPACT_NMS_THRESH": ("NMS_THRESH", float),
             "OPTICAL_COMPACT_MAX_DET": ("MAX_DET", int),
@@ -135,6 +140,9 @@ class ConfigCompactDetect(ConfigSLM):
         train_student = os.environ.get("OPTICAL_COMPACT_TRAIN_STUDENT")
         if train_student:
             cls.COMPACT_TRAIN_STUDENT = train_student.strip().lower() in {"1", "true", "yes", "on"}
+        joint_train = os.environ.get("OPTICAL_COMPACT_JOINT_TRAIN_STUDENT")
+        if joint_train:
+            cls.COMPACT_JOINT_TRAIN_STUDENT = joint_train.strip().lower() in {"1", "true", "yes", "on"}
         warmup_raw = os.environ.get("OPTICAL_COMPACT_TEACHER_WARMUP_RAW_STUDENT")
         if warmup_raw:
             cls.COMPACT_TEACHER_WARMUP_RAW_STUDENT = warmup_raw.strip().lower() in {"1", "true", "yes", "on"}
@@ -150,6 +158,7 @@ class ConfigCompactDetect(ConfigSLM):
         cls.TEACHER_DETECTOR_CHECKPOINT = resolve_project_path(cls.TEACHER_DETECTOR_CHECKPOINT)
         cls.SLM_INIT_CHECKPOINT = resolve_project_path(cls.SLM_INIT_CHECKPOINT)
         cls.COMPACT_PRETRAINED_STUDENT = resolve_project_path(cls.COMPACT_PRETRAINED_STUDENT)
+        cls.COMPACT_PRETRAINED_DETECTOR = resolve_project_path(cls.COMPACT_PRETRAINED_DETECTOR)
         cls.SINGLE_IMAGE_PATH = resolve_project_path(cls.SINGLE_IMAGE_PATH)
         cls.SINGLE_IMAGE_LABEL_PATH = resolve_project_path(cls.SINGLE_IMAGE_LABEL_PATH)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)

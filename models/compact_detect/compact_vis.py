@@ -171,7 +171,7 @@ def add_tensorboard_visualization(writer, step, dataset, student, detector, devi
 
 
 @torch.no_grad()
-def save_compact_visualization_png(epoch, dataset, student, detector, device, save_dir=None, max_images=None, prefix="val"):
+def save_compact_visualization_png(epoch, dataset, student, detector, device, teacher=None, save_dir=None, max_images=None, prefix="val"):
     if dataset is None or len(dataset) == 0:
         return
     if save_dir is None:
@@ -188,6 +188,9 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, sa
     was_detector_training = detector_module.training
     student.eval()
     detector.eval()
+    if teacher is not None:
+        was_teacher_training = teacher.training
+        teacher.eval()
 
     sample_indices = select_visualization_indices(len(dataset), max_images)
     sample_count = len(sample_indices)
@@ -196,11 +199,16 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, sa
         detector.train(was_detector_wrapper_training)
         student_module.train(was_student_training)
         detector_module.train(was_detector_training)
+        if teacher is not None:
+            teacher.train(was_teacher_training)
         return
 
-    fig, axes = plt.subplots(sample_count, 3, figsize=(18, 6 * sample_count))
-    axes = np.asarray(axes).reshape(sample_count, 3)
+    ncols = 4 if teacher is not None else 3
+    fig, axes = plt.subplots(sample_count, ncols, figsize=(6 * ncols, 6 * sample_count))
+    axes = np.asarray(axes).reshape(sample_count, ncols)
     fp32_ctx = torch.amp.autocast(device_type="cuda", enabled=False) if device.type == "cuda" else nullcontext()
+
+    col_names = ["Input", "Teacher feature", "SLM optical feature", "GT + Predictions"] if teacher is not None else ["Input", "SLM optical feature", "GT + Predictions"]
 
     with fp32_ctx:
         for row, sample_idx in enumerate(sample_indices):
@@ -221,13 +229,31 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, sa
             )[0]
 
             img_np = gray.squeeze(0).detach().cpu().numpy()
+
+            col = 0
+            # Column 0: Input
+            axes[row, col].imshow(img_np, cmap="gray")
+            axes[row, col].set_title(col_names[col])
+            col += 1
+
+            # Column 1 (teacher present): Teacher 1ch feature
+            if teacher is not None:
+                rgb = sample["rgb_tensor"].unsqueeze(0).to(device, non_blocking=Config.PIN_MEMORY).float()
+                teacher_feat = teacher(rgb)
+                teacher_np = enhance_feature_for_display(teacher_feat.squeeze().detach().cpu().numpy())
+                axes[row, col].imshow(teacher_np, cmap="magma")
+                axes[row, col].set_title(col_names[col])
+                col += 1
+
+            # Next column: SLM optical feature
             feature_np = enhance_feature_for_display(raw_feature.squeeze().detach().cpu().numpy())
-            axes[row, 0].imshow(img_np, cmap="gray")
-            axes[row, 0].set_title("Input")
-            axes[row, 1].imshow(feature_np, cmap="magma")
-            axes[row, 1].set_title("SLM optical feature")
-            axes[row, 2].imshow(img_np, cmap="gray")
-            axes[row, 2].set_title("GT + Predictions")
+            axes[row, col].imshow(feature_np, cmap="magma")
+            axes[row, col].set_title(col_names[col])
+            col += 1
+
+            # Last column: GT + Predictions
+            axes[row, col].imshow(img_np, cmap="gray")
+            axes[row, col].set_title(col_names[col])
 
             for target in targets:
                 if target.numel() < 5:
@@ -235,7 +261,7 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, sa
                 cls_id, cx, cy, w, h = target.tolist()
                 x1 = (cx - w / 2) * Config.IMG_SIZE
                 y1 = (cy - h / 2) * Config.IMG_SIZE
-                axes[row, 2].add_patch(
+                axes[row, col].add_patch(
                     plt.Rectangle(
                         (x1, y1),
                         w * Config.IMG_SIZE,
@@ -246,7 +272,7 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, sa
                         linestyle="--",
                     )
                 )
-                axes[row, 2].text(
+                axes[row, col].text(
                     x1,
                     y1 + 10,
                     str(Config.CLASS_NAMES.get(int(cls_id), int(cls_id))),
@@ -259,10 +285,10 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, sa
                 cx, cy, w, h, conf, cls_id = [float(v) for v in det]
                 x1 = cx - w / 2
                 y1 = cy - h / 2
-                axes[row, 2].add_patch(
+                axes[row, col].add_patch(
                     plt.Rectangle((x1, y1), w, h, fill=False, edgecolor="red", linewidth=1.6)
                 )
-                axes[row, 2].text(
+                axes[row, col].text(
                     x1,
                     y1 + 10,
                     f"{Config.CLASS_NAMES.get(int(cls_id), int(cls_id))} {conf:.2f}",
@@ -271,8 +297,8 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, sa
                     bbox=dict(boxstyle="round,pad=0.20", facecolor="black", alpha=0.35, edgecolor="none"),
                 )
 
-            for col in range(3):
-                axes[row, col].axis("off")
+            for c in range(ncols):
+                axes[row, c].axis("off")
 
     plt.tight_layout()
     output_path = os.path.join(save_dir, f"{prefix}_epoch_{int(epoch):03d}.png")
@@ -282,4 +308,6 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, sa
     detector.train(was_detector_wrapper_training)
     student_module.train(was_student_training)
     detector_module.train(was_detector_training)
+    if teacher is not None:
+        teacher.train(was_teacher_training)
     log_to_file(Config, f"Saved compact visualization: {output_path}")

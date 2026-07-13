@@ -1,8 +1,29 @@
-"""models - Optical teacher detector training framework."""
+"""models - Optical teacher detector training framework.
+
+When DETECTOR_HEAD_TYPE is "compact" or "center_detect", the teacher +
+CompactOpticalDetector training loop is used (teacher_train_compact.py).
+For all other head types the original anchor-based training loop is used
+(teacher_train_loop.py).
+"""
 
 __version__ = "0.1.0"
 
 
-from .teacher_train_loop import train
+def train():
+    """Train with the appropriate loop based on DETECTOR_HEAD_TYPE config."""
+    from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
+
+    # Resolve head type from env vars before initialisation so we can route.
+    # (initialize() inside each train function will call this again — idempotent.)
+    Config.apply_runtime_overrides()
+    head_type = str(getattr(Config, "DETECTOR_HEAD_TYPE", "yolov8_anchor")).strip().lower()
+
+    if head_type in ("compact", "center_detect"):
+        from .teacher_train_compact import train as _train
+    else:
+        from .teacher_train_loop import train as _train
+
+    return _train()
+
 
 __all__ = ["train"]

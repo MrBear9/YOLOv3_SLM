@@ -48,7 +48,8 @@ from .compact_vis import add_tensorboard_teacher_feature, add_tensorboard_visual
 from .config import ConfigCompactDetect as Config
 from .losses import CenterDetectionLoss
 from .metrics import evaluate_center_detector
-from .model import CompactOpticalDetector, OpticalCompactDetector
+from .model import OpticalCompactDetector
+from models.yolov8.head_v8 import build_detector_head
 
 
 def _collect_compact_val_detections(config, student, detector, val_loader, device):
@@ -138,6 +139,12 @@ def train():
             f"raw_student={Config.COMPACT_TEACHER_WARMUP_RAW_STUDENT}; "
             f"compact feature weight={compact_teacher_weight}",
         )
+        log_to_file(
+            Config,
+            f"Detection phase: student {'trainable' if Config.COMPACT_JOINT_TRAIN_STUDENT else 'frozen'} "
+            f"(COMPACT_JOINT_TRAIN_STUDENT={Config.COMPACT_JOINT_TRAIN_STUDENT}) — "
+            f"{'gradients flow detector→student' if Config.COMPACT_JOINT_TRAIN_STUDENT else 'only detector learns'}",
+        )
 
     train_dataset = SLMFeatureDataset(Config, split="train")
     val_dataset = SLMFeatureDataset(Config, split="val")
@@ -174,13 +181,44 @@ def train():
     val_loader = DataLoader(val_dataset, shuffle=False, sampler=val_sampler, **loader_kwargs)
 
     student_raw = OpticalStudent(Config).to(device)
+
+    # ── Student checkpoint loading (priority chain) ─────────────────────
+    #  1. COMPACT_PRETRAINED_STUDENT (compact-specific, highest priority)
+    #  2. SLM_INIT_CHECKPOINT (shared, when SLM_INIT_MODE contains "checkpoint")
+    #  3. Default: keep the initial phase from SLM_INIT_MODE (vortex / dh_psf / zero)
     pretrained_student = Config.COMPACT_PRETRAINED_STUDENT
+    student_checkpoint_used = None
     if pretrained_student:
         info = load_student_checkpoint(student_raw, pretrained_student, device)
-        log_to_file(Config, f"Student checkpoint load: {info}")
+        log_to_file(Config, f"Student loaded from COMPACT_PRETRAINED_STUDENT: {info}")
+        student_checkpoint_used = pretrained_student
+    else:
+        slm_init_mode = str(getattr(Config, "SLM_INIT_MODE", "")).strip().lower()
+        if "checkpoint" in slm_init_mode:
+            slm_ckpt = Config.SLM_INIT_CHECKPOINT
+            if slm_ckpt:
+                info = load_student_checkpoint(student_raw, slm_ckpt, device)
+                log_to_file(Config, f"Student loaded from SLM_INIT_CHECKPOINT ({slm_init_mode}): {info}")
+                student_checkpoint_used = slm_ckpt
+    if not student_checkpoint_used:
+        slm_init_mode = str(getattr(Config, "SLM_INIT_MODE", "vortex")).strip().lower()
+        log_to_file(Config, f"Student initialised from SLM_INIT_MODE={slm_init_mode} (no checkpoint loaded)")
+
     set_trainable(student_raw, bool(Config.COMPACT_TRAIN_STUDENT))
 
-    detector_raw = CompactOpticalDetector(Config, in_channels=1).to(device)
+    # ── Detector: use factory (respects COMPACT_MODEL_VERSION) ────────
+    detector_raw = build_detector_head(Config, in_channels=1).to(device)
+    pretrained_detector = Config.COMPACT_PRETRAINED_DETECTOR
+    if pretrained_detector:
+        ckpt = torch.load(pretrained_detector, map_location=device)
+        detector_raw.load_state_dict(ckpt["detector_state_dict"])
+        log_to_file(
+            Config,
+            f"Loaded pretrained compact detector from {pretrained_detector} "
+            f"(epoch={ckpt.get('epoch', '?')}, head_type={ckpt.get('head_type', '?')})",
+        )
+    version = str(getattr(Config, "COMPACT_MODEL_VERSION", "v2")).strip().lower()
+    log_to_file(Config, f"Compact detector version: {version}  ({sum(p.numel() for p in detector_raw.parameters()):,} params)")
     if Config.ENABLE_CHANNELS_LAST and torch.cuda.is_available():
         student_raw = student_raw.to(memory_format=torch.channels_last)
         detector_raw = detector_raw.to(memory_format=torch.channels_last)
@@ -248,7 +286,8 @@ def train():
             tensorboard_writer, 0, initial_visualization_dataset, student, detector, device, prefix=initial_prefix
         )
         save_compact_visualization_png(
-            0, initial_visualization_dataset, student, detector, device, prefix=initial_prefix
+            0, initial_visualization_dataset, student, detector, device,
+            teacher=teacher, prefix=initial_prefix,
         )
     if dist.is_initialized():
         dist.barrier()
@@ -270,7 +309,15 @@ def train():
         current_sampler = warmup_sampler if in_teacher_warmup else train_sampler
         if current_sampler is not None:
             current_sampler.set_epoch(epoch)
-        student.train(bool(Config.COMPACT_TRAIN_STUDENT))
+        # ── Phase-aware trainability ───────────────────────────────────
+        # Warmup:  student learns from teacher features (COMPACT_TRAIN_STUDENT)
+        # Detection: student frozen unless COMPACT_JOINT_TRAIN_STUDENT = True
+        if in_teacher_warmup:
+            train_student_now = bool(Config.COMPACT_TRAIN_STUDENT)
+        else:
+            train_student_now = bool(Config.COMPACT_JOINT_TRAIN_STUDENT)
+        student.train(train_student_now)
+        set_trainable(student, train_student_now)
         detector.train(not in_teacher_warmup)
         set_trainable(detector, not in_teacher_warmup)
         epoch_loss_t = torch.zeros((), device=device)
@@ -361,7 +408,8 @@ def train():
             visualization_dataset = warmup_visualization_dataset if in_teacher_warmup else val_dataset
             visualization_prefix = "warmup" if in_teacher_warmup else "val"
             save_compact_visualization_png(
-                epoch + 1, visualization_dataset, student, detector, device, prefix=visualization_prefix
+                epoch + 1, visualization_dataset, student, detector, device,
+                teacher=teacher, prefix=visualization_prefix,
             )
         if dist.is_initialized():
             dist.barrier()
