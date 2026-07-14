@@ -134,7 +134,7 @@ class ConfigYOLOv8Anchor:
     # Anchor-free center-point detector (CompactOpticalDetector).
     # Uses heatmap + box-size + center-offset heads; CenterDetectionLoss.
     # COMPACT_MODEL_VERSION: "v1" (109K params) or "v2" (138K, with ECA+FPN).
-    COMPACT_MODEL_VERSION = "v1"
+    COMPACT_MODEL_VERSION = "v2"
     COMPACT_BASE_CH = 16
     COMPACT_HEAD_CH = 32
     COMPACT_DILATIONS = (1, 2, 4)
@@ -151,7 +151,7 @@ class ConfigYOLOv8Anchor:
     COMPACT_NMS_THRESH = 0.45
     COMPACT_MAX_DET = 100
     COMPACT_DECODE_PRE_NMS_TOPK = 400
-    COMPACT_METRIC_CONF_THRESH = 0.01
+    COMPACT_METRIC_CONF_THRESH = 0.001
     COMPACT_METRIC_NMS_THRESH = 0.50
     COMPACT_METRIC_MAX_DET = 100
     COMPACT_METRIC_PRE_NMS_TOPK = 300

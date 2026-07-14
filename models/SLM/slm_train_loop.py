@@ -195,7 +195,7 @@ def _finalize(ctx):
     tensorboard_writer = ctx["tensorboard_writer"]
 
     if is_main:
-        save_training_curves(history, Config.OUTPUT_DIR)
+        save_training_curves(history, Config.OUTPUT_DIR, op_conf_threshold=Config.CONF_THRESH)
         save_slm_component_curves(history, Config.OUTPUT_DIR)
         if tensorboard_writer is not None:
             tensorboard_writer.close()

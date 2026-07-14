@@ -165,6 +165,15 @@ def write_slm_tensorboard_scalars(
         for key in ("precision", "recall", "f1", "map50", "precision_op", "recall_op", "f1_op"):
             add_tensorboard_scalar(writer, f"Metrics/{stage_name}/{key}", val_metrics.get(key), step)
             add_tensorboard_scalar(writer, f"Metrics/All_Stages/{key}", val_metrics.get(key), step)
+        op_conf = float(getattr(Config, "CONF_THRESH", 0.35))
+        threshold_tag = f"conf_{op_conf:g}"
+        for key in ("precision_op", "recall_op", "f1_op"):
+            add_tensorboard_scalar(
+                writer, f"MetricsOperating/{threshold_tag}/{stage_name}/{key}", val_metrics.get(key), step
+            )
+            add_tensorboard_scalar(
+                writer, f"MetricsOperating/{threshold_tag}/All_Stages/{key}", val_metrics.get(key), step
+            )
     if slm_stats is not None:
         for key in (
             "slm1_wrapped_std",

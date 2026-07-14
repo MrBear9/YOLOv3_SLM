@@ -263,8 +263,9 @@ def run_epoch(
                 tensorboard_writer, cm_dets, cm_targets,
                 Config.NUM_CLASSES, Config.CLASS_NAMES, display_epoch,
                 iou_threshold=Config.METRIC_IOU_THRESHOLD,
-                conf_threshold=getattr(Config, "METRIC_CONF_THRESH", Config.CONF_THRESH),
+                conf_threshold=getattr(Config, "CONF_THRESH", 0.35),
                 prefix="ConfusionMatrix",
+                image_size=Config.IMG_SIZE,
             )
 
     if is_main:
@@ -393,6 +394,7 @@ def run_epoch(
         map50=val_metrics["map50"] if val_metrics is not None else None,
         lr=current_lr,
         best_status=Config.EPOCH_TABLE_BEST_MARK if detector_score_is_best else "",
+        precision_op=val_metrics["precision_op"] if val_metrics is not None else None,
     )
     if use_ddp:
         torch.distributed.barrier()

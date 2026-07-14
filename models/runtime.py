@@ -180,7 +180,8 @@ def log_epoch_table_row(config, epoch, phase, train_loss, val_loss, precision, r
             f"{str(best_status):<{config.EPOCH_TABLE_BEST_WIDTH}}"
         )
         if precision_op is not None:
-            line += f" Prec@0.35={precision_op:.3f}"
+            op_conf = float(getattr(config, "CONF_THRESH", 0.35))
+            line += f" Prec@{op_conf:g}={precision_op:.3f}"
         append_plain_log(config, line)
 
 

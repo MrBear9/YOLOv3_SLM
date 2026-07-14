@@ -90,3 +90,4 @@ tools/
 docs/
 __pycache__
 neural-holography/
+.gitignore

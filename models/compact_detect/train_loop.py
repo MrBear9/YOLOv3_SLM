@@ -74,6 +74,7 @@ def _collect_compact_val_detections(config, student, detector, val_loader, devic
                 conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
                 nms_thresh=getattr(config, "METRIC_NMS_THRESH", config.NMS_THRESH),
                 max_det=getattr(config, "METRIC_MAX_DET", config.MAX_DET),
+                pre_nms_topk=getattr(config, "METRIC_PRE_NMS_TOPK", None),
             )
             targets = batch["targets"]
             for i, dets in enumerate(detections):
@@ -443,8 +444,9 @@ def train():
                     tensorboard_writer, cm_dets, cm_targets,
                     Config.NUM_CLASSES, Config.CLASS_NAMES, epoch + 1,
                     iou_threshold=getattr(Config, "METRIC_IOU_THRESHOLD", 0.5),
-                    conf_threshold=getattr(Config, "METRIC_CONF_THRESH", Config.CONF_THRESH),
+                    conf_threshold=getattr(Config, "CONF_THRESH", 0.30),
                     prefix="ConfusionMatrix",
+                    image_size=Config.IMG_SIZE,
                 )
             log_epoch_table_row(
                 Config,
@@ -458,6 +460,7 @@ def train():
                 map50=val_metrics["map50"] if val_metrics is not None else None,
                 lr=current_lr,
                 best_status=Config.EPOCH_TABLE_BEST_MARK if is_best else "",
+                precision_op=val_metrics["precision_op"] if val_metrics is not None else None,
             )
 
     if is_main:

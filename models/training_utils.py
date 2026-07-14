@@ -121,7 +121,7 @@ def add_tensorboard_scalar(writer, tag, value, step):
     writer.add_scalar(tag, numeric_value, step)
 
 
-def save_training_curves(history, output_dir):
+def save_training_curves(history, output_dir, op_conf_threshold=None):
     os.makedirs(output_dir, exist_ok=True)
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     axes = axes.ravel()
@@ -135,7 +135,10 @@ def save_training_curves(history, output_dir):
     # Precision: prefer operating-point if available, otherwise fallback to metric threshold
     prec_op_x, prec_op_y = _valid_history_points(history.get("precision_op", []))
     if prec_op_y:
-        axes[1].plot(prec_op_x, prec_op_y, label="Prec (op)")
+        op_label = "Precision (op)"
+        if op_conf_threshold is not None:
+            op_label = f"Precision (op, conf={float(op_conf_threshold):g})"
+        axes[1].plot(prec_op_x, prec_op_y, label=op_label)
     else:
         prec_x, prec_y = _valid_history_points(history.get("precision", []))
         axes[1].plot(prec_x, prec_y, label="precision")

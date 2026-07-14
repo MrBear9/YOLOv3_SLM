@@ -28,9 +28,19 @@ def compute_average_precision(detections, total_gt):
     return float(np.sum((mrec[indices + 1] - mrec[indices]) * mpre[indices + 1]))
 
 
-def _distributed_merge_metrics(metric_storage, gt_counts, loss_totals, total_tp, total_fp, total_fn, num_batches, device):
+def _distributed_merge_metrics(
+    metric_storage, gt_counts, loss_totals,
+    total_tp, total_fp, total_fn,
+    total_tp_op, total_fp_op, total_fn_op,
+    num_batches, device,
+):
     if not dist.is_initialized():
-        return metric_storage, gt_counts, loss_totals, total_tp, total_fp, total_fn, num_batches
+        return (
+            metric_storage, gt_counts, loss_totals,
+            total_tp, total_fp, total_fn,
+            total_tp_op, total_fp_op, total_fn_op,
+            num_batches,
+        )
 
     payload = {
         "metric_storage": metric_storage,
@@ -56,6 +66,9 @@ def _distributed_merge_metrics(metric_storage, gt_counts, loss_totals, total_tp,
             float(total_tp),
             float(total_fp),
             float(total_fn),
+            float(total_tp_op),
+            float(total_fp_op),
+            float(total_fn_op),
             float(num_batches),
         ],
         dtype=torch.float64,
@@ -75,7 +88,10 @@ def _distributed_merge_metrics(metric_storage, gt_counts, loss_totals, total_tp,
         int(stat_tensor[4].item()),
         int(stat_tensor[5].item()),
         int(stat_tensor[6].item()),
-        int(max(stat_tensor[7].item(), 1.0)),
+        int(stat_tensor[7].item()),
+        int(stat_tensor[8].item()),
+        int(stat_tensor[9].item()),
+        int(max(stat_tensor[10].item(), 1.0)),
     )
 
 
@@ -87,6 +103,8 @@ def evaluate_center_detector(config, student, detector, dataloader, criterion, d
     gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
     loss_totals = {key: 0.0 for key in ("total", "heatmap", "wh", "offset")}
     total_tp = total_fp = total_fn = 0
+    total_tp_op = total_fp_op = total_fn_op = 0
+    op_conf_thresh = float(getattr(config, "CONF_THRESH", 0.30))
     is_main = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     amp_enabled = bool(getattr(config, "ENABLE_AMP", True)) and device.type == "cuda"
     amp_dtype = torch.bfloat16 if str(getattr(config, "AMP_DTYPE", "float16")).lower() in {"bf16", "bfloat16"} else torch.float16
@@ -129,12 +147,20 @@ def evaluate_center_detector(config, student, detector, dataloader, criterion, d
             for det in sample_detections:
                 dets_by_class.setdefault(int(det[5]), []).append(det)
 
-            for cls_id, gt_boxes_list in gt_by_class.items():
-                gt_boxes = torch.tensor(gt_boxes_list, dtype=torch.float32, device=device)
+            # Include prediction-only classes: every such detection is an FP and
+            # must participate in its class AP curve and the global precision.
+            for cls_id in set(gt_by_class) | set(dets_by_class):
+                gt_boxes_list = gt_by_class.get(cls_id, [])
                 dets = sorted(dets_by_class.get(cls_id, []), key=lambda d: d[4], reverse=True)
+                if not gt_boxes_list:
+                    metric_storage[cls_id].extend((float(det[4]), 0.0) for det in dets)
+                    total_fp += len(dets)
+                    continue
                 if not dets:
                     total_fn += len(gt_boxes_list)
+                    total_fn_op += len(gt_boxes_list)
                     continue
+                gt_boxes = torch.tensor(gt_boxes_list, dtype=torch.float32, device=device)
                 det_boxes = torch.from_numpy(np.stack([d[:4] for d in dets])).to(device=device, dtype=torch.float32)
                 iou_matrix = bbox_iou_matrix_xywh(det_boxes, gt_boxes)
                 matched_gt = set()
@@ -152,14 +178,50 @@ def evaluate_center_detector(config, student, detector, dataloader, criterion, d
                         total_fp += 1
                 total_fn += len(gt_boxes_list) - len(matched_gt)
 
+                op_dets = [det for det in dets if float(det[4]) >= op_conf_thresh]
+                if not op_dets:
+                    total_fn_op += len(gt_boxes_list)
+                    continue
+                op_det_boxes = torch.from_numpy(np.stack([d[:4] for d in op_dets])).to(
+                    device=device, dtype=torch.float32
+                )
+                op_iou_matrix = bbox_iou_matrix_xywh(op_det_boxes, gt_boxes)
+                matched_gt_op = set()
+                for det_idx in range(len(op_dets)):
+                    ious = op_iou_matrix[det_idx].clone()
+                    for matched_idx in matched_gt_op:
+                        ious[matched_idx] = -1.0
+                    best_iou, best_gt_idx = ious.max(dim=0)
+                    if float(best_iou.item()) >= config.METRIC_IOU_THRESHOLD:
+                        total_tp_op += 1
+                        matched_gt_op.add(int(best_gt_idx.item()))
+                    else:
+                        total_fp_op += 1
+                total_fn_op += len(gt_boxes_list) - len(matched_gt_op)
+
+            # Prediction-only classes do not enter the branch above with GT,
+            # but their operating-point detections still count as false positives.
+            for cls_id in set(dets_by_class) - set(gt_by_class):
+                total_fp_op += sum(
+                    float(det[4]) >= op_conf_thresh for det in dets_by_class[cls_id]
+                )
+
     num_batches = max(len(dataloader), 1)
-    metric_storage, gt_counts, loss_totals, total_tp, total_fp, total_fn, num_batches = _distributed_merge_metrics(
+    (
+        metric_storage, gt_counts, loss_totals,
+        total_tp, total_fp, total_fn,
+        total_tp_op, total_fp_op, total_fn_op,
+        num_batches,
+    ) = _distributed_merge_metrics(
         metric_storage,
         gt_counts,
         loss_totals,
         total_tp,
         total_fp,
         total_fn,
+        total_tp_op,
+        total_fp_op,
+        total_fn_op,
         num_batches,
         device,
     )
@@ -167,6 +229,9 @@ def evaluate_center_detector(config, student, detector, dataloader, criterion, d
     precision = total_tp / (total_tp + total_fp + 1e-6)
     recall = total_tp / (total_tp + total_fn + 1e-6)
     f1 = 2.0 * precision * recall / (precision + recall + 1e-6)
+    precision_op = total_tp_op / (total_tp_op + total_fp_op + 1e-6)
+    recall_op = total_tp_op / (total_tp_op + total_fn_op + 1e-6)
+    f1_op = 2.0 * precision_op * recall_op / (precision_op + recall_op + 1e-6)
     ap_values = []
     for cls_id in range(config.NUM_CLASSES):
         ap = compute_average_precision(metric_storage[cls_id], gt_counts[cls_id])
@@ -177,4 +242,7 @@ def evaluate_center_detector(config, student, detector, dataloader, criterion, d
         "recall": float(recall),
         "f1": float(f1),
         "map50": float(np.mean(ap_values)) if ap_values else 0.0,
+        "precision_op": float(precision_op),
+        "recall_op": float(recall_op),
+        "f1_op": float(f1_op),
     }

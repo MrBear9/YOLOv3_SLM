@@ -359,8 +359,9 @@ def train():
                     tensorboard_writer, cm_dets, cm_targets,
                     Config.NUM_CLASSES, Config.CLASS_NAMES, epoch + 1,
                     iou_threshold=Config.METRIC_IOU_THRESHOLD,
-                    conf_threshold=getattr(Config, "METRIC_CONF_THRESH", Config.CONF_THRESH),
+                    conf_threshold=getattr(Config, "CONF_THRESH", 0.35),
                     prefix="ConfusionMatrix",
+                    image_size=Config.IMG_SIZE,
                 )
 
         is_best = False
@@ -456,7 +457,7 @@ def train():
     log_to_file(Config, f"Teacher output directory: {Config.TEACHER_OUTPUT_DIR}")
     log_to_file(Config, "=" * 60)
     if is_main:
-        save_training_curves(history, Config.TEACHER_OUTPUT_DIR)
+        save_training_curves(history, Config.TEACHER_OUTPUT_DIR, op_conf_threshold=Config.CONF_THRESH)
         if tensorboard_writer is not None:
             tensorboard_writer.close()
 

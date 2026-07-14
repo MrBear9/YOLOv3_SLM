@@ -85,12 +85,17 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
                     dets_by_class.setdefault(cls_id, []).append(det)
 
                 matched_coco = {}
-                for cls_id, gt_boxes_list in gt_by_class.items():
-                    gt_boxes = torch.tensor(gt_boxes_list, dtype=torch.float32, device=device)
+                for cls_id in set(gt_by_class) | set(dets_by_class):
+                    gt_boxes_list = gt_by_class.get(cls_id, [])
                     dets = dets_by_class.get(cls_id, [])
+                    if not gt_boxes_list:
+                        metric_storage[cls_id].extend((float(det[4]), 0.0) for det in dets)
+                        total_fp += len(dets)
+                        continue
                     if not dets:
                         total_fn += len(gt_boxes_list)
                         continue
+                    gt_boxes = torch.tensor(gt_boxes_list, dtype=torch.float32, device=device)
                     dets_sorted = sorted(dets, key=lambda d: d[4], reverse=True)
                     det_boxes = torch.from_numpy(np.stack([d[:4] for d in dets_sorted])).to(device=device, dtype=torch.float32)
                     det_confs = [d[4] for d in dets_sorted]
@@ -114,13 +119,17 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
                     total_fn += len(gt_boxes_list) - len(matched_gt)
 
                 matched_op = {}
-                for cls_id, gt_boxes_list in gt_by_class.items():
-                    gt_boxes = torch.tensor(gt_boxes_list, dtype=torch.float32, device=device)
+                for cls_id in set(gt_by_class) | set(dets_by_class):
+                    gt_boxes_list = gt_by_class.get(cls_id, [])
                     dets = dets_by_class.get(cls_id, [])
                     op_dets = [d for d in dets if float(d[4]) >= op_conf_thresh]
+                    if not gt_boxes_list:
+                        total_fp_op += len(op_dets)
+                        continue
                     if not op_dets:
                         total_fn_op += len(gt_boxes_list)
                         continue
+                    gt_boxes = torch.tensor(gt_boxes_list, dtype=torch.float32, device=device)
                     op_dets_sorted = sorted(op_dets, key=lambda d: d[4], reverse=True)
                     op_det_boxes = torch.from_numpy(np.stack([d[:4] for d in op_dets_sorted])).to(device=device, dtype=torch.float32)
                     iou_matrix = bbox_iou_matrix_xywh(op_det_boxes, gt_boxes)

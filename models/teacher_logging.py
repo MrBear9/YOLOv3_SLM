@@ -102,4 +102,8 @@ def write_teacher_tensorboard_scalars(writer, step, train_losses, val_losses=Non
     if val_metrics is not None:
         for key in ("precision", "recall", "f1", "map50", "precision_op", "recall_op", "f1_op"):
             add_tensorboard_scalar(writer, f"Metrics/{key}", val_metrics.get(key), step)
+        op_conf = float(getattr(Config, "CONF_THRESH", 0.35))
+        threshold_tag = f"conf_{op_conf:g}"
+        for key in ("precision_op", "recall_op", "f1_op"):
+            add_tensorboard_scalar(writer, f"MetricsOperating/{threshold_tag}/{key}", val_metrics.get(key), step)
     add_tensorboard_scalar(writer, "LR/current", lr, step)

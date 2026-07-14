@@ -135,6 +135,7 @@ def _collect_compact_val_detections(teacher, detector, val_loader, device):
                 conf_thresh=getattr(Config, "COMPACT_METRIC_CONF_THRESH", Config.COMPACT_CONF_THRESH),
                 nms_thresh=getattr(Config, "COMPACT_METRIC_NMS_THRESH", Config.COMPACT_NMS_THRESH),
                 max_det=getattr(Config, "COMPACT_METRIC_MAX_DET", Config.COMPACT_MAX_DET),
+                pre_nms_topk=getattr(Config, "COMPACT_METRIC_PRE_NMS_TOPK", None),
             )
             for i, dets in enumerate(detections):
                 all_dets.append(np.array(dets) if not isinstance(dets, np.ndarray) else dets)
@@ -169,9 +170,24 @@ def _write_compact_tensorboard_predictions(writer, step, teacher, detector, data
     with torch.no_grad():
         for idx in indices:
             img_tensor, targets = dataset[idx]
-            # img_tensor: (3, H, W) RGB in [0, 1]
-            img_np = (img_tensor.permute(1, 2, 0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
-            canvas = Image.fromarray(img_np).convert("RGB")
+            # img_tensor: (C, H, W) in [0, 1] — C=3 (RGB) or C=1 (gray)
+            img_arr = img_tensor.cpu().numpy()
+            if img_arr.ndim == 3 and img_arr.shape[0] == 1:
+                # Grayscale (1, H, W) → (H, W)
+                img_arr = (img_arr.squeeze(0) * 255).clip(0, 255).astype(np.uint8)
+                canvas = Image.fromarray(img_arr, mode="L").convert("RGB")
+            elif img_arr.ndim == 3 and img_arr.shape[0] == 3:
+                # RGB (3, H, W) → (H, W, 3)
+                img_arr = (img_arr.transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                canvas = Image.fromarray(img_arr).convert("RGB")
+            else:
+                # Fallback: handle unexpected shapes
+                img_arr = img_arr.squeeze()
+                if img_arr.ndim == 2:
+                    img_arr = (img_arr * 255).clip(0, 255).astype(np.uint8)
+                    canvas = Image.fromarray(img_arr, mode="L").convert("RGB")
+                else:
+                    canvas = Image.new("RGB", (Config.IMG_SIZE, Config.IMG_SIZE), (128, 128, 128))
             draw = ImageDraw.Draw(canvas)
 
             # Inference
@@ -202,9 +218,15 @@ def _write_compact_tensorboard_predictions(writer, step, teacher, detector, data
 
             # Draw predictions (red)
             for det in dets_list[0]:
-                x1, y1, x2, y2 = det[0], det[1], det[2], det[3]
+                cx, cy, bw, bh = float(det[0]), float(det[1]), float(det[2]), float(det[3])
                 score = det[4]
                 cls_id = int(det[5])
+                x1 = max(0, int(cx - bw / 2))
+                y1 = max(0, int(cy - bh / 2))
+                x2 = min(canvas.width - 1, int(cx + bw / 2))
+                y2 = min(canvas.height - 1, int(cy + bh / 2))
+                if x2 <= x1 or y2 <= y1:
+                    continue
                 draw.rectangle([x1, y1, x2, y2], outline=(220, 40, 40), width=2)
                 cls_name = Config.CLASS_NAMES.get(cls_id, str(cls_id)) if Config.CLASS_NAMES else str(cls_id)
                 draw.text((x1, y2 + 2), f"{cls_name} {score:.2f}", fill=(220, 40, 40))
@@ -230,6 +252,7 @@ def _evaluate_teacher_compact(teacher, detector, val_loader, criterion, device):
     gt_counts = {cls_id: 0 for cls_id in range(Config.NUM_CLASSES)}
     loss_totals = {"total": 0.0, "heatmap": 0.0, "wh": 0.0, "offset": 0.0}
     total_tp = total_fp = total_fn = 0
+    total_tp_op = total_fp_op = total_fn_op = 0
     num_batches = 0
     is_main = not dist.is_initialized() or dist.get_rank() == 0
 
@@ -242,6 +265,7 @@ def _evaluate_teacher_compact(teacher, detector, val_loader, criterion, device):
         else nullcontext()
     )
     metric_iou = float(getattr(Config, "COMPACT_METRIC_IOU_THRESHOLD", 0.5))
+    op_conf = float(getattr(Config, "COMPACT_CONF_THRESH", 0.30))
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validating (compact)", leave=False, disable=not is_main):
@@ -261,6 +285,7 @@ def _evaluate_teacher_compact(teacher, detector, val_loader, criterion, device):
                 conf_thresh=getattr(Config, "COMPACT_METRIC_CONF_THRESH", Config.COMPACT_CONF_THRESH),
                 nms_thresh=getattr(Config, "COMPACT_METRIC_NMS_THRESH", Config.COMPACT_NMS_THRESH),
                 max_det=getattr(Config, "COMPACT_METRIC_MAX_DET", Config.COMPACT_MAX_DET),
+                pre_nms_topk=getattr(Config, "COMPACT_METRIC_PRE_NMS_TOPK", None),
             )
 
             for sample_idx, sample_dets in enumerate(detections):
@@ -284,12 +309,19 @@ def _evaluate_teacher_compact(teacher, detector, val_loader, criterion, device):
                 for det in sample_dets:
                     dets_by_class.setdefault(int(det[5]), []).append(det)
 
-                for cls_id, gt_boxes_list in gt_by_class.items():
-                    gt_boxes = torch.tensor(gt_boxes_list, dtype=torch.float32, device=device)
+                # Prediction-only classes are false positives too; excluding them
+                # inflates AP and makes it disagree with the confusion matrix.
+                for cls_id in set(gt_by_class) | set(dets_by_class):
+                    gt_boxes_list = gt_by_class.get(cls_id, [])
                     dets = sorted(dets_by_class.get(cls_id, []), key=lambda d: d[4], reverse=True)
+                    if not gt_boxes_list:
+                        metric_storage[cls_id].extend((float(det[4]), 0.0) for det in dets)
+                        total_fp += len(dets)
+                        continue
                     if not dets:
                         total_fn += len(gt_boxes_list)
                         continue
+                    gt_boxes = torch.tensor(gt_boxes_list, dtype=torch.float32, device=device)
                     det_boxes = torch.from_numpy(np.stack([d[:4] for d in dets])).to(device=device, dtype=torch.float32)
                     iou_matrix = bbox_iou_matrix_xywh(det_boxes, gt_boxes)
                     matched_gt = set()
@@ -306,6 +338,34 @@ def _evaluate_teacher_compact(teacher, detector, val_loader, criterion, device):
                         else:
                             total_fp += 1
                     total_fn += len(gt_boxes_list) - len(matched_gt)
+
+                for cls_id in set(gt_by_class) | set(dets_by_class):
+                    gt_boxes_list = gt_by_class.get(cls_id, [])
+                    op_dets = sorted(
+                        (det for det in dets_by_class.get(cls_id, []) if float(det[4]) >= op_conf),
+                        key=lambda det: det[4], reverse=True,
+                    )
+                    if not gt_boxes_list:
+                        total_fp_op += len(op_dets)
+                        continue
+                    if not op_dets:
+                        total_fn_op += len(gt_boxes_list)
+                        continue
+                    gt_boxes = torch.tensor(gt_boxes_list, dtype=torch.float32, device=device)
+                    det_boxes = torch.from_numpy(np.stack([det[:4] for det in op_dets])).to(device=device, dtype=torch.float32)
+                    iou_matrix = bbox_iou_matrix_xywh(det_boxes, gt_boxes)
+                    matched_gt = set()
+                    for det_idx in range(len(op_dets)):
+                        ious = iou_matrix[det_idx].clone()
+                        for matched_idx in matched_gt:
+                            ious[matched_idx] = -1.0
+                        best_iou, best_gt_idx = ious.max(dim=0)
+                        if float(best_iou.item()) >= metric_iou:
+                            total_tp_op += 1
+                            matched_gt.add(int(best_gt_idx.item()))
+                        else:
+                            total_fp_op += 1
+                    total_fn_op += len(gt_boxes_list) - len(matched_gt)
 
     num_batches = max(num_batches, 1)
 
@@ -329,6 +389,7 @@ def _evaluate_teacher_compact(teacher, detector, val_loader, criterion, device):
                 loss_totals["total"], loss_totals["heatmap"],
                 loss_totals["wh"], loss_totals["offset"],
                 float(total_tp), float(total_fp), float(total_fn),
+                float(total_tp_op), float(total_fp_op), float(total_fn_op),
                 float(num_batches),
             ],
             dtype=torch.float64, device=device,
@@ -343,11 +404,17 @@ def _evaluate_teacher_compact(teacher, detector, val_loader, criterion, device):
         total_tp = int(stat_tensor[4].item())
         total_fp = int(stat_tensor[5].item())
         total_fn = int(stat_tensor[6].item())
-        num_batches = int(max(stat_tensor[7].item(), 1.0))
+        total_tp_op = int(stat_tensor[7].item())
+        total_fp_op = int(stat_tensor[8].item())
+        total_fn_op = int(stat_tensor[9].item())
+        num_batches = int(max(stat_tensor[10].item(), 1.0))
 
     losses = {key: value / num_batches for key, value in loss_totals.items()}
-    precision = total_tp / (total_tp + total_fp + 1e-6)
-    recall = total_tp / (total_tp + total_fn + 1e-6)
+    precision_metric = total_tp / (total_tp + total_fp + 1e-6)
+    recall_metric = total_tp / (total_tp + total_fn + 1e-6)
+    f1_metric = 2.0 * precision_metric * recall_metric / (precision_metric + recall_metric + 1e-6)
+    precision = total_tp_op / (total_tp_op + total_fp_op + 1e-6)
+    recall = total_tp_op / (total_tp_op + total_fn_op + 1e-6)
     f1 = 2.0 * precision * recall / (precision + recall + 1e-6)
 
     ap_values = []
@@ -361,6 +428,9 @@ def _evaluate_teacher_compact(teacher, detector, val_loader, criterion, device):
         "recall": float(recall),
         "f1": float(f1),
         "map50": float(np.mean(ap_values)) if ap_values else 0.0,
+        "precision_metric": float(precision_metric),
+        "recall_metric": float(recall_metric),
+        "f1_metric": float(f1_metric),
     }
     return losses, metrics
 
@@ -671,8 +741,9 @@ def train():
                     tensorboard_writer, cm_dets, cm_targets,
                     Config.NUM_CLASSES, Config.CLASS_NAMES, epoch + 1,
                     iou_threshold=getattr(Config, "COMPACT_METRIC_IOU_THRESHOLD", 0.5),
-                    conf_threshold=getattr(Config, "COMPACT_METRIC_CONF_THRESH", Config.COMPACT_CONF_THRESH),
+                    conf_threshold=getattr(Config, "COMPACT_CONF_THRESH", 0.30),
                     prefix="ConfusionMatrix",
+                    image_size=Config.IMG_SIZE,
                 )
 
             # ── 预测可视化 ──

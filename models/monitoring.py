@@ -245,6 +245,7 @@ def compute_detection_confusion_matrix(
     num_classes,
     iou_threshold=0.5,
     conf_threshold=0.25,
+    image_size=None,
 ):
     """Compute a confusion matrix for object detection.
 
@@ -262,78 +263,58 @@ def compute_detection_confusion_matrix(
     class_fn = np.zeros(num_classes, dtype=np.float64)
 
     for detections, targets in zip(detections_list, targets_list):
-        # Build GT by class
-        gt_by_class = {}
         if isinstance(targets, torch.Tensor):
             targets = targets.cpu().numpy()
+        gt_boxes = []
+        gt_classes = []
         for gt in targets:
             if len(gt) < 5 or gt[3] <= 0 or gt[4] <= 0:
                 continue
-            cls_id = int(gt[0])
-            gt_by_class.setdefault(cls_id, []).append(gt[1:5])
+            box = np.asarray(gt[1:5], dtype=np.float32)
+            if image_size is not None:
+                box = box * float(image_size)
+            gt_boxes.append(box)
+            gt_classes.append(int(gt[0]))
 
-        # Build detections by class (filter by confidence)
-        det_by_class = {}
-        if isinstance(detections, np.ndarray):
-            for det in detections:
-                if det[4] >= conf_threshold:
-                    cls_id = int(det[5])
-                    det_by_class.setdefault(cls_id, []).append(det)
-        elif isinstance(detections, list):
-            for det in detections:
-                if det[4] >= conf_threshold:
-                    cls_id = int(det[5])
-                    det_by_class.setdefault(cls_id, []).append(det)
+        detections = np.asarray(detections, dtype=np.float32).reshape(-1, 6)
+        detections = detections[detections[:, 4] >= conf_threshold]
+        matched_dets = set()
+        matched_gts = set()
 
-        matched_gt = {}  # cls_id -> set of matched gt indices
+        if len(detections) and gt_boxes:
+            from models.geometry import bbox_iou_matrix_xywh
 
-        # For each detection, find best matching GT
-        all_det_classes = set(det_by_class.keys())
-        all_gt_classes = set(gt_by_class.keys())
-
-        # Process matched detections
-        for cls_id in all_det_classes:
-            dets = sorted(det_by_class[cls_id], key=lambda d: d[4], reverse=True)
-            gt_boxes = gt_by_class.get(cls_id, [])
-            matched_gt[cls_id] = set()
-
-            if not gt_boxes:
-                # All detections are FP (no GT of this class)
-                for det in dets:
-                    det_cls = int(det[5])
-                    confusion[num_classes, det_cls] += 1  # background -> predicted class
-                    class_fp[det_cls] += 1
-                continue
-
-            gt_tensor = torch.from_numpy(np.array(gt_boxes, dtype=np.float32))
-            for det in dets:
-                det_box = torch.from_numpy(np.array(det[:4], dtype=np.float32)).unsqueeze(0)
-                # Compute IoU
-                from models.geometry import bbox_iou_matrix_xywh
-                ious = bbox_iou_matrix_xywh(det_box, gt_tensor).squeeze(0)
-                # Mask already matched
-                for m in matched_gt[cls_id]:
-                    ious[m] = -1.0
-                best_iou, best_idx = ious.max(dim=0)
-                best_iou = float(best_iou.item())
-                best_idx = int(best_idx.item())
-                det_cls = int(det[5])
-
-                if best_iou >= iou_threshold:
-                    confusion[cls_id, det_cls] += 1  # GT class -> predicted class
-                    matched_gt[cls_id].add(best_idx)
-                    class_tp[det_cls] += 1
+            det_tensor = torch.from_numpy(detections[:, :4])
+            gt_tensor = torch.from_numpy(np.asarray(gt_boxes, dtype=np.float32))
+            iou_matrix = bbox_iou_matrix_xywh(det_tensor, gt_tensor)
+            candidates = torch.nonzero(iou_matrix >= iou_threshold, as_tuple=False)
+            matches = sorted(
+                ((float(iou_matrix[d, g]), int(d), int(g)) for d, g in candidates.tolist()),
+                reverse=True,
+            )
+            for _, det_idx, gt_idx in matches:
+                if det_idx in matched_dets or gt_idx in matched_gts:
+                    continue
+                matched_dets.add(det_idx)
+                matched_gts.add(gt_idx)
+                gt_cls = gt_classes[gt_idx]
+                det_cls = int(detections[det_idx, 5])
+                confusion[gt_cls, det_cls] += 1
+                if gt_cls == det_cls:
+                    class_tp[gt_cls] += 1
                 else:
-                    confusion[num_classes, det_cls] += 1  # background -> predicted class
+                    class_fn[gt_cls] += 1
                     class_fp[det_cls] += 1
 
-        # Unmatched GT -> FN (predicted as background)
-        for cls_id, gt_boxes in gt_by_class.items():
-            matched = matched_gt.get(cls_id, set())
-            for idx in range(len(gt_boxes)):
-                if idx not in matched:
-                    confusion[cls_id, num_classes] += 1  # GT class -> background
-                    class_fn[cls_id] += 1
+        for det_idx, det in enumerate(detections):
+            if det_idx not in matched_dets:
+                det_cls = int(det[5])
+                confusion[num_classes, det_cls] += 1
+                class_fp[det_cls] += 1
+        for gt_idx, gt_cls in enumerate(gt_classes):
+            if gt_idx not in matched_gts:
+                confusion[gt_cls, num_classes] += 1
+                class_fn[gt_cls] += 1
 
     return confusion, class_tp, class_fp, class_fn
 
@@ -390,6 +371,7 @@ def write_confusion_matrix(
     iou_threshold=0.5,
     conf_threshold=0.25,
     prefix="ConfusionMatrix",
+    image_size=None,
 ):
     """Compute and write detection confusion matrix to TensorBoard.
 
@@ -408,7 +390,7 @@ def write_confusion_matrix(
         return
 
     confusion, class_tp, class_fp, class_fn = compute_detection_confusion_matrix(
-        detections_list, targets_list, num_classes, iou_threshold, conf_threshold
+        detections_list, targets_list, num_classes, iou_threshold, conf_threshold, image_size
     )
 
     # Write confusion matrix image
