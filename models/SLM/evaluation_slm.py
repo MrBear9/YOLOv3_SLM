@@ -150,6 +150,41 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
                     total_fn_op += len(gt_boxes) - len(matched_op.get(cls_id, set()))
 
     num_batches = max(len(dataloader), 1)
+    if torch.distributed.is_initialized():
+        world_size = torch.distributed.get_world_size()
+        payload = {"metric_storage": metric_storage, "gt_counts": gt_counts}
+        gathered = [None for _ in range(world_size)]
+        torch.distributed.all_gather_object(gathered, payload)
+        metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
+        gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
+        for item in gathered:
+            for cls_id, values in item["metric_storage"].items():
+                metric_storage[cls_id].extend(values)
+            for cls_id, count in item["gt_counts"].items():
+                gt_counts[cls_id] += int(count)
+
+        loss_keys = tuple(totals.keys())
+        stats = torch.tensor(
+            [
+                *(float(totals[key]) for key in loss_keys),
+                float(total_tp), float(total_fp), float(total_fn),
+                float(total_tp_op), float(total_fp_op), float(total_fn_op),
+                float(num_batches),
+            ],
+            dtype=torch.float64,
+            device=device,
+        )
+        torch.distributed.all_reduce(stats, op=torch.distributed.ReduceOp.SUM)
+        offset = len(loss_keys)
+        totals = {key: float(stats[idx].item()) for idx, key in enumerate(loss_keys)}
+        total_tp = int(stats[offset].item())
+        total_fp = int(stats[offset + 1].item())
+        total_fn = int(stats[offset + 2].item())
+        total_tp_op = int(stats[offset + 3].item())
+        total_fp_op = int(stats[offset + 4].item())
+        total_fn_op = int(stats[offset + 5].item())
+        num_batches = int(max(stats[offset + 6].item(), 1.0))
+
     avg_losses = {key: value / num_batches for key, value in totals.items()}
     precision = total_tp / (total_tp + total_fp + 1e-6)
     recall = total_tp / (total_tp + total_fn + 1e-6)

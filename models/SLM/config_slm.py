@@ -1,4 +1,4 @@
-import os
+﻿import os
 from datetime import datetime
 
 import numpy as np
@@ -9,7 +9,7 @@ from models.yolov8.config_v8 import load_anchor_groups, load_class_names, resolv
 
 class ConfigSLM:
     # =========================================================================
-    # Common — paths, device, I/O
+    # Common 鈥?paths, device, I/O
     # =========================================================================
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
@@ -45,7 +45,7 @@ class ConfigSLM:
     WAVELENGTH = 532e-9
     PIXEL_SIZE = 6.4e-6
     PROP_DISTANCE_1 = 0.10 # 10cm
-    PROP_DISTANCE_2 = 0.20 # 20cm
+    PROP_DISTANCE_2 = 0.10 # 10cm
     # Options: "phase", "amp_phase".
     SLM_MODE = "phase"
     RESOLUTION = (640, 640)
@@ -54,19 +54,33 @@ class ConfigSLM:
 
     # -------- Phase parameterisation --------
     # "direct": single flat phase_raw parameter (legacy / compatible)
-    # "multiscale_mlp": Plan A+C — multi-scale pyramid + neural-field MLP
+    # "multiscale_mlp": Plan A+C multi-scale pyramid + neural-field MLP
     SLM_PHASE_PARAM_MODE = "multiscale_mlp"
-    # Plan A — multi-scale pyramid levels (80→160→320 for 640 resolution)
+
+    # Shared phase-field settings.
     SLM_PHASE_NUM_SCALES = 5
-    # Plan B — overlapping block-wise learning (replaces the finest scale)
     SLM_PHASE_USE_BLOCKWISE = True
-    SLM_PHASE_BLOCK_GRID = 6       # 6×6 = 36 blocks (set 1 to disable)
-    SLM_PHASE_BLOCK_OVERLAP = 8   # overlap pixels for boundary blending
-    SLM_PHASE_BLOCK_INNER_SCALES = 3  # mini-pyramid layers inside each block (1 = single scale)
-    # Plan C — coordinate MLP architecture
     SLM_PHASE_MLP_HIDDEN = 32
-    SLM_PHASE_MLP_NUM_FREQS = 10
     SLM_PHASE_MLP_LAYERS = 2
+
+    # SLM1: main modulation and fine spatial detail.
+    SLM1_PHASE_BLOCK_GRID = 6
+    SLM1_PHASE_BLOCK_OVERLAP = 8
+    SLM1_PHASE_BLOCK_INNER_SCALES = 3
+    SLM1_PHASE_MLP_NUM_FREQS = 10
+
+    # SLM2: coarser post-propagation residual shaping.
+    SLM2_PHASE_BLOCK_GRID = 4
+    SLM2_PHASE_BLOCK_OVERLAP = 8
+    SLM2_PHASE_BLOCK_INNER_SCALES = 2
+    SLM2_PHASE_MLP_NUM_FREQS = 6
+    # Layer-wise ablation controls. Keep both enabled for normal two-SLM training.
+    TRAIN_SLM1 = True
+    TRAIN_SLM2 = True
+    # Per-layer phase learning-rate multipliers; 1.0 preserves the shared-LR baseline.
+    SLM2_PHASE_FOCUS_LR_MULT = 1.0
+    SLM2_JOINT_LR_MULT = 1.0
+    SLM2_NORM_JOINT_LR_MULT = 1.0
 
     # -------- Student normalization --------
     ENABLE_STUDENT_NORM = True
@@ -81,7 +95,7 @@ class ConfigSLM:
     # -------- SLM phase init --------
     # Options: zero, random, vortex, dh_psf/double_helix_psf, checkpoint,
     # vortex_checkpoint, dh_psf_checkpoint/double_helix_checkpoint.
-    # "zero": flat phase (tiny noise), no range bias — lets the phase learn
+    # "zero": flat phase (tiny noise), no range bias 鈥?lets the phase learn
     #   freely in early stages before diversity constraints ramp up.
     SLM_INIT_MODE = "vortex"
     SLM_INIT_NOISE_STD = 0.02
@@ -139,7 +153,7 @@ class ConfigSLM:
     YOLOV8_C2F_BLOCKS = 3
 
     # -------- DETECTOR_HEAD_TYPE = "light" --------
-    YOLO_LIGHT_BASE_CH = 8  # 方案A: halved from 16
+    YOLO_LIGHT_BASE_CH = 8  # 鏂规A: halved from 16
 
     # =========================================================================
     # Anchors
@@ -207,15 +221,15 @@ class ConfigSLM:
     HARD_NEG_MIN = 512
 
     # =========================================================================
-    # SLM feature loss (student → teacher matching)
+    # SLM feature loss (student 鈫?teacher matching)
     # =========================================================================
-    LOSS_FULL_WEIGHT = 0.05
-    LOSS_LOW1_WEIGHT = 0.20
-    LOSS_LOW2_WEIGHT = 0.10
-    LOSS_SSIM_WEIGHT = 0.30
-    LOSS_GRAD_WEIGHT = 0.35
-    LOSS_FREQ_WEIGHT = 0.25
-    LOSS_PEARSON_WEIGHT = 0.40
+    LOSS_FULL_WEIGHT = 0.03
+    LOSS_LOW1_WEIGHT = 0.25
+    LOSS_LOW2_WEIGHT = 0.15
+    LOSS_SSIM_WEIGHT = 0.35
+    LOSS_GRAD_WEIGHT = 0.10
+    LOSS_FREQ_WEIGHT = 0.08
+    LOSS_PEARSON_WEIGHT = 0.45
     LOSS_PHASE_SMOOTH_WEIGHT = 0.000
     LOSS_PHASE_DIVERSITY_WEIGHT = 0.015
     PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.003
@@ -329,7 +343,7 @@ class ConfigSLM:
     # =========================================================================
     # Data loading
     # =========================================================================
-    # Windows 使用 spawn 创建多进程，开销远大于 Linux 的 fork，需要降低 worker 数量
+    # Windows 浣跨敤 spawn 鍒涘缓澶氳繘绋嬶紝寮€閿€杩滃ぇ浜?Linux 鐨?fork锛岄渶瑕侀檷浣?worker 鏁伴噺
     _IS_WINDOWS = os.name == "nt"
     NUM_WORKERS = (4 if _IS_WINDOWS else min(12, os.cpu_count() or 0))
     PIN_MEMORY = torch.cuda.is_available()
@@ -399,11 +413,20 @@ class ConfigSLM:
             "OPTICAL_SLM_STUDENT_NORM_PERCENTILE": ("STUDENT_NORM_PERCENTILE", float),
             "OPTICAL_SLM_STUDENT_OUTPUT_CLAMP_MAX": ("STUDENT_OUTPUT_CLAMP_MAX", float),
             "OPTICAL_SLM_STUDENT_OUTPUT_BLUR_KERNEL": ("STUDENT_OUTPUT_BLUR_KERNEL", int),
+            "OPTICAL_SLM_SLM1_PHASE_BLOCK_GRID": ("SLM1_PHASE_BLOCK_GRID", int),
+            "OPTICAL_SLM_SLM1_PHASE_BLOCK_INNER_SCALES": ("SLM1_PHASE_BLOCK_INNER_SCALES", int),
+            "OPTICAL_SLM_SLM1_PHASE_MLP_NUM_FREQS": ("SLM1_PHASE_MLP_NUM_FREQS", int),
+            "OPTICAL_SLM_SLM2_PHASE_BLOCK_GRID": ("SLM2_PHASE_BLOCK_GRID", int),
+            "OPTICAL_SLM_SLM2_PHASE_BLOCK_INNER_SCALES": ("SLM2_PHASE_BLOCK_INNER_SCALES", int),
+            "OPTICAL_SLM_SLM2_PHASE_MLP_NUM_FREQS": ("SLM2_PHASE_MLP_NUM_FREQS", int),
             "OPTICAL_SLM_PHASE_FOCUS_PHASE_PARAM_LR": ("PHASE_FOCUS_PHASE_PARAM_LR", float),
+            "OPTICAL_SLM_SLM2_PHASE_FOCUS_LR_MULT": ("SLM2_PHASE_FOCUS_LR_MULT", float),
             "OPTICAL_SLM_DETECTOR_LR": ("DETECTOR_LR", float),
             "OPTICAL_SLM_JOINT_PHASE_PARAM_LR": ("JOINT_PHASE_PARAM_LR", float),
+            "OPTICAL_SLM_SLM2_JOINT_LR_MULT": ("SLM2_JOINT_LR_MULT", float),
             "OPTICAL_SLM_JOINT_DETECTOR_LR": ("JOINT_DETECTOR_LR", float),
             "OPTICAL_SLM_NORM_JOINT_PHASE_PARAM_LR": ("NORM_JOINT_PHASE_PARAM_LR", float),
+            "OPTICAL_SLM_SLM2_NORM_JOINT_LR_MULT": ("SLM2_NORM_JOINT_LR_MULT", float),
             "OPTICAL_SLM_NORM_JOINT_DETECTOR_LR": ("NORM_JOINT_DETECTOR_LR", float),
             "OPTICAL_SLM_PHASE_GRAD_CLIP_NORM": ("PHASE_GRAD_CLIP_NORM", float),
             "OPTICAL_SLM_LOSS_SSIM_WEIGHT": ("LOSS_SSIM_WEIGHT", float),
@@ -463,6 +486,8 @@ class ConfigSLM:
             cls.ENABLE_DETECTOR_FOCUS_EARLY_STOP = early_stop.strip().lower() in {"1", "true", "yes", "on"}
         bool_overrides = {
             "OPTICAL_SLM_VORTEX_ALTERNATE_CHARGE": "SLM_VORTEX_ALTERNATE_CHARGE",
+            "OPTICAL_SLM_TRAIN_SLM1": "TRAIN_SLM1",
+            "OPTICAL_SLM_TRAIN_SLM2": "TRAIN_SLM2",
         }
         for env_name, attr in bool_overrides.items():
             value = os.environ.get(env_name)
@@ -590,7 +615,6 @@ class ConfigSLM:
     @classmethod
     def get_epoch_table_header(cls):
         return "".join(f"{title:<{width}}" for title, width in cls.get_epoch_table_columns())
-
     @classmethod
     def should_skip_file_log(cls, message):
         return any(token in message for token in cls.SKIP_FILE_LOG_MESSAGES)

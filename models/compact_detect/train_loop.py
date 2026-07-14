@@ -27,6 +27,7 @@ from models.runtime import (
     init_epoch_log_table,
     log_epoch_table_row,
     log_to_file,
+    gather_detection_results,
     unwrap_module,
 )
 from models.training_utils import create_tensorboard_writer
@@ -36,6 +37,7 @@ from models.monitoring import (
     write_gradient_monitoring,
     write_parameter_monitoring,
 )
+from models.runtime import DistributedEvalSampler
 
 from .compact_tensorboard import write_tensorboard_model_summary, write_tensorboard_scalars
 from .compact_utils import (
@@ -56,6 +58,8 @@ def _collect_compact_val_detections(config, student, detector, val_loader, devic
     """Collect all validation detections and targets for confusion matrix."""
     from .decode import decode_center_detections
 
+    student = unwrap_module(student)
+    detector = unwrap_module(detector)
     student.eval()
     detector.eval()
     all_dets = []
@@ -162,7 +166,7 @@ def train():
             shuffle=True,
             drop_last=not bool(getattr(Config, "SINGLE_IMAGE_TRAINING", False)),
         )
-        val_sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=False)
+        val_sampler = DistributedEvalSampler(val_dataset)
     loader_kwargs = {
         "batch_size": Config.BATCH_SIZE,
         "num_workers": Config.NUM_WORKERS,
@@ -416,6 +420,17 @@ def train():
             dist.barrier()
 
         current_lr = max(group["lr"] for group in optimizer.param_groups)
+        cm_dets = cm_targets = None
+        should_write_cm = (
+            not in_teacher_warmup
+            and val_metrics is not None
+            and (epoch + 1) % max(Config.VIS_INTERVAL, 1) == 0
+        )
+        if should_write_cm:
+            cm_dets, cm_targets = _collect_compact_val_detections(
+                Config, student, detector, val_loader, device
+            )
+            cm_dets, cm_targets = gather_detection_results(cm_dets, cm_targets)
         is_best = False
         if not in_teacher_warmup and is_main and val_metrics is not None and val_metrics["map50"] > best_map50:
             best_map50 = val_metrics["map50"]
@@ -438,8 +453,7 @@ def train():
             write_parameter_monitoring(tensorboard_writer, student_raw, epoch + 1, prefix="Param/Student")
             write_parameter_monitoring(tensorboard_writer, detector_raw, epoch + 1, prefix="Param/Detector")
             # ── 混淆矩阵（每个验证 epoch）──
-            if not in_teacher_warmup and val_metrics is not None and (epoch + 1) % max(Config.VIS_INTERVAL, 1) == 0:
-                cm_dets, cm_targets = _collect_compact_val_detections(Config, student, detector, val_loader, device)
+            if should_write_cm:
                 write_confusion_matrix(
                     tensorboard_writer, cm_dets, cm_targets,
                     Config.NUM_CLASSES, Config.CLASS_NAMES, epoch + 1,

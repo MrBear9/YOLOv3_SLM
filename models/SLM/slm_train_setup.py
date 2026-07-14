@@ -18,6 +18,7 @@ from models.SLM.utils_slm import (
     set_trainable,
 )
 from models.runtime import (
+    DistributedEvalSampler,
     get_runtime_device,
     init_log_file,
     log_to_file,
@@ -67,8 +68,21 @@ def setup_training(is_main, use_ddp):
 
     student_raw = student
     detector_raw = detector
-    student = wrap_data_parallel(Config, student, module_name="OpticalStudent", find_unused_parameters=False)
+    # Layer-wise ablations freeze one SLM after DDP has registered all parameters.
+    # Let DDP mark that layer unused instead of waiting for gradients that never arrive.
+    student_find_unused = not (Config.TRAIN_SLM1 and Config.TRAIN_SLM2)
+    student = wrap_data_parallel(
+        Config,
+        student,
+        module_name="OpticalStudent",
+        find_unused_parameters=student_find_unused,
+    )
     detector = wrap_data_parallel(Config, detector, module_name="Detector", find_unused_parameters=False)
+    if student_find_unused:
+        log_to_file(
+            Config,
+            "OpticalStudent DDP unused-parameter detection enabled for a single-SLM ablation.",
+        )
 
     # Datasets & loaders
     train_dataset = SLMFeatureDataset(Config, split="train")
@@ -97,8 +111,7 @@ def setup_training(is_main, use_ddp):
         val_dataset = SLMFeatureDataset(Config, split="val")
         if len(val_dataset) > 0:
             if use_ddp:
-                from torch.utils.data.distributed import DistributedSampler
-                val_sampler = DistributedSampler(val_dataset, shuffle=False, drop_last=False)
+                val_sampler = DistributedEvalSampler(val_dataset)
             val_kwargs = {
                 "batch_size": Config.BATCH_SIZE,
                 "shuffle": False,

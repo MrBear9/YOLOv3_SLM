@@ -89,7 +89,9 @@ def write_gradient_monitoring(writer, model, step, prefix="Grad"):
 
         grad_norms.append(s["grad_norm"])
         zero_ratios.append(s["grad_zero_ratio"])
-        if s["grad_zero_ratio"] > 0.99:
+        # A constant phase offset is unobservable after intensity detection.
+        is_global_phase_bias = short.endswith("phase_field.mlp_field.net.2.bias")
+        if s["grad_zero_ratio"] > 0.99 and not is_global_phase_bias:
             dead_layers.append(short)
 
     # Global summaries

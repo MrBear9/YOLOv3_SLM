@@ -10,6 +10,8 @@ Supporting helpers live in:
 import os
 import warnings
 
+import torch
+
 from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.slm_utils import (
     configure_student_norm_for_stage,
@@ -97,12 +99,21 @@ def train():
             )
             global_epoch += 1
             detector_no_improve += no_improve_delta
-            if (
+            should_stop_stage = (
                 stage_name == "detector_focus"
                 and Config.ENABLE_DETECTOR_FOCUS_EARLY_STOP
                 and Config.DETECTOR_FOCUS_EARLY_STOP_PATIENCE > 0
                 and detector_no_improve >= Config.DETECTOR_FOCUS_EARLY_STOP_PATIENCE
-            ):
+            )
+            if use_ddp:
+                stop_tensor = torch.tensor(
+                    int(should_stop_stage) if is_main else 0,
+                    dtype=torch.int32,
+                    device=ctx["device"],
+                )
+                torch.distributed.broadcast(stop_tensor, src=0)
+                should_stop_stage = bool(stop_tensor.item())
+            if should_stop_stage:
                 log_to_file(
                     Config,
                     f"Early stopping detector_focus after {detector_no_improve} epochs without mAP50 improvement. "
@@ -117,6 +128,9 @@ def train():
 def _set_trainable_both(student, detector, student_trainable, detector_trainable):
     from models.SLM.utils_slm import set_trainable
     set_trainable(student, student_trainable)
+    if student_trainable:
+        set_trainable(student.module.slm1 if hasattr(student, "module") else student.slm1, Config.TRAIN_SLM1)
+        set_trainable(student.module.slm2 if hasattr(student, "module") else student.slm2, Config.TRAIN_SLM2)
     set_trainable(detector, detector_trainable)
 
 

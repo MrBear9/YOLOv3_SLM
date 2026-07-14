@@ -90,9 +90,10 @@ class MultiScalePhaseField(nn.Module):
         self.resolution = resolution
         self.layer_index = layer_index
 
-        num_scales = int(getattr(config, "SLM_PHASE_NUM_SCALES", 4))
+        layer_prefix = f"SLM{layer_index}_PHASE_"
+        num_scales = int(getattr(config, f"{layer_prefix}NUM_SCALES", getattr(config, "SLM_PHASE_NUM_SCALES", 4)))
         mlp_hidden = int(getattr(config, "SLM_PHASE_MLP_HIDDEN", 64))
-        mlp_freqs = int(getattr(config, "SLM_PHASE_MLP_NUM_FREQS", 6))
+        mlp_freqs = int(getattr(config, f"{layer_prefix}MLP_NUM_FREQS", getattr(config, "SLM_PHASE_MLP_NUM_FREQS", 6)))
         mlp_layers = int(getattr(config, "SLM_PHASE_MLP_LAYERS", 3))
 
         # --- Plan C: smooth neural-field base ---
@@ -105,8 +106,8 @@ class MultiScalePhaseField(nn.Module):
 
         # --- Plan B config ---
         self.use_blockwise = bool(getattr(config, "SLM_PHASE_USE_BLOCKWISE", True))
-        block_grid = int(getattr(config, "SLM_PHASE_BLOCK_GRID", 4))
-        block_overlap = int(getattr(config, "SLM_PHASE_BLOCK_OVERLAP", 16))
+        block_grid = int(getattr(config, f"{layer_prefix}BLOCK_GRID", getattr(config, "SLM_PHASE_BLOCK_GRID", 4)))
+        block_overlap = int(getattr(config, f"{layer_prefix}BLOCK_OVERLAP", getattr(config, "SLM_PHASE_BLOCK_OVERLAP", 16)))
         h, w = resolution
 
         # --- Plan A: global multi-scale parameters (coarse → medium-fine) ---
@@ -153,7 +154,9 @@ class MultiScalePhaseField(nn.Module):
             # different spatial regions can learn different frequency mixes.
             # block_inner_scales=1  →  single scale (legacy, same as before)
             # block_inner_scales=2  →  coarse (//4) + fine (//1)   lightweight
-            block_inner_scales = int(getattr(config, "SLM_PHASE_BLOCK_INNER_SCALES", 2))
+            block_inner_scales = int(
+                getattr(config, f"{layer_prefix}BLOCK_INNER_SCALES", getattr(config, "SLM_PHASE_BLOCK_INNER_SCALES", 2))
+            )
             self._block_inner_scales = max(block_inner_scales, 1)
 
             factors = [2 ** (self._block_inner_scales - k) for k in range(self._block_inner_scales - 1)] + [1]

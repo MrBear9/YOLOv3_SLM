@@ -150,6 +150,7 @@ def write_slm_tensorboard_scalars(
     phase_grad_norm=None,
     phase_update_norm=None,
     phase_update_rel=None,
+    phase_layer_stats=None,
     lr=None,
 ):
     if writer is None:
@@ -189,6 +190,11 @@ def write_slm_tensorboard_scalars(
     add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_grad_norm", phase_grad_norm, step)
     add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_update_norm", phase_update_norm, step)
     add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_update_rel", phase_update_rel, step)
+    if phase_layer_stats is not None:
+        for layer_name, stats in phase_layer_stats.items():
+            add_tensorboard_scalar(writer, f"SLM/{stage_name}/{layer_name}_phase_grad_norm", stats["grad_norm"], step)
+            add_tensorboard_scalar(writer, f"SLM/{stage_name}/{layer_name}_phase_update_norm", stats["update_norm"], step)
+            add_tensorboard_scalar(writer, f"SLM/{stage_name}/{layer_name}_phase_update_rel", stats["update_rel"], step)
     add_tensorboard_scalar(writer, f"LR/{stage_name}", lr, step)
 
 
@@ -197,22 +203,32 @@ def write_slm_tensorboard_scalars(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+def is_phase_parameter(name):
+    return any(token in name for token in ("phase_raw", "amp_raw", "phase_field", "scale_params", "mlp_field"))
+
+
 def collect_phase_snapshot(student):
     return {
         name: param.detach().float().clone()
         for name, param in student.named_parameters()
-        if "phase_raw" in name
+        if is_phase_parameter(name)
     }
 
 
-def collect_phase_grad_norm(student):
-    total_sq = torch.zeros((), device=next(student.parameters()).device)
+def collect_phase_grad_norms(student):
+    totals = {"slm1": 0.0, "slm2": 0.0}
     for name, param in student.named_parameters():
-        if "phase_raw" not in name or param.grad is None:
+        if not is_phase_parameter(name) or param.grad is None:
             continue
-        grad = param.grad.detach()
-        total_sq += torch.sum(grad * grad)
-    return float(total_sq.item()) ** 0.5
+        for layer_name in totals:
+            if name.startswith(f"{layer_name}."):
+                totals[layer_name] += float(torch.sum(param.grad.detach().float().square()).item())
+                break
+    return {layer_name: total_sq ** 0.5 for layer_name, total_sq in totals.items()}
+
+
+def collect_phase_grad_norm(student):
+    return sum(value * value for value in collect_phase_grad_norms(student).values()) ** 0.5
 
 
 def clip_phase_grad_norm(student, max_norm):
@@ -222,27 +238,41 @@ def clip_phase_grad_norm(student, max_norm):
     params = [
         param
         for name, param in student.named_parameters()
-        if "phase_raw" in name and param.requires_grad and param.grad is not None
+        if is_phase_parameter(name) and param.requires_grad and param.grad is not None
     ]
     if not params:
         return None
     return float(torch.nn.utils.clip_grad_norm_(params, max_norm).detach().item())
 
 
-def collect_phase_update_norm(student, snapshot):
-    update_sq = 0.0
-    param_sq = 0.0
+def collect_phase_update_norms(student, snapshot):
+    update_sq = {"slm1": 0.0, "slm2": 0.0}
+    param_sq = {"slm1": 0.0, "slm2": 0.0}
     for name, param in student.named_parameters():
         if name not in snapshot:
+            continue
+        layer_name = next((layer for layer in update_sq if name.startswith(f"{layer}.")), None)
+        if layer_name is None:
             continue
         current = param.detach().float()
         before = snapshot[name].to(device=current.device)
         diff = current - before
-        update_sq += float(torch.sum(diff * diff).item())
-        param_sq += float(torch.sum(before * before).item())
-    update_norm = update_sq ** 0.5
-    relative = update_norm / ((param_sq ** 0.5) + 1e-12)
-    return update_norm, relative
+        update_sq[layer_name] += float(torch.sum(diff * diff).item())
+        param_sq[layer_name] += float(torch.sum(before * before).item())
+    return {
+        layer_name: {
+            "update_norm": update_sq[layer_name] ** 0.5,
+            "update_rel": (update_sq[layer_name] ** 0.5) / ((param_sq[layer_name] ** 0.5) + 1e-12),
+        }
+        for layer_name in update_sq
+    }
+
+
+def collect_phase_update_norm(student, snapshot):
+    layer_stats = collect_phase_update_norms(student, snapshot)
+    update_norm = sum(stats["update_norm"] ** 2 for stats in layer_stats.values()) ** 0.5
+    param_relative = sum(stats["update_rel"] ** 2 for stats in layer_stats.values()) ** 0.5
+    return update_norm, param_relative
 
 
 # ═══════════════════════════════════════════════════════════════════════════

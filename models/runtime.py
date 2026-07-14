@@ -4,6 +4,26 @@ from datetime import datetime, timedelta
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.data import Sampler
+
+
+class DistributedEvalSampler(Sampler):
+    """Shard evaluation data across ranks without padding duplicate samples."""
+
+    def __init__(self, dataset):
+        if not torch.distributed.is_initialized():
+            raise RuntimeError("DistributedEvalSampler requires an initialized process group")
+        self.dataset = dataset
+        self.rank = torch.distributed.get_rank()
+        self.world_size = torch.distributed.get_world_size()
+
+    def __iter__(self):
+        return iter(range(self.rank, len(self.dataset), self.world_size))
+
+    def __len__(self):
+        if self.rank >= len(self.dataset):
+            return 0
+        return (len(self.dataset) - 1 - self.rank) // self.world_size + 1
 
 
 def init_distributed_mode(config):
@@ -35,6 +55,24 @@ def init_distributed_mode(config):
 def cleanup_distributed():
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
+
+
+def gather_detection_results(detections, targets, dst=0):
+    """Gather per-rank detection lists on *dst* for visualization/monitoring."""
+    if not torch.distributed.is_initialized():
+        return detections, targets
+    payload = (detections, targets)
+    if torch.distributed.get_rank() == dst:
+        gathered = [None for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.gather_object(payload, gathered, dst=dst)
+        merged_detections = []
+        merged_targets = []
+        for rank_detections, rank_targets in gathered:
+            merged_detections.extend(rank_detections)
+            merged_targets.extend(rank_targets)
+        return merged_detections, merged_targets
+    torch.distributed.gather_object(payload, None, dst=dst)
+    return None, None
 
 
 def init_log_file(config):

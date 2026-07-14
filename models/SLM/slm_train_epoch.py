@@ -15,8 +15,10 @@ from models.SLM.evaluation_slm import evaluate_slm_detector, save_slm_detection_
 from models.SLM.losses_slm import detection_response_loss, input_privacy_loss
 from models.SLM.slm_utils import (
     collect_phase_grad_norm,
+    collect_phase_grad_norms,
     collect_phase_snapshot,
     collect_phase_update_norm,
+    collect_phase_update_norms,
     clip_phase_grad_norm,
     prepare_batch,
     save_current_student_checkpoint,
@@ -33,13 +35,15 @@ from models.monitoring import (
     write_gradient_monitoring,
     write_parameter_monitoring,
 )
-from models.runtime import log_epoch_table_row, log_to_file
+from models.runtime import gather_detection_results, log_epoch_table_row, log_to_file, unwrap_module
 
 
 def _collect_slm_val_detections(config, student, detector, val_loader, device):
     """Collect all validation detections and targets for confusion matrix."""
     from models.yolov8.decode_anchor_v8 import decode_detections_anchor_v8
 
+    student = unwrap_module(student)
+    detector = unwrap_module(detector)
     student.eval()
     detector.eval()
     all_dets = []
@@ -112,6 +116,7 @@ def run_epoch(
     epoch_privacy_t = torch.zeros((), device=device)
     phase_snapshot = collect_phase_snapshot(student_raw)
     epoch_phase_grad_norm = 0.0
+    epoch_phase_grad_norms = {"slm1": 0.0, "slm2": 0.0}
 
     for batch in tqdm(train_loader, desc=f"Epoch {global_epoch + 1}/{Config.EPOCHS} [{stage_name}]", leave=True, disable=not is_main):
         gray, rgb, targets = prepare_batch(batch, device)
@@ -153,6 +158,9 @@ def run_epoch(
         )
 
         total_loss.backward()
+        batch_phase_grad_norms = collect_phase_grad_norms(student_raw)
+        for layer_name, value in batch_phase_grad_norms.items():
+            epoch_phase_grad_norms[layer_name] += value
         phase_grad_norm = collect_phase_grad_norm(student_raw)
         if stage_name in {"joint_fit", "norm_joint"}:
             clipped_norm = clip_phase_grad_norm(student_raw, Config.PHASE_GRAD_CLIP_NORM)
@@ -177,6 +185,14 @@ def run_epoch(
     avg_privacy = float(epoch_privacy_t.item()) / num_batches
     avg_phase_grad_norm = epoch_phase_grad_norm / num_batches
     phase_update_norm, phase_update_rel = collect_phase_update_norm(student_raw, phase_snapshot)
+    phase_layer_updates = collect_phase_update_norms(student_raw, phase_snapshot)
+    phase_layer_stats = {
+        layer_name: {
+            "grad_norm": epoch_phase_grad_norms[layer_name] / num_batches,
+            **phase_layer_updates[layer_name],
+        }
+        for layer_name in epoch_phase_grad_norms
+    }
     history["train_total"].append(avg_total)
     history["train_feature"].append(avg_feature)
     history["train_detection"].append(avg_detection)
@@ -230,6 +246,12 @@ def run_epoch(
             history[key].append(np.nan)
     current_lr = max(group["lr"] for group in optimizer.param_groups)
 
+    cm_dets = cm_targets = None
+    should_write_cm = val_loader is not None and (global_epoch + 1) % Config.VAL_INTERVAL == 0
+    if should_write_cm:
+        cm_dets, cm_targets = _collect_slm_val_detections(Config, student, detector, val_loader, device)
+        cm_dets, cm_targets = gather_detection_results(cm_dets, cm_targets)
+
     # TensorBoard & checkpoint
     if is_main:
         write_slm_tensorboard_scalars(
@@ -249,6 +271,7 @@ def run_epoch(
             phase_grad_norm=avg_phase_grad_norm,
             phase_update_norm=phase_update_norm,
             phase_update_rel=phase_update_rel,
+            phase_layer_stats=phase_layer_stats,
             lr=current_lr,
         )
         # ── 梯度 & 参数监测 ──
@@ -257,8 +280,7 @@ def run_epoch(
         write_parameter_monitoring(tensorboard_writer, student, display_epoch, prefix="Param/Student")
         write_parameter_monitoring(tensorboard_writer, detector, display_epoch, prefix="Param/Detector")
         # ── 混淆矩阵（每个验证 epoch）──
-        if val_loader is not None and (global_epoch + 1) % Config.VAL_INTERVAL == 0:
-            cm_dets, cm_targets = _collect_slm_val_detections(Config, student, detector, val_loader, device)
+        if should_write_cm:
             write_confusion_matrix(
                 tensorboard_writer, cm_dets, cm_targets,
                 Config.NUM_CLASSES, Config.CLASS_NAMES, display_epoch,

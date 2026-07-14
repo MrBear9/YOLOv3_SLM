@@ -109,25 +109,45 @@ def split_student_param_groups(student):
     return slm_params, other_params
 
 
+def split_phase_param_groups(student):
+    groups = {"slm1": [], "slm2": [], "other": []}
+    for name, param in student.named_parameters():
+        if not param.requires_grad:
+            continue
+        if _is_slm_phase_param(name):
+            if name.startswith("slm1."):
+                groups["slm1"].append(param)
+            elif name.startswith("slm2."):
+                groups["slm2"].append(param)
+        else:
+            groups["other"].append(param)
+    return groups
+
+
 def build_stage_optimizer(config, student, detector, stage_name):
     if stage_name == "phase_focus":
-        slm_params, other_params = split_student_param_groups(student)
+        phase_groups = split_phase_param_groups(student)
         groups = []
-        if slm_params:
-            groups.append({"params": slm_params, "lr": config.PHASE_FOCUS_PHASE_PARAM_LR, "weight_decay": config.PHASE_WEIGHT_DECAY})
-        if other_params:
-            groups.append({"params": other_params, "lr": config.PHASE_FOCUS_PHASE_PARAM_LR, "weight_decay": config.WEIGHT_DECAY})
+        if phase_groups["slm1"]:
+            groups.append({"params": phase_groups["slm1"], "lr": config.PHASE_FOCUS_PHASE_PARAM_LR, "weight_decay": config.PHASE_WEIGHT_DECAY})
+        if phase_groups["slm2"]:
+            groups.append({"params": phase_groups["slm2"], "lr": config.PHASE_FOCUS_PHASE_PARAM_LR * config.SLM2_PHASE_FOCUS_LR_MULT, "weight_decay": config.PHASE_WEIGHT_DECAY})
+        if phase_groups["other"]:
+            groups.append({"params": phase_groups["other"], "lr": config.PHASE_FOCUS_PHASE_PARAM_LR, "weight_decay": config.WEIGHT_DECAY})
         return torch.optim.Adam(groups, weight_decay=0.0)
     if stage_name == "detector_focus":
         return torch.optim.Adam([p for p in detector.parameters() if p.requires_grad], lr=config.DETECTOR_LR, weight_decay=config.WEIGHT_DECAY)
-    slm_params, other_params = split_student_param_groups(student)
     phase_lr = config.NORM_JOINT_PHASE_PARAM_LR if stage_name == "norm_joint" else config.JOINT_PHASE_PARAM_LR
+    slm2_lr_mult = config.SLM2_NORM_JOINT_LR_MULT if stage_name == "norm_joint" else config.SLM2_JOINT_LR_MULT
     detector_lr = config.NORM_JOINT_DETECTOR_LR if stage_name == "norm_joint" else config.JOINT_DETECTOR_LR
+    phase_groups = split_phase_param_groups(student)
     groups = []
-    if slm_params:
-        groups.append({"params": slm_params, "lr": phase_lr, "weight_decay": config.PHASE_WEIGHT_DECAY})
-    if other_params:
-        groups.append({"params": other_params, "lr": phase_lr, "weight_decay": config.WEIGHT_DECAY})
+    if phase_groups["slm1"]:
+        groups.append({"params": phase_groups["slm1"], "lr": phase_lr, "weight_decay": config.PHASE_WEIGHT_DECAY})
+    if phase_groups["slm2"]:
+        groups.append({"params": phase_groups["slm2"], "lr": phase_lr * slm2_lr_mult, "weight_decay": config.PHASE_WEIGHT_DECAY})
+    if phase_groups["other"]:
+        groups.append({"params": phase_groups["other"], "lr": phase_lr, "weight_decay": config.WEIGHT_DECAY})
     detector_params = [p for p in detector.parameters() if p.requires_grad]
     if detector_params:
         groups.append({"params": detector_params, "lr": detector_lr, "weight_decay": config.WEIGHT_DECAY})
