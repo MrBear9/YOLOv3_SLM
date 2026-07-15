@@ -21,7 +21,7 @@ from models.geometry import bbox_iou_xywh
 from models.runtime import prepare_batch
 from models.teacher_guidance import enhance_feature_for_display
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
-from models.yolov8.decode_anchor_v8 import decode_detections_anchor_v8
+from models.yolov8.detection_protocol import decode_detections
 from models.yolov8.head_v8 import TeacherWithDetector, build_detector_head
 
 
@@ -233,7 +233,7 @@ def save_visualization(path, image_tensor, teacher_feature, targets, detections,
         cx, cy, w, h, conf, cls_id = det
         x1 = cx - w / 2
         y1 = cy - h / 2
-        color = plt.cm.tab20(int(cls_id) / max(len(class_names), 1))
+        color = "red"
         axes[3].add_patch(plt.Rectangle((x1, y1), w, h, fill=False, edgecolor=color, linewidth=1.6))
         axes[3].text(
             x1,
@@ -289,7 +289,7 @@ def evaluate(args):
         for batch in dataloader:
             images, targets_list = prepare_batch(Config, batch, device)
             teacher_features, predictions = teacher_detector(images, return_feature=True)
-            detections = decode_detections_anchor_v8(
+            detections = decode_detections(
                 Config,
                 predictions,
                 conf_thresh=args.conf_thresh,

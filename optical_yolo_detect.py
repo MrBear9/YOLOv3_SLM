@@ -479,7 +479,7 @@ def draw_detections(image, detections, class_names, conf_thresh=0.5, offset_x=No
         y2 = max(0, min(y2, image.shape[0]-1))
         
         # 选择颜色
-        color = colors[cls_id % len(colors)]
+        color = (0, 0, 255)
         
         # 绘制边界框
         cv2.rectangle(img_with_boxes, (x1, y1), (x2, y2), color, 2)

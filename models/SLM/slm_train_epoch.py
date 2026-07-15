@@ -40,7 +40,7 @@ from models.runtime import gather_detection_results, log_epoch_table_row, log_to
 
 def _collect_slm_val_detections(config, student, detector, val_loader, device):
     """Collect all validation detections and targets for confusion matrix."""
-    from models.yolov8.decode_anchor_v8 import decode_detections_anchor_v8
+    from models.yolov8.detection_protocol import decode_detections
 
     student = unwrap_module(student)
     detector = unwrap_module(detector)
@@ -59,7 +59,7 @@ def _collect_slm_val_detections(config, student, detector, val_loader, device):
             with amp_ctx:
                 student_feature = student(gray) if hasattr(student, '__call__') else student
                 predictions = detector(student_feature)
-            detections = decode_detections_anchor_v8(
+            detections = decode_detections(
                 config, predictions,
                 conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
                 nms_thresh=getattr(config, "METRIC_NMS_THRESH", config.NMS_THRESH),
@@ -359,6 +359,9 @@ def run_epoch(
                     "paired_student_source": "student_state_dict",
                     "paired_student_epoch": display_epoch,
                     "paired_student_stage": stage_name,
+                    "detector_head_type": Config.DETECTOR_HEAD_TYPE,
+                    "detection_protocol": Config.DETECTION_PROTOCOL,
+                    "anchor_match_mode": Config.ANCHOR_MATCH_MODE,
                     "student_norm_mode": Config.STUDENT_NORM_MODE,
                     "student_norm_schedule": Config.STUDENT_NORM_SCHEDULE,
                     "slm_stats": slm_stats,

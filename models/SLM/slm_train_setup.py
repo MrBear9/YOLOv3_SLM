@@ -27,7 +27,7 @@ from models.runtime import (
 from models.teacher import build_teacher
 from models.training_utils import create_tensorboard_writer
 from models.yolov8.head_v8 import build_detector_head
-from models.yolov8.loss_anchor_v8 import YOLOv3AnchorLossForV8Head
+from models.yolov8.detection_protocol import build_detection_criterion
 
 
 def setup_training(is_main, use_ddp):
@@ -132,7 +132,7 @@ def setup_training(is_main, use_ddp):
     vis_prefix = "val" if vis_dataset is val_dataset else "train"
 
     feature_criterion = CompositeOpticalFeatureLoss(Config)
-    detection_criterion = YOLOv3AnchorLossForV8Head(Config)
+    detection_criterion = build_detection_criterion(Config)
 
     history = {
         "train_total": [],

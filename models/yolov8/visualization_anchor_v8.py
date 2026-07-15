@@ -8,49 +8,7 @@ import torch
 
 from models.runtime import unwrap_module
 from models.teacher_guidance import enhance_feature_for_display
-from .decode_anchor_v8 import decode_detections_anchor_v8
-
-
-def wh_iou_scalar(w1, h1, w2, h2, eps=1e-6):
-    inter = min(float(w1), float(w2)) * min(float(h1), float(h2))
-    union = float(w1) * float(h1) + float(w2) * float(h2) - inter + eps
-    return inter / union
-
-
-def draw_best_matching_anchor_boxes(config, ax, x_center, y_center, width, height):
-    anchor_colors = ["#ffd166", "#00d1ff", "#ff5db1"]
-    for scale_idx, scale_anchors in enumerate(config.ANCHORS):
-        best_anchor = scale_anchors[0]
-        best_iou = -1.0
-        for anchor_w, anchor_h in scale_anchors:
-            match_iou = wh_iou_scalar(width, height, anchor_w, anchor_h)
-            if match_iou > best_iou:
-                best_iou = match_iou
-                best_anchor = (anchor_w, anchor_h)
-        anchor_w, anchor_h = best_anchor
-        x1 = x_center - anchor_w / 2.0
-        y1 = y_center - anchor_h / 2.0
-        ax.add_patch(
-            plt.Rectangle(
-                (x1, y1),
-                anchor_w,
-                anchor_h,
-                linewidth=1.1,
-                edgecolor=anchor_colors[scale_idx % len(anchor_colors)],
-                facecolor="none",
-                linestyle="--",
-                alpha=0.85,
-            )
-        )
-        ax.text(
-            x1,
-            max(8, y1 - 4),
-            f"A@{config.STRIDES[scale_idx]}",
-            color=anchor_colors[scale_idx % len(anchor_colors)],
-            fontsize=8,
-            fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.15", facecolor="black", alpha=0.25, edgecolor="none"),
-        )
+from .detection_protocol import decode_detections
 
 
 def save_detection_visualization_anchor_v8(config, epoch, model, dataset, save_dir, prefix="train", device=None):
@@ -71,7 +29,7 @@ def save_detection_visualization_anchor_v8(config, epoch, model, dataset, save_d
             image, targets = dataset[int(sample_idx)]
             input_tensor = image.unsqueeze(0).to(device)
             teacher_feature, predictions = model_core(input_tensor, return_feature=True)
-            detections = decode_detections_anchor_v8(
+            detections = decode_detections(
                 config,
                 predictions,
                 conf_thresh=config.VIS_CONF_THRESH,
@@ -105,7 +63,7 @@ def save_detection_visualization_anchor_v8(config, epoch, model, dataset, save_d
                 cx, cy, w, h, conf, cls_id = det
                 x1 = cx - w / 2
                 y1 = cy - h / 2
-                color = plt.cm.tab20(int(cls_id) / max(config.NUM_CLASSES, 1))
+                color = "red"
                 axes[row, 3].add_patch(plt.Rectangle((x1, y1), w, h, fill=False, edgecolor=color, linewidth=2.6))
                 axes[row, 3].text(
                     x1,

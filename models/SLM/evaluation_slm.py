@@ -11,7 +11,7 @@ from models.geometry import bbox_iou_xywh
 from models.SLM.losses_slm import detection_response_loss, input_privacy_loss
 from models.runtime import unwrap_module
 from models.teacher_guidance import enhance_feature_for_display
-from models.yolov8.decode_anchor_v8 import decode_detections_anchor_v8
+from models.yolov8.detection_protocol import decode_detections
 from models.yolov8.metrics_anchor_v8 import compute_average_precision
 
 
@@ -39,7 +39,7 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
 
     metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
-    totals = {key: 0.0 for key in ("total", "feature", "detection", "response", "privacy", "box", "obj", "noobj", "cls")}
+    totals = {key: 0.0 for key in ("total", "feature", "detection", "response", "privacy", "box", "obj", "noobj", "cls", "dfl")}
     total_tp = total_fp = total_fn = 0
     total_tp_op = total_fp_op = total_fn_op = 0
     op_conf_thresh = float(getattr(config, "CONF_THRESH", 0.35))
@@ -74,7 +74,7 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
             else:
                 predictions = None
                 detection_loss = zero
-                loss_stats = {"box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0}
+                loss_stats = {"box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0, "dfl": 0.0}
 
             total_loss = (
                 feature_loss * stage_weights["feature"]
@@ -88,13 +88,13 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
             totals["detection"] += float(detection_loss.detach().item())
             totals["response"] += float(response_loss.detach().item())
             totals["privacy"] += float(privacy_loss.detach().item())
-            for key in ("box", "obj", "noobj", "cls"):
+            for key in ("box", "obj", "noobj", "cls", "dfl"):
                 totals[key] += loss_stats.get(key, 0.0)
 
             if not evaluate_detector:
                 continue
 
-            detections = decode_detections_anchor_v8(
+            detections = decode_detections(
                 config,
                 predictions,
                 conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
@@ -250,7 +250,7 @@ def save_slm_detection_visualization(config, epoch, teacher, student, detector, 
             teacher_feature = teacher_core(teacher_batch)
             student_feature = student_core(gray_batch)
             predictions = detector_core(student_feature)
-            detections = decode_detections_anchor_v8(
+            detections = decode_detections(
                 config,
                 predictions,
                 conf_thresh=config.VIS_CONF_THRESH,
@@ -294,7 +294,7 @@ def save_slm_detection_visualization(config, epoch, teacher, student, detector, 
                 cx, cy, w, h, conf, cls_id = det
                 x1 = cx - w / 2
                 y1 = cy - h / 2
-                color = plt.cm.tab20(int(cls_id) / max(config.NUM_CLASSES, 1))
+                color = "red"
                 axes[row, 3].add_patch(plt.Rectangle((x1, y1), w, h, fill=False, edgecolor=color, linewidth=1.6))
                 axes[row, 3].text(
                     x1,

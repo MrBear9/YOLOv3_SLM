@@ -20,7 +20,7 @@ from models.SLM.optical_layers import OpticalStudent
 from models.SLM.utils_slm import load_matching_state
 from models.geometry import bbox_iou_xywh
 from models.teacher_guidance import enhance_feature_for_display
-from models.yolov8.decode_anchor_v8 import decode_detections_anchor_v8
+from models.yolov8.detection_protocol import decode_detections
 from models.yolov8.head_v8 import YOLOv8AnchorHead
 from models.yolov8.metrics_anchor_v8 import compute_average_precision
 
@@ -170,7 +170,7 @@ def save_vis(path, gray, optical_feature, targets, detections):
         cx, cy, w, h, conf, cls_id = det
         x1 = cx - w / 2
         y1 = cy - h / 2
-        color = plt.cm.tab20(int(cls_id) / max(Config.NUM_CLASSES, 1))
+        color = "red"
         axes[3].add_patch(plt.Rectangle((x1, y1), w, h, fill=False, edgecolor=color, linewidth=1.6))
         axes[3].text(
             x1,
@@ -241,7 +241,7 @@ def run(args):
                 gray = gray.contiguous(memory_format=torch.channels_last)
             student_features = student(gray)
             preds = detector(student_features)
-            detections = decode_detections_anchor_v8(Config, preds, conf_thresh=args.conf_thresh, nms_thresh=args.nms_thresh, max_det=args.max_det)
+            detections = decode_detections(Config, preds, conf_thresh=args.conf_thresh, nms_thresh=args.nms_thresh, max_det=args.max_det)
             for idx in range(gray.shape[0]):
                 seen += 1
                 targets = batch["targets"][idx]

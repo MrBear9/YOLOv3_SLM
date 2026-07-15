@@ -50,7 +50,7 @@ from models.monitoring import (
 )
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 from models.yolov8.head_v8 import TeacherWithDetector, build_detector_head
-from models.yolov8.loss_anchor_v8 import YOLOv3AnchorLossForV8Head
+from models.yolov8.detection_protocol import build_detection_criterion, decode_detections
 from models.yolov8.metrics_anchor_v8 import evaluate_model_anchor_v8
 from models.yolov8.visualization_anchor_v8 import save_detection_visualization_anchor_v8
 
@@ -109,7 +109,6 @@ def _write_teacher_tensorboard_model_summary(writer, model):
 def _collect_teacher_val_detections(config, model, val_loader, device):
     """Collect all validation detections and targets for confusion matrix."""
     from models.runtime import prepare_batch
-    from models.yolov8.decode_anchor_v8 import decode_detections_anchor_v8
 
     model.eval()
     all_dets = []
@@ -127,7 +126,7 @@ def _collect_teacher_val_detections(config, model, val_loader, device):
             batch_images, batch_targets = prepare_batch(config, batch, device)
             with amp_ctx:
                 _, predictions = model(batch_images, return_feature=True)
-            detections = decode_detections_anchor_v8(
+            detections = decode_detections(
                 config, predictions,
                 conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
                 nms_thresh=getattr(config, "METRIC_NMS_THRESH", config.NMS_THRESH),
@@ -220,7 +219,7 @@ def train():
     except Exception as exc:
         log_to_file(Config, f"Validation dataset unavailable: {exc}")
 
-    criterion = YOLOv3AnchorLossForV8Head(Config)
+    criterion = build_detection_criterion(Config)
     vis_dataset = val_dataset if Config.VIS_DATASET_SPLIT == "val" and val_dataset is not None and len(val_dataset) > 0 else train_dataset
     vis_prefix = "val" if vis_dataset is val_dataset else "train"
     vis_dir = os.path.join(Config.TEACHER_OUTPUT_DIR, "visualizations")
@@ -237,7 +236,7 @@ def train():
     scheduler = None
 
     log_to_file(Config, "=" * 60)
-    log_to_file(Config, "Training YOLOv8-style head with legacy YOLOv3 anchor loss")
+    log_to_file(Config, f"Training {Config.DETECTOR_HEAD_TYPE} detector with {Config.DETECTION_PROTOCOL} protocol")
     log_to_file(Config, "=" * 60)
     init_epoch_log_table(Config)
     tensorboard_writer = create_tensorboard_writer(Config, Config.TEACHER_OUTPUT_DIR, log_to_file) if is_main else None
@@ -256,6 +255,7 @@ def train():
             "obj": 0.0,
             "noobj": 0.0,
             "cls": 0.0,
+            "dfl": 0.0,
             "slm_cipher": 0.0,
             "slm_tv": 0.0,
             "slm_hf": 0.0,
@@ -318,7 +318,7 @@ def train():
             amp_scaler.step(optimizer)
             amp_scaler.update()
             train_component_sums["total"] += float(loss.detach().item())
-            for key in ("box", "obj", "noobj", "cls"):
+            for key in ("box", "obj", "noobj", "cls", "dfl"):
                 train_component_sums[key] += loss_stats.get(key, 0.0)
 
         avg_train = {key: value / max(len(train_loader), 1) for key, value in train_component_sums.items()}
@@ -384,7 +384,8 @@ def train():
                         "loss": avg_train["total"],
                         "val_map50": best_map50 if val_metrics is not None else None,
                         "teacher_arch": Config.TEACHER_ARCH,
-                        "head_type": "yolov8_style_head_yolov3_anchor_loss",
+                        "head_type": Config.DETECTOR_HEAD_TYPE,
+                        "detection_protocol": Config.DETECTION_PROTOCOL,
                     },
                     joint_best_path,
                 )
@@ -444,7 +445,8 @@ def train():
                 "loss": history["train_total"][-1] if history["train_total"] else None,
                 "val_map50": best_map50 if best_map50 >= 0 else None,
                 "teacher_arch": Config.TEACHER_ARCH,
-                "head_type": "yolov8_style_head_yolov3_anchor_loss",
+                "head_type": Config.DETECTOR_HEAD_TYPE,
+                "detection_protocol": Config.DETECTION_PROTOCOL,
             },
             joint_final_path,
         )

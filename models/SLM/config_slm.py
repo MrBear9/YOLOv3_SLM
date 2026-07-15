@@ -147,6 +147,8 @@ class ConfigSLM:
     # Options: "light", "yolov8_anchor".
     # =========================================================================
     DETECTOR_HEAD_TYPE = "light"
+    # Must match the teacher checkpoint: "anchor_free_tal" or legacy "anchor".
+    DETECTION_PROTOCOL = "anchor_free_tal"
 
     # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
     YOLOV8_BASE_CHANNELS = 32
@@ -154,6 +156,15 @@ class ConfigSLM:
 
     # -------- DETECTOR_HEAD_TYPE = "light" --------
     YOLO_LIGHT_BASE_CH = 8  # 鏂规A: halved from 16
+    ANCHOR_FREE_HEAD_CH = 24
+    ANCHOR_FREE_REG_MAX = 16
+    ANCHOR_FREE_BOX_WEIGHT = 7.5
+    ANCHOR_FREE_CLS_WEIGHT = 0.5
+    ANCHOR_FREE_DFL_WEIGHT = 1.5
+    ANCHOR_FREE_PRE_NMS_TOPK = 3000
+    TAL_TOPK = 10
+    TAL_ALPHA = 0.5
+    TAL_BETA = 6.0
 
     # =========================================================================
     # Anchors
@@ -366,6 +377,9 @@ class ConfigSLM:
             "OPTICAL_SLM_OUTPUT_DIR": ("OUTPUT_DIR", str),
             "OPTICAL_SLM_TEACHER_DETECTOR_CHECKPOINT": ("TEACHER_DETECTOR_CHECKPOINT", str),
             "OPTICAL_SLM_DETECTOR_HEAD_TYPE": ("DETECTOR_HEAD_TYPE", str),
+            "OPTICAL_SLM_DETECTION_PROTOCOL": ("DETECTION_PROTOCOL", str),
+            "OPTICAL_SLM_ANCHOR_FREE_HEAD_CH": ("ANCHOR_FREE_HEAD_CH", int),
+            "OPTICAL_SLM_ANCHOR_FREE_REG_MAX": ("ANCHOR_FREE_REG_MAX", int),
             "OPTICAL_SLM_INIT_MODE": ("SLM_INIT_MODE", str),
             "OPTICAL_SLM_INIT_CHECKPOINT": ("SLM_INIT_CHECKPOINT", str),
             "OPTICAL_SLM_VORTEX_PERIODS": ("SLM_VORTEX_PERIODS", float),

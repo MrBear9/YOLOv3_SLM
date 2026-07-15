@@ -25,27 +25,35 @@ def bootstrap_runtime():
 
 def log_all_parameters():
     log_to_file(Config, "=" * 80)
-    log_to_file(Config, "Optical teacher YOLOv8-style head + YOLOv3 anchor loss configuration")
+    log_to_file(Config, "Optical teacher lightweight multi-scale detector configuration")
     log_to_file(Config, "=" * 80)
     log_to_file(Config, f"Dataset: {Config.YAML_PATH}")
     log_to_file(Config, f"Classes: {Config.CLASS_NAMES}")
     log_to_file(Config, f"Image size / batch / epochs: {Config.IMG_SIZE} / {Config.BATCH_SIZE} / {Config.EPOCHS}")
     log_to_file(
         Config,
-        f"Head factory: type={Config.DETECTOR_HEAD_TYPE}, light_base_ch={Config.YOLO_LIGHT_BASE_CH}, "
+        f"Head factory: type={Config.DETECTOR_HEAD_TYPE}, protocol={Config.DETECTION_PROTOCOL}, light_base_ch={Config.YOLO_LIGHT_BASE_CH}, "
         f"yolov8_base_ch={Config.YOLOV8_BASE_CHANNELS}, c2f_blocks={Config.YOLOV8_C2F_BLOCKS}",
     )
     log_to_file(Config, f"Strides: {Config.STRIDES}")
-    log_to_file(Config, f"Anchor source: {Config.ANCHOR_SOURCE}")
-    log_to_file(Config, f"Anchors: {Config.ANCHORS}")
-    log_to_file(Config, f"Loss weights box/obj/noobj/cls: {Config.BOX_WEIGHT_BASE}/{Config.OBJ_WEIGHT_BASE}/{Config.NOOBJ_WEIGHT_BASE}/{Config.CLS_WEIGHT_BASE}")
+    if Config.DETECTION_PROTOCOL == "anchor":
+        log_to_file(Config, f"Anchor source: {Config.ANCHOR_SOURCE}")
+        log_to_file(Config, f"Anchors: {Config.ANCHORS}")
+        log_to_file(Config, f"Loss weights box/obj/noobj/cls: {Config.BOX_WEIGHT_BASE}/{Config.OBJ_WEIGHT_BASE}/{Config.NOOBJ_WEIGHT_BASE}/{Config.CLS_WEIGHT_BASE}")
+    else:
+        log_to_file(
+            Config,
+            f"Anchor-free TAL/DFL: head_ch={Config.ANCHOR_FREE_HEAD_CH}, reg_max={Config.ANCHOR_FREE_REG_MAX}, "
+            f"topk={Config.TAL_TOPK}, alpha={Config.TAL_ALPHA}, beta={Config.TAL_BETA}",
+        )
     log_to_file(Config, f"Focal alpha/gamma: {Config.FOCAL_ALPHA}/{Config.FOCAL_GAMMA}")
-    log_to_file(
-        Config,
-        f"Anchor matching: mode={Config.ANCHOR_MATCH_MODE}, ratio_thresh={Config.ANCHOR_MATCH_RATIO_THRESH}, "
-        f"neighbor_cells={Config.ASSIGN_NEIGHBOR_CELLS}, simota_iou={Config.ANCHOR_MATCH_IOU_THRESH}, "
-        f"center_radius={Config.CENTER_PRIOR_RADIUS}, top_n={Config.SIMOTA_TOP_N}, max_assign={Config.SIMOTA_MAX_ASSIGN}",
-    )
+    if Config.DETECTION_PROTOCOL == "anchor":
+        log_to_file(
+            Config,
+            f"Anchor matching: mode={Config.ANCHOR_MATCH_MODE}, ratio_thresh={Config.ANCHOR_MATCH_RATIO_THRESH}, "
+            f"neighbor_cells={Config.ASSIGN_NEIGHBOR_CELLS}, simota_iou={Config.ANCHOR_MATCH_IOU_THRESH}, "
+            f"center_radius={Config.CENTER_PRIOR_RADIUS}, top_n={Config.SIMOTA_TOP_N}, max_assign={Config.SIMOTA_MAX_ASSIGN}",
+        )
     log_to_file(Config, f"Hard negative mining: ratio={Config.HARD_NEG_RATIO}, min={Config.HARD_NEG_MIN}")
     log_to_file(Config, f"Box decode range: {Config.BOX_DECODE_RANGE}")
     log_to_file(Config, f"LR teacher/detector: {Config.PHASE1_TEACHER_LR}/{Config.PHASE1_DETECTOR_LR} -> {Config.PHASE2_TEACHER_LR}/{Config.PHASE2_DETECTOR_LR}")

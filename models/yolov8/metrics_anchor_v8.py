@@ -5,7 +5,7 @@ from tqdm import tqdm
 
 from models.geometry import bbox_iou_xywh, bbox_iou_matrix_xywh
 from models.runtime import prepare_batch
-from .decode_anchor_v8 import decode_detections_anchor_v8
+from .detection_protocol import decode_detections
 
 
 def compute_average_precision(detections, total_gt):
@@ -32,7 +32,7 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
     model.eval()
     metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
-    component_totals = {key: 0.0 for key in ("total", "box", "obj", "noobj", "cls")}
+    component_totals = {key: 0.0 for key in ("total", "box", "obj", "noobj", "cls", "dfl")}
     total_tp = total_fp = total_fn = 0
     total_tp_op = total_fp_op = total_fn_op = 0
     op_conf_thresh = float(getattr(config, "CONF_THRESH", 0.35))
@@ -53,10 +53,10 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
             with amp_ctx:
                 teacher_features, predictions = model(batch_images, return_feature=True)
             loss, loss_stats = criterion(predictions, batch_targets)
-            for key in ("box", "obj", "noobj", "cls"):
+            for key in ("box", "obj", "noobj", "cls", "dfl"):
                 component_totals[key] += loss_stats.get(key, 0.0)
             component_totals["total"] += float(loss.detach().item())
-            detections = decode_detections_anchor_v8(
+            detections = decode_detections(
                 config,
                 predictions,
                 conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),

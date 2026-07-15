@@ -120,6 +120,8 @@ class ConfigYOLOv8Anchor:
     # DETECTOR_HEAD_TYPE = "light" | "yolov8_anchor"
     # =========================================================================
     DETECTOR_HEAD_TYPE = "light"
+    # "anchor_free_tal" is the default; "anchor" retains ratio/SimOTA ablations.
+    DETECTION_PROTOCOL = "anchor_free_tal"
 
     # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
     YOLOV8_BASE_CHANNELS = 32
@@ -128,6 +130,15 @@ class ConfigYOLOv8Anchor:
     # -------- DETECTOR_HEAD_TYPE = "light" --------
     YOLO_LIGHT_BASE_CH = 8  # 方案A: halved from 16
     DETECTOR_USE_COORDCONV = True
+    ANCHOR_FREE_HEAD_CH = 24
+    ANCHOR_FREE_REG_MAX = 16
+    ANCHOR_FREE_BOX_WEIGHT = 7.5
+    ANCHOR_FREE_CLS_WEIGHT = 0.5
+    ANCHOR_FREE_DFL_WEIGHT = 1.5
+    ANCHOR_FREE_PRE_NMS_TOPK = 3000
+    TAL_TOPK = 10
+    TAL_ALPHA = 0.5
+    TAL_BETA = 6.0
     DETECTOR_INVERT_FEATURE = True   # invert teacher feature (dark→bright) before detector
 
     # -------- DETECTOR_HEAD_TYPE = "compact" | "center_detect" --------
@@ -345,6 +356,9 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_INIT_CHECKPOINT": ("TEACHER_INIT_CHECKPOINT", str),
             "OPTICAL_TEACHER_ARCH": ("TEACHER_ARCH", str),
             "OPTICAL_TEACHER_DETECTOR_HEAD_TYPE": ("DETECTOR_HEAD_TYPE", str),
+            "OPTICAL_TEACHER_DETECTION_PROTOCOL": ("DETECTION_PROTOCOL", str),
+            "OPTICAL_TEACHER_ANCHOR_FREE_HEAD_CH": ("ANCHOR_FREE_HEAD_CH", int),
+            "OPTICAL_TEACHER_ANCHOR_FREE_REG_MAX": ("ANCHOR_FREE_REG_MAX", int),
             "OPTICAL_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),
             "OPTICAL_TEACHER_V2_C2F_BLOCKS": ("TEACHER_V2_C2F_BLOCKS", int),
             "OPTICAL_TEACHER_V2_SYNTHETIC_WAVELENGTHS": ("TEACHER_V2_SYNTHETIC_WAVELENGTHS", int),

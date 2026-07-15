@@ -23,6 +23,34 @@ from .building_blocks import (
 )
 
 
+class DepthwiseSeparableTower(nn.Module):
+    """Low-cost spatial task tower suitable for FPGA-oriented deployment."""
+
+    def __init__(self, in_channels, hidden_channels):
+        super().__init__()
+        self.input_proj = ConvBNAct(in_channels, hidden_channels, 1)
+        self.depthwise = ConvBNAct(hidden_channels, hidden_channels, 3, groups=hidden_channels)
+        self.output_proj = ConvBNAct(hidden_channels, hidden_channels, 1)
+
+    def forward(self, x):
+        return self.output_proj(self.depthwise(self.input_proj(x)))
+
+
+class AnchorFreeDetectBranch(nn.Module):
+    """Decoupled anchor-free branch with DFL box regression and class logits."""
+
+    def __init__(self, in_channels, num_classes, reg_max, hidden_channels):
+        super().__init__()
+        self.box_tower = DepthwiseSeparableTower(in_channels, hidden_channels)
+        self.cls_tower = DepthwiseSeparableTower(in_channels, hidden_channels)
+        self.box_pred = nn.Conv2d(hidden_channels, 4 * reg_max, 1)
+        self.cls_pred = nn.Conv2d(hidden_channels, num_classes, 1)
+        nn.init.constant_(self.cls_pred.bias, -4.6)
+
+    def forward(self, x):
+        return {"reg": self.box_pred(self.box_tower(x)), "cls": self.cls_pred(self.cls_tower(x))}
+
+
 class YOLOv8AnchorHead(nn.Module):
     """YOLOv8-style C2f/PAN head with legacy YOLOv3 anchor-formatted outputs."""
 
@@ -185,6 +213,7 @@ class YOLOLightHead(nn.Module):
     def __init__(self, config, in_channels=1, out_channels=None, base_ch=None):
         super().__init__()
         self.config = config
+        self.detection_protocol = str(getattr(config, "DETECTION_PROTOCOL", "anchor_free_tal")).strip().lower()
         out_channels = config.get_detector_output_channels() if out_channels is None else out_channels
         c = base_ch if base_ch is not None else int(getattr(config, "YOLO_LIGHT_BASE_CH", 8))
         c2, c4, c8 = c * 2, c * 4, c * 8
@@ -223,6 +252,16 @@ class YOLOLightHead(nn.Module):
         self.pan_p5 = nn.Sequential(ConvBNAct(c8 * 2, c8, 1), ECABlock(c8))
 
         self.head_dropout = nn.Dropout2d(0.1)
+
+        if self.detection_protocol == "anchor_free_tal":
+            reg_max = int(getattr(config, "ANCHOR_FREE_REG_MAX", 16))
+            head_ch = int(getattr(config, "ANCHOR_FREE_HEAD_CH", max(c2, 16)))
+            self.anchor_free_heads = nn.ModuleList(
+                AnchorFreeDetectBranch(ch, config.NUM_CLASSES, reg_max, head_ch) for ch in (c2, c4, c8)
+            )
+            return
+        if self.detection_protocol != "anchor":
+            raise ValueError("DETECTION_PROTOCOL must be 'anchor_free_tal' or 'anchor'.")
 
         # 方案A: direct 1×1 projections — no shared 3×3 conv.
         # FPN/PAN features already carry sufficient spatial context from
@@ -291,10 +330,16 @@ class YOLOLightHead(nn.Module):
         p5_pan = self.pan_p5(torch.cat([p4_down, p5_feat], dim=1))
 
         # Detection heads — direct 1×1 per scale (方案A)
-        pred_p3 = self._decode_head(self.head_p3_box, self.head_p3_obj, self.head_p3_cls, self.head_dropout(p3_fused))
-        pred_p4 = self._decode_head(self.head_p4_box, self.head_p4_obj, self.head_p4_cls, self.head_dropout(p4_pan))
-        pred_p5 = self._decode_head(self.head_p5_box, self.head_p5_obj, self.head_p5_cls, self.head_dropout(p5_pan))
+        prediction_features = (self.head_dropout(p3_fused), self.head_dropout(p4_pan), self.head_dropout(p5_pan))
+        if self.detection_protocol == "anchor_free_tal":
+            predictions = tuple(head(feat) for head, feat in zip(self.anchor_free_heads, prediction_features))
+        else:
+            predictions = (
+                self._decode_head(self.head_p3_box, self.head_p3_obj, self.head_p3_cls, prediction_features[0]),
+                self._decode_head(self.head_p4_box, self.head_p4_obj, self.head_p4_cls, prediction_features[1]),
+                self._decode_head(self.head_p5_box, self.head_p5_obj, self.head_p5_cls, prediction_features[2]),
+            )
 
         if return_features:
-            return (pred_p3, pred_p4, pred_p5), {"s8": p3_feat, "s16": p4_feat, "s32": p5_feat}
-        return (pred_p3, pred_p4, pred_p5)
+            return predictions, {"s8": p3_feat, "s16": p4_feat, "s32": p5_feat}
+        return predictions

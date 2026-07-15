@@ -1,5 +1,13 @@
 # models layout
 
+## Project targets
+
+- Teacher feature + lightweight detector: validation `mAP@0.5 > 0.80`.
+- SLM optical feature + lightweight detector: validation `mAP@0.5 >= 0.55`.
+- Keep the detector suitable for FPGA/edge deployment and evaluate parameters, MACs, activation memory, latency, and quantized accuracy.
+- The default Light protocol is three-scale anchor-free TAL + DFL. Legacy anchor `ratio` and `yolo7_simota` modes remain as controlled ablations.
+- See `docs/HeadIdea/Light检测头目标与Anchor-Free路线.md` for the experiment and acceptance plan.
+
 Shared modules live directly under `models/`:
 
 - `teacher.py`: shared ConvTeacher.
@@ -21,19 +29,20 @@ SLM student-specific modules live under `models/SLM/`:
 YOLOv8-specific modules live under `models/yolov8/`:
 
 - `config_v8.py`: config for `optical_teacher_yolov8_head.py`.
-- `head_v8.py`: YOLOv8-style C2f/PAN head with legacy 3-anchor output.
-- `loss_anchor_v8.py`: YOLOv3 anchor loss used with the YOLOv8-style head.
-- `decode_anchor_v8.py`: anchor decode and NMS for the YOLOv8-style head.
-- `metrics_anchor_v8.py`: validation metrics for the anchor-compatible version.
-- `visualization_anchor_v8.py`: visualization for the anchor-compatible version.
+- `head_v8.py`: detector factory and teacher-detector wrapper.
+- `detection_heads.py`: lightweight multi-scale and YOLOv8-style detector heads.
+- `anchor_free.py`: default TAL assignment, DFL/CIoU loss, and anchor-free decode.
+- `detection_protocol.py`: shared protocol switch for anchor-free and anchor ablations.
+- `loss_anchor_v8.py` / `decode_anchor_v8.py`: legacy ratio/SimOTA anchor comparison path.
+- `metrics_anchor_v8.py` / `visualization_anchor_v8.py`: shared validation and visualization paths despite their legacy filenames.
 
-The current `optical_teacher_yolov8_head.py` intentionally uses:
+The default `optical_teacher_yolov8_head.py` route uses:
 
 ```text
-YOLOv8-style head + legacy YOLOv3 anchor loss
+Light multi-scale neck + anchor-free TAL + DFL/CIoU
 ```
 
-It does not import or initialize `optical_teacher_yolo.py`, so running the YOLOv8-head experiment will only create logs under its own configured output directory.
+Set `DETECTION_PROTOCOL="anchor"` to run the retained `ratio` or `yolo7_simota` comparisons. The script does not import or initialize `optical_teacher_yolo.py`, so it only creates logs under its own configured output directory.
 
 `optical_slm_yolov8_head.py` trains the SLM optical student and a YOLOv8-style anchor detector from a checkpoint produced by `optical_teacher_yolov8_head.py`. It saves only:
 
