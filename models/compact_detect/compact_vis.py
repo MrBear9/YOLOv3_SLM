@@ -20,7 +20,7 @@ from models.runtime import log_to_file, unwrap_module
 from models.teacher_guidance import enhance_feature_for_display
 
 from .config import ConfigCompactDetect as Config
-from .decode import decode_center_detections
+from .factory import build_compact_decode_fn
 
 
 def draw_box(draw, box_xywh, color, label):
@@ -110,6 +110,7 @@ def add_tensorboard_visualization(writer, step, dataset, student, detector, devi
         max_images = int(getattr(Config, "VIS_MAX_IMAGES", 4))
     student.eval()
     detector.eval()
+    decode_fn = build_compact_decode_fn(Config)
     sample_indices = select_visualization_indices(len(dataset), max_images)
     items = [dataset[idx] for idx in sample_indices]
     images = torch.stack([item["gray_tensor"] for item in items], dim=0).to(device, non_blocking=Config.PIN_MEMORY)
@@ -119,7 +120,7 @@ def add_tensorboard_visualization(writer, step, dataset, student, detector, devi
         optical_features = student(images.float())
         raw_optical_features = forward_student_with_norm(student, images.float(), enable_norm=False)
         pred = detector(optical_features)
-    detections = decode_center_detections(
+    detections = decode_fn(
         Config,
         pred,
         conf_thresh=Config.CONF_THRESH,
@@ -180,6 +181,7 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, te
         max_images = int(getattr(Config, "VIS_FILE_MAX_IMAGES", 3))
     os.makedirs(save_dir, exist_ok=True)
 
+    decode_fn = build_compact_decode_fn(Config)
     student_module = unwrap_module(student)
     detector_module = unwrap_module(detector)
     was_student_wrapper_training = student.training
@@ -220,7 +222,7 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, te
             detector_feature = student(gray_batch)
             raw_feature = forward_student_with_norm(student, gray_batch, enable_norm=False)
             predictions = detector(detector_feature)
-            detections = decode_center_detections(
+            detections = decode_fn(
                 Config,
                 predictions,
                 conf_thresh=Config.CONF_THRESH,

@@ -41,7 +41,7 @@ class ConfigCompactDetect(ConfigSLM):
     COMPACT_BASE_CH = 16
     COMPACT_DILATIONS = (1, 2, 4)
     COMPACT_HEAD_CH = 32
-    COMPACT_MODEL_VERSION = "v1"           # "v1" (109K) or "v2" (144K, ECA+FPN)
+    COMPACT_MODEL_VERSION = "v1"           # "v1" (109K) or "v2" (~32K, Level-4 decoupled 3-network)
     COMPACT_PRETRAINED_STUDENT = r""       # pretrained OpticalStudent SLM phase
     COMPACT_PRETRAINED_DETECTOR = r""      # pretrained CompactOpticalDetector weights
     COMPACT_TRAIN_STUDENT = True            # trainable during teacher warmup (feature matching)
@@ -60,6 +60,9 @@ class ConfigCompactDetect(ConfigSLM):
     HEATMAP_LOSS_WEIGHT = 1.0
     WH_LOSS_WEIGHT = 0.08
     OFFSET_LOSS_WEIGHT = 1.0
+    # Level-4 V2 decoupled loss weights (obj + cls replace heatmap)
+    OBJ_LOSS_WEIGHT = 1.0
+    CLS_LOSS_WEIGHT = 1.0
     MIN_HEATMAP_RADIUS = 1
     HEATMAP_RADIUS_SCALE = 0.35
 
@@ -132,6 +135,8 @@ class ConfigCompactDetect(ConfigSLM):
             "OPTICAL_COMPACT_SINGLE_IMAGE_PATH": ("SINGLE_IMAGE_PATH", str),
             "OPTICAL_COMPACT_SINGLE_IMAGE_LABEL_PATH": ("SINGLE_IMAGE_LABEL_PATH", str),
             "OPTICAL_COMPACT_SINGLE_IMAGE_REPEAT": ("SINGLE_IMAGE_REPEAT", int),
+            "OPTICAL_COMPACT_OBJ_LOSS_WEIGHT": ("OBJ_LOSS_WEIGHT", float),
+            "OPTICAL_COMPACT_CLS_LOSS_WEIGHT": ("CLS_LOSS_WEIGHT", float),
         }
         for env_name, (attr, caster) in overrides.items():
             value = os.environ.get(env_name)

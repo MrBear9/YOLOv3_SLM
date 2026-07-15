@@ -31,7 +31,8 @@ def build_detector_head(config, in_channels=1, out_channels=None):
         base_ch = int(getattr(config, "YOLO_LIGHT_BASE_CH", 8))
         return YOLOLightHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch)
     if head_type in {"compact", "center_detect"}:
-        from models.compact_detect.model import CompactOpticalDetector, CompactOpticalDetectorV2
+        from models.compact_detect.model import CompactOpticalDetector           # V1 (anchor-free, 109 K)
+        from models.compact_detect.model_v2 import CompactOpticalDetectorV2      # V2 (Level-4 decoupled, ~32 K)
         version = str(getattr(config, "COMPACT_MODEL_VERSION", "v2")).strip().lower()
         if version in {"v2", "2"}:
             return CompactOpticalDetectorV2(config, in_channels=in_channels)

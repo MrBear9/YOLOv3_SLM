@@ -48,7 +48,8 @@ from .compact_utils import (
 )
 from .compact_vis import add_tensorboard_teacher_feature, add_tensorboard_visualization, save_compact_visualization_png
 from .config import ConfigCompactDetect as Config
-from .losses import CenterDetectionLoss
+from .factory import build_compact_criterion, build_compact_decode_fn, get_compact_loss_keys
+from .losses import CenterDetectionLoss  # kept for feature_criterion during teacher warmup
 from .metrics import evaluate_center_detector
 from .model import OpticalCompactDetector
 from models.yolov8.head_v8 import build_detector_head
@@ -56,7 +57,7 @@ from models.yolov8.head_v8 import build_detector_head
 
 def _collect_compact_val_detections(config, student, detector, val_loader, device):
     """Collect all validation detections and targets for confusion matrix."""
-    from .decode import decode_center_detections
+    decode_fn = build_compact_decode_fn(config)
 
     student = unwrap_module(student)
     detector = unwrap_module(detector)
@@ -73,7 +74,7 @@ def _collect_compact_val_detections(config, student, detector, val_loader, devic
             with amp_ctx:
                 features = student(images)
                 pred = detector(features)
-            detections = decode_center_detections(
+            detections = decode_fn(
                 config, pred,
                 conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
                 nms_thresh=getattr(config, "METRIC_NMS_THRESH", config.NMS_THRESH),
@@ -274,7 +275,7 @@ def train():
     log_to_file(Config, f"Compact detector parameters: {detector_params:,}")
     log_to_file(Config, f"Student parameters: {student_params:,}, combined train route: {total_params:,}")
 
-    criterion = CenterDetectionLoss(Config)
+    criterion = build_compact_criterion(Config)
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
     tensorboard_writer = create_tensorboard_writer(Config, Config.OUTPUT_DIR, log_to_file) if is_main else None
@@ -329,7 +330,7 @@ def train():
         stat_keys = (
             ("feature_total", "full", "low1", "low2", "ssim", "grad", "freq", "pearson", "slm_smooth", "slm_diversity")
             if in_teacher_warmup
-            else ("heatmap", "wh", "offset", "feature_total")
+            else get_compact_loss_keys(Config)
         )
         epoch_stats_t = {key: torch.zeros((), device=device) for key in stat_keys}
 

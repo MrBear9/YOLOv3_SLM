@@ -6,6 +6,7 @@ from tqdm import tqdm
 
 from models.geometry import bbox_iou_matrix_xywh
 from .decode import decode_center_detections
+from .factory import build_compact_decode_fn, get_compact_loss_keys
 
 
 def compute_average_precision(detections, total_gt):
@@ -33,7 +34,11 @@ def _distributed_merge_metrics(
     total_tp, total_fp, total_fn,
     total_tp_op, total_fp_op, total_fn_op,
     num_batches, device,
+    loss_keys=None,
 ):
+    if loss_keys is None:
+        loss_keys = ["heatmap", "wh", "offset"]
+
     if not dist.is_initialized():
         return (
             metric_storage, gt_counts, loss_totals,
@@ -57,41 +62,35 @@ def _distributed_merge_metrics(
         for cls_id, value in item["gt_counts"].items():
             merged_gt_counts[cls_id] += int(value)
 
-    stat_tensor = torch.tensor(
-        [
-            loss_totals["total"],
-            loss_totals["heatmap"],
-            loss_totals["wh"],
-            loss_totals["offset"],
-            float(total_tp),
-            float(total_fp),
-            float(total_fn),
-            float(total_tp_op),
-            float(total_fp_op),
-            float(total_fn_op),
-            float(num_batches),
-        ],
-        dtype=torch.float64,
-        device=device,
-    )
+    # Build stat tensor dynamically from loss_keys
+    stat_parts = [loss_totals.get("total", 0.0)]
+    for key in loss_keys:
+        stat_parts.append(loss_totals.get(key, 0.0))
+    stat_parts.extend([
+        float(total_tp), float(total_fp), float(total_fn),
+        float(total_tp_op), float(total_fp_op), float(total_fn_op),
+        float(num_batches),
+    ])
+
+    stat_tensor = torch.tensor(stat_parts, dtype=torch.float64, device=device)
     dist.all_reduce(stat_tensor, op=dist.ReduceOp.SUM)
-    merged_losses = {
-        "total": float(stat_tensor[0].item()),
-        "heatmap": float(stat_tensor[1].item()),
-        "wh": float(stat_tensor[2].item()),
-        "offset": float(stat_tensor[3].item()),
-    }
+
+    merged_losses = {"total": float(stat_tensor[0].item())}
+    for i, key in enumerate(loss_keys):
+        merged_losses[key] = float(stat_tensor[1 + i].item())
+
+    base = 1 + len(loss_keys)
     return (
         merged_storage,
         merged_gt_counts,
         merged_losses,
-        int(stat_tensor[4].item()),
-        int(stat_tensor[5].item()),
-        int(stat_tensor[6].item()),
-        int(stat_tensor[7].item()),
-        int(stat_tensor[8].item()),
-        int(stat_tensor[9].item()),
-        int(max(stat_tensor[10].item(), 1.0)),
+        int(stat_tensor[base + 0].item()),
+        int(stat_tensor[base + 1].item()),
+        int(stat_tensor[base + 2].item()),
+        int(stat_tensor[base + 3].item()),
+        int(stat_tensor[base + 4].item()),
+        int(stat_tensor[base + 5].item()),
+        int(max(stat_tensor[base + 6].item(), 1.0)),
     )
 
 
@@ -101,10 +100,14 @@ def evaluate_center_detector(config, student, detector, dataloader, criterion, d
     detector.eval()
     metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
-    loss_totals = {key: 0.0 for key in ("total", "heatmap", "wh", "offset")}
+    loss_keys = [k for k in get_compact_loss_keys(config) if k != "feature_total"]
+    loss_totals = {"total": 0.0}
+    for k in loss_keys:
+        loss_totals[k] = 0.0
     total_tp = total_fp = total_fn = 0
     total_tp_op = total_fp_op = total_fn_op = 0
     op_conf_thresh = float(getattr(config, "CONF_THRESH", 0.30))
+    decode_fn = build_compact_decode_fn(config)
     is_main = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     amp_enabled = bool(getattr(config, "ENABLE_AMP", True)) and device.type == "cuda"
     amp_dtype = torch.bfloat16 if str(getattr(config, "AMP_DTYPE", "float16")).lower() in {"bf16", "bfloat16"} else torch.float16
@@ -119,7 +122,7 @@ def evaluate_center_detector(config, student, detector, dataloader, criterion, d
             loss, stats = criterion(pred, targets)
         for key in loss_totals:
             loss_totals[key] += stats.get(key, float(loss.detach().item()) if key == "total" else 0.0)
-        detections = decode_center_detections(
+        detections = decode_fn(
             config,
             pred,
             conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
@@ -224,6 +227,7 @@ def evaluate_center_detector(config, student, detector, dataloader, criterion, d
         total_fn_op,
         num_batches,
         device,
+        loss_keys=loss_keys,
     )
     losses = {key: value / num_batches for key, value in loss_totals.items()}
     precision = total_tp / (total_tp + total_fp + 1e-6)

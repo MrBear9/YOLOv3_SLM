@@ -21,8 +21,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from models.compact_detect.decode import decode_center_detections
-from models.compact_detect.losses import CenterDetectionLoss
+from models.compact_detect.factory import build_compact_criterion, build_compact_decode_fn, get_compact_loss_keys
 from models.compact_detect.metrics import _distributed_merge_metrics, compute_average_precision
 from models.yolov8.head_v8 import build_detector_head
 from models.dataset import YOLODataset, build_class_balanced_train_sampler, identity_collate
@@ -117,6 +116,7 @@ def _collect_compact_val_detections(teacher, detector, val_loader, device):
     detector.eval()
     all_dets = []
     all_targets = []
+    decode_fn = build_compact_decode_fn(Config)
     amp_enabled = bool(getattr(Config, "ENABLE_AMP", True)) and device.type == "cuda"
     amp_dtype = torch.bfloat16 if str(Config.AMP_DTYPE).lower() in {"bf16", "bfloat16"} else torch.float16
     amp_ctx = (
@@ -130,7 +130,7 @@ def _collect_compact_val_detections(teacher, detector, val_loader, device):
             with amp_ctx:
                 features = teacher(prepare_conv_tensor(Config, batch_images))
                 pred = detector(features)
-            detections = decode_center_detections(
+            detections = decode_fn(
                 Config, pred,
                 conf_thresh=getattr(Config, "COMPACT_METRIC_CONF_THRESH", Config.COMPACT_CONF_THRESH),
                 nms_thresh=getattr(Config, "COMPACT_METRIC_NMS_THRESH", Config.COMPACT_NMS_THRESH),
@@ -195,7 +195,8 @@ def _write_compact_tensorboard_predictions(writer, step, teacher, detector, data
             with fp32_ctx:
                 features = teacher(prepare_conv_tensor(Config, inp))
                 pred = detector(features)
-            dets_list = decode_center_detections(
+            decode_vis_fn = build_compact_decode_fn(Config)
+            dets_list = decode_vis_fn(
                 Config, pred,
                 conf_thresh=getattr(Config, "COMPACT_CONF_THRESH", 0.30),
                 nms_thresh=getattr(Config, "COMPACT_NMS_THRESH", 0.45),
@@ -248,9 +249,14 @@ def _evaluate_teacher_compact(teacher, detector, val_loader, criterion, device):
     teacher.eval()
     detector.eval()
 
+    loss_keys = [k for k in get_compact_loss_keys(Config) if k != "feature_total"]
+    decode_val_fn = build_compact_decode_fn(Config)
+
     metric_storage = {cls_id: [] for cls_id in range(Config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(Config.NUM_CLASSES)}
-    loss_totals = {"total": 0.0, "heatmap": 0.0, "wh": 0.0, "offset": 0.0}
+    loss_totals = {"total": 0.0}
+    for k in loss_keys:
+        loss_totals[k] = 0.0
     total_tp = total_fp = total_fn = 0
     total_tp_op = total_fp_op = total_fn_op = 0
     num_batches = 0
@@ -275,12 +281,11 @@ def _evaluate_teacher_compact(teacher, detector, val_loader, criterion, device):
                 pred = detector(features)
                 loss, stats = criterion(pred, batch_targets)
             loss_totals["total"] += float(loss.detach().item())
-            loss_totals["heatmap"] += float(stats.get("heatmap", 0.0))
-            loss_totals["wh"] += float(stats.get("wh", 0.0))
-            loss_totals["offset"] += float(stats.get("offset", 0.0))
+            for k in loss_keys:
+                loss_totals[k] += float(stats.get(k, 0.0))
             num_batches += 1
 
-            detections = decode_center_detections(
+            detections = decode_val_fn(
                 Config, pred,
                 conf_thresh=getattr(Config, "COMPACT_METRIC_CONF_THRESH", Config.COMPACT_CONF_THRESH),
                 nms_thresh=getattr(Config, "COMPACT_METRIC_NMS_THRESH", Config.COMPACT_NMS_THRESH),
@@ -384,30 +389,27 @@ def _evaluate_teacher_compact(teacher, detector, val_loader, criterion, device):
         metric_storage = merged_storage
         gt_counts = merged_gt_counts
 
-        stat_tensor = torch.tensor(
-            [
-                loss_totals["total"], loss_totals["heatmap"],
-                loss_totals["wh"], loss_totals["offset"],
-                float(total_tp), float(total_fp), float(total_fn),
-                float(total_tp_op), float(total_fp_op), float(total_fn_op),
-                float(num_batches),
-            ],
-            dtype=torch.float64, device=device,
-        )
+        stat_parts = [loss_totals.get("total", 0.0)]
+        for k in loss_keys:
+            stat_parts.append(loss_totals.get(k, 0.0))
+        stat_parts.extend([
+            float(total_tp), float(total_fp), float(total_fn),
+            float(total_tp_op), float(total_fp_op), float(total_fn_op),
+            float(num_batches),
+        ])
+        stat_tensor = torch.tensor(stat_parts, dtype=torch.float64, device=device)
         dist.all_reduce(stat_tensor, op=dist.ReduceOp.SUM)
-        loss_totals = {
-            "total": float(stat_tensor[0].item()),
-            "heatmap": float(stat_tensor[1].item()),
-            "wh": float(stat_tensor[2].item()),
-            "offset": float(stat_tensor[3].item()),
-        }
-        total_tp = int(stat_tensor[4].item())
-        total_fp = int(stat_tensor[5].item())
-        total_fn = int(stat_tensor[6].item())
-        total_tp_op = int(stat_tensor[7].item())
-        total_fp_op = int(stat_tensor[8].item())
-        total_fn_op = int(stat_tensor[9].item())
-        num_batches = int(max(stat_tensor[10].item(), 1.0))
+        loss_totals = {"total": float(stat_tensor[0].item())}
+        for i, k in enumerate(loss_keys):
+            loss_totals[k] = float(stat_tensor[1 + i].item())
+        base = 1 + len(loss_keys)
+        total_tp = int(stat_tensor[base + 0].item())
+        total_fp = int(stat_tensor[base + 1].item())
+        total_fn = int(stat_tensor[base + 2].item())
+        total_tp_op = int(stat_tensor[base + 3].item())
+        total_fp_op = int(stat_tensor[base + 4].item())
+        total_fn_op = int(stat_tensor[base + 5].item())
+        num_batches = int(max(stat_tensor[base + 6].item(), 1.0))
 
     losses = {key: value / num_batches for key, value in loss_totals.items()}
     precision_metric = total_tp / (total_tp + total_fp + 1e-6)
@@ -507,7 +509,7 @@ def train():
     log_to_file(Config, f"Image size / batch / epochs: {Config.IMG_SIZE} / {Config.BATCH_SIZE} / {Config.EPOCHS}")
     log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}, detector: compact (center-point)")
     log_to_file(Config, f"Compact: base_ch={Config.COMPACT_BASE_CH}, head_ch={Config.COMPACT_HEAD_CH}, dilations={Config.COMPACT_DILATIONS}")
-    log_to_file(Config, f"Loss weights: heatmap={Config.HEATMAP_LOSS_WEIGHT}, wh={Config.WH_LOSS_WEIGHT}, offset={Config.OFFSET_LOSS_WEIGHT}")
+    log_to_file(Config, f"Loss weights: heatmap={Config.HEATMAP_LOSS_WEIGHT}, wh={Config.WH_LOSS_WEIGHT}, offset={Config.OFFSET_LOSS_WEIGHT}, obj={getattr(Config, 'OBJ_LOSS_WEIGHT', 'N/A')}, cls={getattr(Config, 'CLS_LOSS_WEIGHT', 'N/A')}")
     log_to_file(Config, f"Strides: {Config.STRIDES}")
     log_to_file(
         Config,
@@ -596,8 +598,8 @@ def train():
         log_to_file(Config, f"Validation dataset unavailable: {exc}")
 
     # ── Criterion ────────────────────────────────────────────────────────
-    criterion = CenterDetectionLoss(Config)
-    log_to_file(Config, "Criterion: CenterDetectionLoss (anchor-free)")
+    criterion = build_compact_criterion(Config)
+    log_to_file(Config, f"Criterion: {type(criterion).__name__} (anchor-free)")
 
     # ── Logging ──────────────────────────────────────────────────────────
     log_to_file(Config, "=" * 60)
@@ -657,9 +659,8 @@ def train():
             )
 
         epoch_loss = 0.0
-        epoch_heatmap = 0.0
-        epoch_wh = 0.0
-        epoch_offset = 0.0
+        train_loss_keys = [k for k in get_compact_loss_keys(Config) if k != "feature_total"]
+        epoch_train_stats = {k: 0.0 for k in train_loss_keys}
 
         for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True, disable=not is_main):
             batch_images, batch_targets = prepare_batch(Config, batch, device)
@@ -684,17 +685,13 @@ def train():
             amp_scaler.update()
 
             epoch_loss += float(loss.detach().item())
-            epoch_heatmap += float(loss_stats.get("heatmap", 0.0))
-            epoch_wh += float(loss_stats.get("wh", 0.0))
-            epoch_offset += float(loss_stats.get("offset", 0.0))
+            for k in train_loss_keys:
+                epoch_train_stats[k] += float(loss_stats.get(k, 0.0))
 
         n_batches = max(len(train_loader), 1)
-        avg_train = {
-            "total": epoch_loss / n_batches,
-            "heatmap": epoch_heatmap / n_batches,
-            "wh": epoch_wh / n_batches,
-            "offset": epoch_offset / n_batches,
-        }
+        avg_train = {"total": epoch_loss / n_batches}
+        for k in train_loss_keys:
+            avg_train[k] = epoch_train_stats[k] / n_batches
 
         if scheduler is not None:
             scheduler.step()
@@ -712,14 +709,12 @@ def train():
         if is_main and tensorboard_writer is not None:
             writer = tensorboard_writer
             writer.add_scalar("Loss/train_total", avg_train["total"], epoch + 1)
-            writer.add_scalar("Loss/train_heatmap", avg_train["heatmap"], epoch + 1)
-            writer.add_scalar("Loss/train_wh", avg_train["wh"], epoch + 1)
-            writer.add_scalar("Loss/train_offset", avg_train["offset"], epoch + 1)
+            for k in train_loss_keys:
+                writer.add_scalar(f"Loss/train_{k}", avg_train[k], epoch + 1)
             if val_losses is not None:
                 writer.add_scalar("Loss/val_total", val_losses["total"], epoch + 1)
-                writer.add_scalar("Loss/val_heatmap", val_losses["heatmap"], epoch + 1)
-                writer.add_scalar("Loss/val_wh", val_losses["wh"], epoch + 1)
-                writer.add_scalar("Loss/val_offset", val_losses["offset"], epoch + 1)
+                for k in train_loss_keys:
+                    writer.add_scalar(f"Loss/val_{k}", val_losses.get(k, 0.0), epoch + 1)
             if val_metrics is not None:
                 for key in ("precision", "recall", "f1", "map50"):
                     if key in val_metrics:
