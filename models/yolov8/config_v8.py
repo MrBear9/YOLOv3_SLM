@@ -150,7 +150,6 @@ class ConfigYOLOv8Anchor:
     COMPACT_CONF_THRESH = 0.30
     COMPACT_NMS_THRESH = 0.45
     COMPACT_MAX_DET = 100
-    COMPACT_DECODE_PRE_NMS_TOPK = 400
     COMPACT_METRIC_CONF_THRESH = 0.001
     COMPACT_METRIC_NMS_THRESH = 0.50
     COMPACT_METRIC_MAX_DET = 100
@@ -275,16 +274,6 @@ class ConfigYOLOv8Anchor:
     NMS_THRESH = 0.35
     MAX_DET = 20
     AGNOSTIC_NMS = False
-    ENABLE_CONTAINMENT_SUPPRESSION = True
-    CONTAINMENT_SUPPRESS_RATIO = 0.90
-    CONTAINMENT_AREA_RATIO_LIMIT = 0.50
-    ENABLE_WBF = True
-    WBF_IOU_THRESH = 0.72
-    WBF_SKIP_CONF_THRESH = 0.08
-    WBF_SCORE_POWER = 1.5
-    WBF_MAX_CANDIDATES = 12
-    WBF_CENTER_DIST_FACTOR = 0.22
-    WBF_SIZE_RATIO_LIMIT = 1.8
 
     # =========================================================================
     # Validation
@@ -305,11 +294,9 @@ class ConfigYOLOv8Anchor:
     VIS_DPI = 130
     VIS_DATASET_SPLIT = "val"
     VIS_SEED = 20260506
-    VIS_CONF_THRESH = 0.35
+    VIS_CONF_THRESH = 0.50
     VIS_NMS_THRESH = 0.35
     VIS_MAX_DET = 20
-    VIS_SHOW_BEST_MATCHED_ANCHORS = True
-    VIS_MAX_GT_ANCHOR_OVERLAYS = 2
 
     # =========================================================================
     # Data loading
@@ -539,5 +526,4 @@ class ConfigYOLOv8Anchor:
         print(f"Epochs: {cls.EPOCHS}")
         print(f"Num Classes: {cls.NUM_CLASSES}")
         print(f"Learning Rate: {cls.LEARNING_RATE}")
-        print(f"Class Names: {cls.CLASS_NAMES}")
         print("=" * 80)

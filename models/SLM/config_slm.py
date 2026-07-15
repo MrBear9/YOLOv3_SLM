@@ -204,9 +204,6 @@ class ConfigSLM:
     # -------- Object size weighting --------
     SMALL_OBJ_AREA = 32 * 32
     LARGE_OBJ_AREA = 128 * 128
-    SMALL_OBJ_WEIGHT = 0.8
-    MEDIUM_OBJ_WEIGHT = 1.0
-    LARGE_OBJ_WEIGHT = 1.5
 
     # =========================================================================
     # Focal loss
@@ -306,15 +303,13 @@ class ConfigSLM:
     # =========================================================================
     # Detection post-process
     # =========================================================================
-    CONF_THRESH = 0.7
-    NMS_THRESH = 0.25
-    MAX_DET = 5
+    CONF_THRESH = 0.5
+    NMS_THRESH = 0.45
+    MAX_DET = 10
     METRIC_CONF_THRESH = 0.001
     METRIC_NMS_THRESH = 0.50
     METRIC_MAX_DET = 300
     AGNOSTIC_NMS = False
-    ENABLE_CONTAINMENT_SUPPRESSION = False
-    ENABLE_WBF = False
 
     # =========================================================================
     # Validation
@@ -334,8 +329,6 @@ class ConfigSLM:
     VIS_CONF_THRESH = 0.5
     VIS_NMS_THRESH = 0.35
     VIS_MAX_DET = 5
-    VIS_SHOW_BEST_MATCHED_ANCHORS = False
-    VIS_MAX_GT_ANCHOR_OVERLAYS = 2
 
     # Repeat each train-set entry for tiny subset experiments; validation is unchanged.
     TRAIN_DATASET_REPEAT = 1
