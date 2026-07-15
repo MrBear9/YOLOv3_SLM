@@ -12,6 +12,8 @@ import torch.nn.functional as F
 
 from .building_blocks import (
     CVOCAStage,
+    FeedbackGuidance,
+    RawImageBridge,
     TeacherC2f,
     TeacherConvBNAct,
     TeacherResidualBlock,
@@ -292,6 +294,16 @@ class CVOCAConvTeacherV2(nn.Module):
         self.out_scale = nn.Parameter(torch.ones(1))
         self.out_bias = nn.Parameter(torch.zeros(1))
 
+        # --- Deep-feature feedback guidance for OCA ---
+        # Inputs: f_s8 (c3), f_context (c3), f_from_s4 (c3) — all at 80×80
+        self.feedback_guidance = FeedbackGuidance([c3, c3, c3], guide_channels=16)
+
+        # --- Raw image spatial bridges ---
+        self.raw_bridge_s8 = RawImageBridge(out_channels=c1)
+        self.raw_bridge_s32 = RawImageBridge(out_channels=c1)
+        self.fuse_bridge_s8 = nn.Conv2d(c1 * 2, c1, 1, bias=True)
+        self.fuse_bridge_s32 = nn.Conv2d(c1 * 2, c1, 1, bias=True)
+
     @staticmethod
     def _normalize_intensity(x):
         low = x.amin(dim=(2, 3), keepdim=True)
@@ -303,27 +315,45 @@ class CVOCAConvTeacherV2(nn.Module):
             x = x.mean(dim=1, keepdim=True)
         gray = x.clamp(min=0.0)
 
-        f_s2 = self.stage_s2(self.entry(gray))
-        f_s4 = self.stage_s4(f_s2)
-        f_s8 = self.stage_s8(f_s4)
-        f_context = self.global_optical_context(f_s8)
-        f_from_s2 = self.s2_to_s8(f_s2)
-        f_from_s4 = self.s4_to_s8(f_s4)
+        # ---- Backbone ----
+        f_s2 = self.stage_s2(self.entry(gray))                         # [B, c1, 320]
+        f_s4 = self.stage_s4(f_s2)                                     # [B, c2, 160]
+        f_s8 = self.stage_s8(f_s4)                                     # [B, c3,  80]  (CVOCA)
+
+        # ---- First pass: get deep features for feedback ----
+        f_context = self.global_optical_context(f_s8)                  # [B, c3,  80]  (CVOCA)
+        f_from_s2 = self.s2_to_s8(f_s2)                               # [B, c3,  80]
+        f_from_s4 = self.s4_to_s8(f_s4)                               # [B, c3,  80]
+
+        # ---- Feedback guidance: modulate context with deep features ----
+        f_context = self.feedback_guidance(f_context, f_s8, f_context, f_from_s4)
+
+        # ---- Recompute fuse with guided context ----
         f_refined = self.fuse(torch.cat([f_context, f_from_s4, f_from_s2], dim=1))
 
+        # ---- Raw image bridge at s8 scale ----
+        bridge_s8 = self.raw_bridge_s8(gray, f_refined.shape[-2:])     # [B, c1,  80]
+        f_refined = self.fuse_bridge_s8(torch.cat([f_refined, bridge_s8], dim=1))
+
+        # ---- Projection ----
         raw_cipher = F.softplus(self.proj_out(f_refined))
         raw_cipher = raw_cipher * (0.75 + 0.50 * self.semantic_gain(f_refined))
         feat_1ch = self._normalize_intensity(raw_cipher)
         feat_1ch = torch.clamp(feat_1ch * F.softplus(self.out_scale) + self.out_bias, min=0.0)
+
+        # ---- Raw image bridge at output scale (s32 = 320) ----
+        bridge_s32 = self.raw_bridge_s32(gray, f_s2.shape[-2:])       # [B, c1, 320]
+        feat_s2_fused = self.fuse_bridge_s32(torch.cat([f_s2, bridge_s32], dim=1))
+
         det_feature = _interpolate_preserve_layout(feat_1ch, size=gray.shape[-2:], mode="bilinear", align_corners=False)
 
         if return_aux:
             return {
                 "det_feature": det_feature,
                 "gray": gray,
-                "feat_scale8": f_refined,
-                "feat_scale4": f_s4,
-                "feat_scale2": f_s2,
+                "feat_scale8": f_refined,                              # [B, c1,  80]
+                "feat_scale4": f_s4,                                   # [B, c2, 160]
+                "feat_scale2": feat_s2_fused,                          # [B, c1, 320]
                 "feat_raw_1ch": feat_1ch,
                 "optical_cipher_raw": raw_cipher,
             }

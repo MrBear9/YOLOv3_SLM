@@ -36,6 +36,86 @@ class SqueezeExcite(nn.Module):
         return x * self.fc(self.pool(x))
 
 
+class SwiGLUGate(nn.Module):
+    """SwiGLU-style channel gate: AdaptiveAvgPool → 1×1 Conv → Sigmoid.
+
+    Drop-in replacement for SqueezeExcite.  Unlike SE which compresses
+    channels (reduction=8), this keeps full channel resolution for
+    finer-grained per-channel attention.
+    """
+
+    def __init__(self, channels):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.gate = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        return x * self.gate(self.pool(x))
+
+
+class FeedbackGuidance(nn.Module):
+    """Deep-feature feedback gate for OCA output.
+
+    Compresses multi-scale features into a spatial attention map, then
+    multiplicatively modulates the OCA output.  ``alpha`` starts at 0 so
+    the gate is identity at init and gradually learns a non-trivial
+    modulation signal.
+
+    Args:
+        in_channels_list: channel count of each input feature map.
+        guide_channels: internal compression channels.
+    """
+
+    def __init__(self, in_channels_list, guide_channels=16):
+        super().__init__()
+        self.compress = nn.ModuleList(
+            nn.Conv2d(c, guide_channels, 1, bias=False) for c in in_channels_list
+        )
+        n_inputs = len(in_channels_list)
+        self.fuse = nn.Sequential(
+            nn.Conv2d(guide_channels * n_inputs, guide_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(guide_channels),
+            nn.SiLU(),
+            nn.Conv2d(guide_channels, 1, 1),
+            nn.Sigmoid(),
+        )
+        self.alpha = nn.Parameter(torch.zeros(1))
+
+    def forward(self, oca_out, *feats):
+        h, w = oca_out.shape[2:]
+        compressed = [
+            _interpolate_preserve_layout(c(f), (h, w), mode="bilinear", align_corners=False)
+            for c, f in zip(self.compress, feats)
+        ]
+        gate = self.fuse(torch.cat(compressed, dim=1))
+        return oca_out * (1.0 + self.alpha * gate)
+
+
+class RawImageBridge(nn.Module):
+    """Bridge raw image features to a target spatial scale.
+
+    Extracts edge/texture information from the original image via a
+    lightweight conv branch and outputs at ``target_size`` for fusion
+    with refine-stage features.
+    """
+
+    def __init__(self, out_channels=1):
+        super().__init__()
+        self.edge_conv = nn.Sequential(
+            nn.Conv2d(1, 4, 3, padding=1, bias=False),
+            nn.BatchNorm2d(4),
+            nn.SiLU(),
+            nn.Conv2d(4, out_channels, 1, bias=False),
+        )
+
+    def forward(self, raw_img, target_size):
+        x = _interpolate_preserve_layout(raw_img, target_size, mode="bilinear", align_corners=False)
+        return self.edge_conv(x)
+
+
 class TeacherResidualBlock(nn.Module):
     def __init__(self, channels, dilation=1):
         super().__init__()
@@ -44,14 +124,14 @@ class TeacherResidualBlock(nn.Module):
         self.bn1 = nn.BatchNorm2d(channels)
         self.conv2 = nn.Conv2d(channels, channels, 3, padding=padding, dilation=dilation, bias=False)
         self.bn2 = nn.BatchNorm2d(channels)
-        self.se = SqueezeExcite(channels)
+        self.gate = SwiGLUGate(channels)
         self.act = nn.SiLU()
 
     def forward(self, x):
         identity = x
         out = self.act(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
-        out = self.se(out)
+        out = self.gate(out)
         return self.act(out + identity)
 
 
@@ -73,11 +153,11 @@ class TeacherBottleneck(nn.Module):
         hidden = max(int(channels * expansion), 8)
         self.cv1 = TeacherConvBNAct(channels, hidden, 1)
         self.cv2 = TeacherConvBNAct(hidden, channels, 3)
-        self.se = SqueezeExcite(channels)
+        self.gate = SwiGLUGate(channels)
         self.shortcut = shortcut
 
     def forward(self, x):
-        y = self.se(self.cv2(self.cv1(x)))
+        y = self.gate(self.cv2(self.cv1(x)))
         return x + y if self.shortcut else y
 
 

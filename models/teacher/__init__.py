@@ -5,7 +5,10 @@ __version__ = "0.1.0"
 from .architectures import CVOCAConvTeacherV2, ConvTeacher, ConvTeacherV3
 from .building_blocks import (
     CVOCAStage,
+    FeedbackGuidance,
+    RawImageBridge,
     SqueezeExcite,
+    SwiGLUGate,
     SyntheticWavelengthComplexConv,
     TeacherBottleneck,
     TeacherC2f,
@@ -40,7 +43,10 @@ __all__ = [
     "ConvTeacher",
     "ConvTeacherV3",
     "CVOCAConvTeacherV2",
+    "FeedbackGuidance",
+    "RawImageBridge",
     "SqueezeExcite",
+    "SwiGLUGate",
     "TeacherResidualBlock",
     "TeacherConvBNAct",
     "TeacherBottleneck",
