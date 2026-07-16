@@ -110,6 +110,9 @@ def _collect_teacher_val_detections(config, model, val_loader, device):
     """Collect all validation detections and targets for confusion matrix."""
     from models.runtime import prepare_batch
 
+    # This helper runs on rank 0 only. Bypass DDP so no unmatched collectives
+    # are started while the other ranks wait at the end-of-epoch barrier.
+    model = unwrap_module(model)
     model.eval()
     all_dets = []
     all_targets = []

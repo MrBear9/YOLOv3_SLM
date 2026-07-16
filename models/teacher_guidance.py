@@ -180,9 +180,8 @@ def build_feature_distillation_loss(config):
         c = int(getattr(config, "TEACHER_V2_BASE_CHANNELS", 24))
         teacher_chs = (c, c * 2, c)
     else:
-        # ConvTeacher (legacy deep projection)
-        # feat_scale8: c1,  feat_scale4/2: c3 = c*4
-        c = int(getattr(config, "TEACHER_V2_BASE_CHANNELS", 24))
+        # ConvTeacher v1: refined s8 uses c1; lateral s4/s2 use c3=4*c1.
+        c = int(getattr(config, "TEACHER_V1_BASE_CHANNELS", 32))
         teacher_chs = (c, c * 4, c * 4)
 
     # Detector feature channels  {s8, s16, s32}
