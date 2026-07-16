@@ -316,11 +316,26 @@ class ConfigYOLOv8Anchor:
     # Data loading
     # =========================================================================
     USE_CLASS_BALANCED_SAMPLER = True
+    SAMPLER_SEED = 20260716
     CLASS_BALANCE_POWER = 0.6
     MAX_CLASS_BALANCE_GAIN = 3.0
     MAJORITY_ONLY_IMAGE_WEIGHT = 0.45
     EMPTY_IMAGE_SAMPLE_WEIGHT = 0.7
     MIN_IMAGE_SAMPLE_WEIGHT = 0.35
+
+    # Conservative box-aware augmentation for grayscale optical inputs.
+    TRAIN_AUGMENT = True
+    AUG_HFLIP_PROB = 0.5
+    AUG_ROTATE_DEG = 5.0
+    AUG_SCALE_MIN = 0.8
+    AUG_SCALE_MAX = 1.25
+    AUG_TRANSLATE = 0.08
+    AUG_BRIGHTNESS = 0.15
+    AUG_CONTRAST = 0.15
+    AUG_GAMMA = 0.15
+    AUG_BLUR_PROB = 0.08
+    AUG_NOISE_PROB = 0.10
+    AUG_NOISE_STD = 0.01
 
     # Windows 使用 spawn 创建多进程，开销远大于 Linux 的 fork，需要降低 worker 数量
     _IS_WINDOWS = os.name == "nt"

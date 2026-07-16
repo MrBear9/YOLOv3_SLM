@@ -7,6 +7,8 @@ train_teacher_helpers.py so each module stays focused and small.
 
 import os
 
+import torch
+
 from models.runtime import init_log_file, log_to_file
 from models.teacher import build_teacher
 from models.training_utils import add_tensorboard_scalar
@@ -59,6 +61,11 @@ def log_all_parameters():
     log_to_file(Config, f"LR teacher/detector: {Config.PHASE1_TEACHER_LR}/{Config.PHASE1_DETECTOR_LR} -> {Config.PHASE2_TEACHER_LR}/{Config.PHASE2_DETECTOR_LR}")
     log_to_file(Config, f"Detection conf/nms/max_det: {Config.CONF_THRESH}/{Config.NMS_THRESH}/{Config.MAX_DET}")
     log_to_file(Config, f"Metric conf/nms/max_det: {Config.METRIC_CONF_THRESH}/{Config.METRIC_NMS_THRESH}/{Config.METRIC_MAX_DET}")
+    log_to_file(
+        Config,
+        f"Training data: letterbox=True, augment={Config.TRAIN_AUGMENT}, hflip={Config.AUG_HFLIP_PROB}, "
+        f"rotate={Config.AUG_ROTATE_DEG}, scale={Config.AUG_SCALE_MIN}-{Config.AUG_SCALE_MAX}, translate={Config.AUG_TRANSLATE}",
+    )
     log_to_file(Config, f"Output: {Config.TEACHER_OUTPUT_DIR}")
     teacher = build_teacher(Config)
     detector = build_detector_head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
@@ -114,4 +121,29 @@ def write_teacher_tensorboard_scalars(writer, step, train_losses, val_losses=Non
         threshold_tag = f"conf_{op_conf:g}"
         for key in ("precision_op", "recall_op", "f1_op"):
             add_tensorboard_scalar(writer, f"MetricsOperating/{threshold_tag}/{key}", val_metrics.get(key), step)
+        for cls_id, values in val_metrics.get("per_class", {}).items():
+            cls_name = Config.CLASS_NAMES.get(cls_id, f"class_{cls_id}")
+            for key in ("ap50", "precision", "recall", "f1", "confidence"):
+                add_tensorboard_scalar(writer, f"MetricsPerClass/{cls_name}/{key}", values.get(key), step)
+            add_tensorboard_scalar(writer, f"MetricsPerClass/{cls_name}/gt_count", values.get("gt_count"), step)
+            for size_name, recall in values.get("size_recall", {}).items():
+                add_tensorboard_scalar(writer, f"MetricsPerClass/{cls_name}/size_{size_name}_recall", recall, step)
+                add_tensorboard_scalar(
+                    writer, f"MetricsPerClass/{cls_name}/size_{size_name}_gt_count",
+                    values.get("size_gt_count", {}).get(size_name), step,
+                )
+            pr_data = val_metrics.get("pr_data", {}).get(cls_id, {})
+            if pr_data.get("confidence"):
+                writer.add_pr_curve(
+                    f"PRCurve/{cls_name}",
+                    labels=torch.tensor(pr_data["label"], dtype=torch.int32),
+                    predictions=torch.tensor(pr_data["confidence"], dtype=torch.float32),
+                    global_step=step, num_thresholds=127,
+                )
+        for size_name, value in val_metrics.get("size_recall", {}).items():
+            add_tensorboard_scalar(writer, f"MetricsBySize/{size_name}/recall", value, step)
+            add_tensorboard_scalar(
+                writer, f"MetricsBySize/{size_name}/gt_count",
+                val_metrics.get("size_gt_count", {}).get(size_name), step,
+            )
     add_tensorboard_scalar(writer, "LR/current", lr, step)

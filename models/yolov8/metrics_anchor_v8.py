@@ -28,6 +28,23 @@ def compute_average_precision(detections, total_gt):
     return float(np.sum((mrec[indices + 1] - mrec[indices]) * mpre[indices + 1]))
 
 
+def compute_pr_summary(detections, total_gt):
+    if total_gt == 0 or len(detections) == 0:
+        return {"precision": 0.0, "recall": 0.0, "f1": 0.0, "confidence": 0.0}
+    detections = sorted(detections, key=lambda item: item[0], reverse=True)
+    confidence = np.asarray([item[0] for item in detections], dtype=np.float32)
+    tp = np.asarray([item[1] for item in detections], dtype=np.float32)
+    tp_cum, fp_cum = np.cumsum(tp), np.cumsum(1.0 - tp)
+    precision = tp_cum / np.maximum(tp_cum + fp_cum, 1e-6)
+    recall = tp_cum / max(total_gt, 1)
+    f1 = 2.0 * precision * recall / np.maximum(precision + recall, 1e-6)
+    best = int(np.argmax(f1))
+    return {
+        "precision": float(precision[best]), "recall": float(recall[best]),
+        "f1": float(f1[best]), "confidence": float(confidence[best]),
+    }
+
+
 def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
     model.eval()
     metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
@@ -35,6 +52,10 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
     component_totals = {key: 0.0 for key in ("total", "box", "obj", "noobj", "cls", "dfl")}
     total_tp = total_fp = total_fn = 0
     total_tp_op = total_fp_op = total_fn_op = 0
+    size_totals = {"small": 0, "medium": 0, "large": 0}
+    size_matches = {"small": 0, "medium": 0, "large": 0}
+    class_size_totals = {cls_id: {name: 0 for name in size_totals} for cls_id in range(config.NUM_CLASSES)}
+    class_size_matches = {cls_id: {name: 0 for name in size_totals} for cls_id in range(config.NUM_CLASSES)}
     op_conf_thresh = float(getattr(config, "CONF_THRESH", 0.35))
     is_main = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
 
@@ -52,7 +73,7 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
             batch_images, batch_targets = prepare_batch(config, batch, device)
             with amp_ctx:
                 teacher_features, predictions = model(batch_images, return_feature=True)
-            loss, loss_stats = criterion(predictions, batch_targets)
+                loss, loss_stats = criterion(predictions, batch_targets)
             for key in ("box", "obj", "noobj", "cls", "dfl"):
                 component_totals[key] += loss_stats.get(key, 0.0)
             component_totals["total"] += float(loss.detach().item())
@@ -149,6 +170,16 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
                     matched_op[cls_id] = matched_gt
                     total_fn_op += len(gt_boxes_list) - len(matched_gt)
 
+                for cls_id, gt_boxes_list in gt_by_class.items():
+                    matched = matched_coco.get(cls_id, set())
+                    for gt_idx, gt_box in enumerate(gt_boxes_list):
+                        area = gt_box[2] * gt_box[3]
+                        size_name = "small" if area < 32.0 ** 2 else ("medium" if area < 96.0 ** 2 else "large")
+                        size_totals[size_name] += 1
+                        size_matches[size_name] += int(gt_idx in matched)
+                        class_size_totals[cls_id][size_name] += 1
+                        class_size_matches[cls_id][size_name] += int(gt_idx in matched)
+
     num_batches = max(len(dataloader), 1)
     avg_losses = {key: value / num_batches for key, value in component_totals.items()}
     # COCO-style (conf_thresh=0.001) — used for mAP, precision_metric ≈ 0.004
@@ -160,11 +191,22 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
     recall_op = total_tp_op / (total_tp_op + total_fn_op + 1e-6)
     f1_op = 2.0 * precision_op * recall_op / (precision_op + recall_op + 1e-6)
     ap_values = []
+    per_class = {}
     for cls_id in range(config.NUM_CLASSES):
         ap = compute_average_precision(metric_storage[cls_id], gt_counts[cls_id])
         if ap is not None:
             ap_values.append(ap)
-    return avg_losses, {
+        per_class[cls_id] = {
+            "ap50": float(ap or 0.0),
+            **compute_pr_summary(metric_storage[cls_id], gt_counts[cls_id]),
+            "gt_count": int(gt_counts[cls_id]),
+            "size_recall": {
+                name: float(class_size_matches[cls_id][name] / max(class_size_totals[cls_id][name], 1))
+                for name in size_totals
+            },
+            "size_gt_count": class_size_totals[cls_id],
+        }
+    metrics = {
         "precision": float(precision_metric),
         "recall": float(recall_metric),
         "f1": float(f1_metric),
@@ -172,4 +214,19 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
         "precision_op": float(precision_op),
         "recall_op": float(recall_op),
         "f1_op": float(f1_op),
+        "per_class": per_class,
+        "size_recall": {
+            name: float(size_matches[name] / max(size_totals[name], 1)) for name in size_totals
+        },
+        "size_gt_count": size_totals,
+        "pr_data": {
+            cls_id: {
+                "confidence": [float(item[0]) for item in metric_storage[cls_id]]
+                + [0.0] * max(0, gt_counts[cls_id] - sum(int(item[1]) for item in metric_storage[cls_id])),
+                "label": [int(item[1]) for item in metric_storage[cls_id]]
+                + [1] * max(0, gt_counts[cls_id] - sum(int(item[1]) for item in metric_storage[cls_id])),
+            }
+            for cls_id in range(config.NUM_CLASSES)
+        },
     }
+    return avg_losses, metrics

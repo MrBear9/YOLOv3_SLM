@@ -194,7 +194,13 @@ def train():
 
     train_dataset = YOLODataset(Config, split="train")
     train_sampler = None
-    if use_ddp:
+    if use_ddp and Config.USE_CLASS_BALANCED_SAMPLER:
+        train_sampler, sampler_summary = build_class_balanced_train_sampler(
+            Config, train_dataset,
+            num_replicas=torch.distributed.get_world_size(), rank=torch.distributed.get_rank(),
+        )
+        log_to_file(Config, f"DDP class balanced sampler: {sampler_summary}")
+    elif use_ddp:
         from torch.utils.data.distributed import DistributedSampler
         train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=True)
         log_to_file(Config, f"Using DistributedSampler for DDP training")
@@ -249,7 +255,7 @@ def train():
 
     for epoch in range(Config.EPOCHS):
         last_epoch = epoch
-        if use_ddp and train_sampler is not None:
+        if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
             train_sampler.set_epoch(epoch)
         model.train()
         train_component_sums = {

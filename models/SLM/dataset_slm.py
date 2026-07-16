@@ -4,8 +4,10 @@ from pathlib import Path
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
-from torchvision import transforms
+from torchvision.transforms import functional as TF
 import yaml
+
+from models.dataset import letterbox_image_targets
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -57,7 +59,6 @@ class SLMFeatureDataset(Dataset):
                 }
                 for _ in range(repeat)
             ]
-            self.transform = transforms.Compose([transforms.Resize((config.IMG_SIZE, config.IMG_SIZE)), transforms.Grayscale(1), transforms.ToTensor()])
             return
         root = cfg.get("path", ".")
         if not os.path.isabs(root):
@@ -81,7 +82,6 @@ class SLMFeatureDataset(Dataset):
         if split == "train":
             repeat = max(int(getattr(config, "TRAIN_DATASET_REPEAT", 1)), 1)
             self.entries *= repeat
-        self.transform = transforms.Compose([transforms.Resize((config.IMG_SIZE, config.IMG_SIZE)), transforms.Grayscale(1), transforms.ToTensor()])
 
     def __len__(self):
         return len(self.entries)
@@ -89,8 +89,6 @@ class SLMFeatureDataset(Dataset):
     def __getitem__(self, idx):
         entry = self.entries[idx]
         img = Image.open(entry["image_path"]).convert("RGB")
-        gray_tensor = self.transform(img)
-        rgb_tensor = gray_tensor
         targets = []
         label_path = entry["label_path"]
         if os.path.exists(label_path):
@@ -100,6 +98,9 @@ class SLMFeatureDataset(Dataset):
                     if len(parts) >= 5:
                         targets.append([int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])])
         targets = torch.tensor(targets, dtype=torch.float32) if targets else torch.zeros((0, 5), dtype=torch.float32)
+        img, targets = letterbox_image_targets(img, targets, self.config.IMG_SIZE)
+        gray_tensor = TF.to_tensor(TF.to_grayscale(img, num_output_channels=1))
+        rgb_tensor = gray_tensor
         return {
             "gray_tensor": gray_tensor,
             "rgb_tensor": rgb_tensor,
