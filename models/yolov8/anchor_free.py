@@ -68,11 +68,14 @@ def aligned_ciou(boxes1, boxes2, eps=1e-7):
 
 
 class TaskAlignedAssigner:
-    def __init__(self, topk=10, alpha=0.5, beta=6.0):
+    def __init__(self, topk=10, alpha=0.5, beta=6.0, small_area=32 ** 2, small_min_candidates=3, fallback_score=0.05):
         self.topk, self.alpha, self.beta = int(topk), float(alpha), float(beta)
+        self.small_area = float(small_area)
+        self.small_min_candidates = int(small_min_candidates)
+        self.fallback_score = float(fallback_score)
 
     @torch.no_grad()
-    def __call__(self, scores, boxes, points, gt_boxes, gt_classes):
+    def __call__(self, scores, boxes, points, strides, gt_boxes, gt_classes):
         num_points, num_classes = scores.shape
         target_scores = scores.new_zeros((num_points, num_classes))
         target_boxes = boxes.new_zeros((num_points, 4))
@@ -86,9 +89,31 @@ class TaskAlignedAssigner:
         ious = pairwise_iou(boxes, gt_boxes).clamp(min=0)
         metric = scores[:, gt_classes].pow(self.alpha) * ious.pow(self.beta) * inside
         candidate = torch.zeros_like(inside)
+        fallback = torch.zeros_like(inside)
         k = min(self.topk, num_points)
         top_values, top_indices = metric.topk(k, dim=0)
         candidate.scatter_(0, top_indices, top_values > 0)
+
+        # A tiny box may contain no stride-8 center at all. Give such GTs a
+        # few nearest P3 points so TAL can learn them without adding a P2 head.
+        gt_wh = (gt_boxes[:, 2:] - gt_boxes[:, :2]).clamp(min=0)
+        small_gt = gt_wh.prod(-1) < self.small_area
+        p3_mask = strides.squeeze(-1) == strides.min()
+        p3_indices = p3_mask.nonzero(as_tuple=False).squeeze(1)
+        if self.small_min_candidates > 0 and p3_indices.numel() > 0:
+            gt_centers = (gt_boxes[:, :2] + gt_boxes[:, 2:]) / 2
+            for gt_idx in small_gt.nonzero(as_tuple=False).squeeze(1).tolist():
+                current = int(candidate[:, gt_idx].sum().item())
+                needed = min(self.small_min_candidates - current, p3_indices.numel())
+                if needed <= 0:
+                    continue
+                distance = (points[p3_indices] - gt_centers[gt_idx]).square().sum(-1)
+                distance = distance.masked_fill(candidate[p3_indices, gt_idx], float("inf"))
+                available = int(torch.isfinite(distance).sum().item())
+                nearest = p3_indices[distance.topk(min(needed, available), largest=False).indices]
+                candidate[nearest, gt_idx] = True
+                fallback[nearest, gt_idx] = True
+
         matched_iou = ious.masked_fill(~candidate, -1.0)
         best_iou, matched_gt = matched_iou.max(dim=1)
         foreground = best_iou >= 0
@@ -96,6 +121,10 @@ class TaskAlignedAssigner:
             fg_gt = matched_gt[foreground]
             target_boxes[foreground] = gt_boxes[fg_gt]
             soft_labels = best_iou[foreground].clamp(min=0).to(dtype=target_scores.dtype)
+            fallback_match = fallback[foreground, fg_gt]
+            soft_labels = torch.where(
+                fallback_match, soft_labels.clamp(min=self.fallback_score), soft_labels
+            )
             target_scores[foreground, gt_classes[fg_gt]] = soft_labels
         return target_scores, target_boxes, foreground
 
@@ -106,7 +135,9 @@ class AnchorFreeTALLoss(nn.Module):
         self.config = config
         self.reg_max = int(getattr(config, "ANCHOR_FREE_REG_MAX", 16))
         self.assigner = TaskAlignedAssigner(
-            getattr(config, "TAL_TOPK", 10), getattr(config, "TAL_ALPHA", 0.5), getattr(config, "TAL_BETA", 6.0)
+            getattr(config, "TAL_TOPK", 10), getattr(config, "TAL_ALPHA", 0.5), getattr(config, "TAL_BETA", 6.0),
+            getattr(config, "SMALL_OBJ_AREA", 32 ** 2), getattr(config, "TAL_SMALL_MIN_CANDIDATES", 3),
+            getattr(config, "TAL_SMALL_FALLBACK_SCORE", 0.05),
         )
         self.last_components = {"total": 0.0, "box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0, "dfl": 0.0}
 
@@ -145,16 +176,21 @@ class AnchorFreeTALLoss(nn.Module):
         for b in range(cls_logits.shape[0]):
             gt_boxes, gt_classes = self.targets_to_xyxy(targets[b], self.config.IMG_SIZE, cls_logits.device, cls_logits.dtype)
             target_scores[b], target_boxes[b], foreground[b] = self.assigner(
-                cls_logits[b].sigmoid(), decoded[b].detach(), points, gt_boxes, gt_classes
+                cls_logits[b].sigmoid(), decoded[b].detach(), points, strides, gt_boxes, gt_classes
             )
         score_sum = target_scores.sum().clamp(min=1.0)
         cls_loss = F.binary_cross_entropy_with_logits(cls_logits, target_scores, reduction="sum") / score_sum
         if foreground.any():
             weights = target_scores.sum(-1)[foreground].clamp(min=1e-3)
+            boxes = target_boxes[foreground]
+            target_area = ((boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])).clamp(min=0)
+            small_mask = target_area < float(getattr(self.config, "SMALL_OBJ_AREA", 32 ** 2))
+            size_weights = torch.ones_like(weights)
+            size_weights[small_mask] = float(getattr(self.config, "ANCHOR_FREE_SMALL_REG_WEIGHT", 1.25))
+            weights = weights * size_weights
             box_loss = ((1.0 - aligned_ciou(decoded[foreground], target_boxes[foreground])) * weights).sum() / weights.sum()
             batch_points = points.unsqueeze(0).expand(cls_logits.shape[0], -1, -1)[foreground]
             batch_strides = strides.unsqueeze(0).expand(cls_logits.shape[0], -1, -1)[foreground]
-            boxes = target_boxes[foreground]
             distances = torch.cat((batch_points - boxes[:, :2], boxes[:, 2:] - batch_points), dim=-1) / batch_strides
             dfl_loss = (self.dfl_loss(reg_logits[foreground], distances) * weights).sum() / weights.sum()
         else:
@@ -165,7 +201,16 @@ class AnchorFreeTALLoss(nn.Module):
             + cls_loss * float(getattr(self.config, "ANCHOR_FREE_CLS_WEIGHT", 0.5))
             + dfl_loss * float(getattr(self.config, "ANCHOR_FREE_DFL_WEIGHT", 1.5))
         )
-        stats = {"total": float(total.detach()), "box": float(box_loss.detach()), "obj": 0.0, "noobj": 0.0, "cls": float(cls_loss.detach()), "dfl": float(dfl_loss.detach())}
+        positive_area = ((target_boxes[..., 2] - target_boxes[..., 0]) * (target_boxes[..., 3] - target_boxes[..., 1])).clamp(min=0)
+        stats = {
+            "total": float(total.detach()), "box": float(box_loss.detach()), "obj": 0.0, "noobj": 0.0,
+            "cls": float(cls_loss.detach()), "dfl": float(dfl_loss.detach()),
+            "positive_total": float(foreground.sum().detach()),
+            "positive_small": float((foreground & (positive_area < float(getattr(self.config, "SMALL_OBJ_AREA", 32 ** 2)))).sum().detach()),
+        }
+        positive_classes = target_scores.argmax(-1)
+        for cls_id in range(int(getattr(self.config, "NUM_CLASSES", 0))):
+            stats[f"positive_class_{cls_id}"] = float((foreground & (positive_classes == cls_id)).sum().detach())
         self.last_components = stats
         return total, stats
 

@@ -16,7 +16,6 @@
 YOLOv3_SLM/
 ├── data/
 │   ├── military/                  # 军事目标数据集
-│   └── fashion_mnist/             # Fashion-MNIST数据集
 ├── optical_slm_yolov8_head.py     # 光学SLM YOLOv8检测头
 ├── optical_teacher_yolov8_head.py # 光学教师YOLOv8检测头
 ├── test_Phase_weight.py           # 相位层提取工具
@@ -70,10 +69,6 @@ python test_Phase_weight.py
 ### 军事目标数据集
 - 类别：坦克、装甲车、军用卡车、军用直升机
 - 配置：`data/military/data.yaml`
-
-### Fashion-MNIST数据集
-- 类别：10类服装物品
-- 配置：`data/fashion_mnist/data.yaml`
 
 ## 核心模块
 

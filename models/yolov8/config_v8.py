@@ -139,6 +139,9 @@ class ConfigYOLOv8Anchor:
     TAL_TOPK = 10
     TAL_ALPHA = 0.5
     TAL_BETA = 6.0
+    TAL_SMALL_MIN_CANDIDATES = 3
+    TAL_SMALL_FALLBACK_SCORE = 0.05
+    ANCHOR_FREE_SMALL_REG_WEIGHT = 1.25
     DETECTOR_INVERT_FEATURE = True   # invert teacher feature (dark→bright) before detector
 
     # -------- DETECTOR_HEAD_TYPE = "compact" | "center_detect" --------
@@ -243,7 +246,7 @@ class ConfigYOLOv8Anchor:
     # Feature distillation (teacher → detector)
     # =========================================================================
     ENABLE_FEATURE_DISTILL = True
-    FEATURE_DISTILL_WEIGHT = 0.18
+    FEATURE_DISTILL_WEIGHT = 0.5
 
     # =========================================================================
     # Teacher ciphertext regularization (weakened)
@@ -327,8 +330,8 @@ class ConfigYOLOv8Anchor:
     TRAIN_AUGMENT = True
     AUG_HFLIP_PROB = 0.5
     AUG_ROTATE_DEG = 5.0
-    AUG_SCALE_MIN = 0.8
-    AUG_SCALE_MAX = 1.25
+    AUG_SCALE_MIN = 0.90
+    AUG_SCALE_MAX = 1.30
     AUG_TRANSLATE = 0.08
     AUG_BRIGHTNESS = 0.15
     AUG_CONTRAST = 0.15

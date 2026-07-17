@@ -27,7 +27,13 @@ class DistributedEvalSampler(Sampler):
 
 
 def init_distributed_mode(config):
-    """Initialize DDP only when launched by torchrun. Returns (local_rank, use_ddp)."""
+    """Initialize DDP only for multi-rank torchrun launches.
+
+    A bare ``torchrun script.py`` creates one rank by default.  Restrict that
+    process to its local GPU so it cannot silently fall back to DataParallel.
+    This is important for modules with complex-valued FFT buffers, which are
+    not safe to replicate through DataParallel.
+    """
     gpu_ids = getattr(config, "GPU_IDS", [])
     if len(gpu_ids) <= 1 or not torch.cuda.is_available():
         return 0, False
@@ -35,9 +41,17 @@ def init_distributed_mode(config):
     if not all(name in os.environ for name in required_env):
         return 0, False
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    if world_size <= 1:
-        return 0, False
     local_rank = int(os.environ["LOCAL_RANK"])
+    if world_size <= 1:
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            config.GPU_IDS = [local_rank]
+            config.DEVICE = f"cuda:{local_rank}"
+            print(
+                "torchrun started one rank; using one GPU. "
+                "Use --nproc_per_node=<GPU count> to enable DDP."
+            )
+        return local_rank, False
     torch.cuda.set_device(local_rank)
     # 增加 NCCL 超时到 30 分钟，避免长 epoch 后误超时
     timeout_ms = int(os.environ.get("NCCL_TIMEOUT_MS", 30 * 60 * 1000))

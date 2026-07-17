@@ -9,7 +9,7 @@ from models.yolov8.config_v8 import load_anchor_groups, load_class_names, resolv
 
 class ConfigSLM:
     # =========================================================================
-    # Common 鈥?paths, device, I/O
+    # Common paths, device, I/O
     # =========================================================================
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
@@ -155,7 +155,7 @@ class ConfigSLM:
     YOLOV8_C2F_BLOCKS = 3
 
     # -------- DETECTOR_HEAD_TYPE = "light" --------
-    YOLO_LIGHT_BASE_CH = 8  # 鏂规A: halved from 16
+    YOLO_LIGHT_BASE_CH = 8  # A: halved from 16
     ANCHOR_FREE_HEAD_CH = 24
     ANCHOR_FREE_REG_MAX = 16
     ANCHOR_FREE_BOX_WEIGHT = 7.5
@@ -229,7 +229,7 @@ class ConfigSLM:
     HARD_NEG_MIN = 512
 
     # =========================================================================
-    # SLM feature loss (student 鈫?teacher matching)
+    # SLM feature loss (student teacher feature matching)
     # =========================================================================
     LOSS_FULL_WEIGHT = 0.03
     LOSS_LOW1_WEIGHT = 0.25
@@ -308,7 +308,7 @@ class ConfigSLM:
     ETA_MIN = 1e-6
 
     ENABLE_DETECTOR_FOCUS_EARLY_STOP = True
-    DETECTOR_FOCUS_EARLY_STOP_PATIENCE = 8
+    DETECTOR_FOCUS_EARLY_STOP_PATIENCE = 18
     DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA = 0.002
 
     # =========================================================================
@@ -347,7 +347,6 @@ class ConfigSLM:
     # =========================================================================
     # Data loading
     # =========================================================================
-    # Windows 浣跨敤 spawn 鍒涘缓澶氳繘绋嬶紝寮€閿€杩滃ぇ浜?Linux 鐨?fork锛岄渶瑕侀檷浣?worker 鏁伴噺
     _IS_WINDOWS = os.name == "nt"
     NUM_WORKERS = (4 if _IS_WINDOWS else min(12, os.cpu_count() or 0))
     PIN_MEMORY = torch.cuda.is_available()

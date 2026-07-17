@@ -265,6 +265,8 @@ def train():
             "noobj": 0.0,
             "cls": 0.0,
             "dfl": 0.0,
+            "positive_total": 0.0,
+            "positive_small": 0.0,
             "slm_cipher": 0.0,
             "slm_tv": 0.0,
             "slm_hf": 0.0,
@@ -327,8 +329,11 @@ def train():
             amp_scaler.step(optimizer)
             amp_scaler.update()
             train_component_sums["total"] += float(loss.detach().item())
-            for key in ("box", "obj", "noobj", "cls", "dfl"):
+            for key in ("box", "obj", "noobj", "cls", "dfl", "positive_total", "positive_small"):
                 train_component_sums[key] += loss_stats.get(key, 0.0)
+            for cls_id in range(Config.NUM_CLASSES):
+                key = f"positive_class_{cls_id}"
+                train_component_sums[key] = train_component_sums.get(key, 0.0) + loss_stats.get(key, 0.0)
 
         avg_train = {key: value / max(len(train_loader), 1) for key, value in train_component_sums.items()}
         history["train_total"].append(avg_train["total"])

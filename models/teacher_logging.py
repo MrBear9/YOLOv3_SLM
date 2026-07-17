@@ -48,6 +48,11 @@ def log_all_parameters():
             f"Anchor-free TAL/DFL: head_ch={Config.ANCHOR_FREE_HEAD_CH}, reg_max={Config.ANCHOR_FREE_REG_MAX}, "
             f"topk={Config.TAL_TOPK}, alpha={Config.TAL_ALPHA}, beta={Config.TAL_BETA}",
         )
+        log_to_file(
+            Config,
+            f"Small-object TAL: min_candidates={Config.TAL_SMALL_MIN_CANDIDATES}, "
+            f"fallback_score={Config.TAL_SMALL_FALLBACK_SCORE}, reg_weight={Config.ANCHOR_FREE_SMALL_REG_WEIGHT}",
+        )
     log_to_file(Config, f"Focal alpha/gamma: {Config.FOCAL_ALPHA}/{Config.FOCAL_GAMMA}")
     if Config.DETECTION_PROTOCOL == "anchor":
         log_to_file(
@@ -110,7 +115,14 @@ def write_teacher_tensorboard_scalars(writer, step, train_losses, val_losses=Non
     if writer is None:
         return
     for key, value in train_losses.items():
-        add_tensorboard_scalar(writer, f"Loss/train_{key}", value, step)
+        if key.startswith("positive_"):
+            assignment_name = key.removeprefix("positive_")
+            if assignment_name.startswith("class_"):
+                cls_id = int(assignment_name.removeprefix("class_"))
+                assignment_name = f"class/{Config.CLASS_NAMES.get(cls_id, f'class_{cls_id}')}"
+            add_tensorboard_scalar(writer, f"Assignment/train_positive/{assignment_name}", value, step)
+        else:
+            add_tensorboard_scalar(writer, f"Loss/train_{key}", value, step)
     if val_losses is not None:
         for key, value in val_losses.items():
             add_tensorboard_scalar(writer, f"Loss/val_{key}", value, step)
