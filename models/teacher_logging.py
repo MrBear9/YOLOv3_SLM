@@ -50,10 +50,11 @@ def log_all_parameters():
         )
         log_to_file(
             Config,
-            f"Small-object TAL: min_candidates={Config.TAL_SMALL_MIN_CANDIDATES}, "
-            f"fallback_score={Config.TAL_SMALL_FALLBACK_SCORE}, reg_weight={Config.ANCHOR_FREE_SMALL_REG_WEIGHT}",
+            f"Anchor-free classification: loss={Config.ANCHOR_FREE_CLS_LOSS}, "
+            f"varifocal_alpha={Config.VARIFOCAL_ALPHA}, varifocal_gamma={Config.VARIFOCAL_GAMMA}",
         )
-    log_to_file(Config, f"Focal alpha/gamma: {Config.FOCAL_ALPHA}/{Config.FOCAL_GAMMA}")
+    if Config.DETECTION_PROTOCOL == "anchor":
+        log_to_file(Config, f"Focal alpha/gamma: {Config.FOCAL_ALPHA}/{Config.FOCAL_GAMMA}")
     if Config.DETECTION_PROTOCOL == "anchor":
         log_to_file(
             Config,

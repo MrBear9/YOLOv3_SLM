@@ -165,6 +165,9 @@ class ConfigSLM:
     TAL_TOPK = 10
     TAL_ALPHA = 0.5
     TAL_BETA = 6.0
+    ANCHOR_FREE_CLS_LOSS = "varifocal"
+    VARIFOCAL_ALPHA = 0.75
+    VARIFOCAL_GAMMA = 2.0
 
     # =========================================================================
     # Anchors
@@ -379,6 +382,9 @@ class ConfigSLM:
             "OPTICAL_SLM_DETECTION_PROTOCOL": ("DETECTION_PROTOCOL", str),
             "OPTICAL_SLM_ANCHOR_FREE_HEAD_CH": ("ANCHOR_FREE_HEAD_CH", int),
             "OPTICAL_SLM_ANCHOR_FREE_REG_MAX": ("ANCHOR_FREE_REG_MAX", int),
+            "OPTICAL_SLM_ANCHOR_FREE_CLS_LOSS": ("ANCHOR_FREE_CLS_LOSS", str),
+            "OPTICAL_SLM_VARIFOCAL_ALPHA": ("VARIFOCAL_ALPHA", float),
+            "OPTICAL_SLM_VARIFOCAL_GAMMA": ("VARIFOCAL_GAMMA", float),
             "OPTICAL_SLM_INIT_MODE": ("SLM_INIT_MODE", str),
             "OPTICAL_SLM_INIT_CHECKPOINT": ("SLM_INIT_CHECKPOINT", str),
             "OPTICAL_SLM_VORTEX_PERIODS": ("SLM_VORTEX_PERIODS", float),
