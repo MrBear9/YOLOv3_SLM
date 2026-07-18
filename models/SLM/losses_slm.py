@@ -124,9 +124,27 @@ class CompositeOpticalFeatureLoss(nn.Module):
         t_std = teacher_feature.std(dim=(2, 3), keepdim=True, unbiased=False)
         return (student_feature - s_mean) / (s_std + eps), (teacher_feature - t_mean) / (t_std + eps)
 
+    @staticmethod
+    def _iter_slm_layers(student):
+        """Yield (index, slm_layer) for all SLM layers across all heads.
+
+        Handles both single-head (``OpticalStudent``) and multi-head
+        (``MultiHeadOpticalStudent``) students transparently.
+        """
+        if hasattr(student, "all_slm_pairs"):
+            idx = 0
+            for slm1, slm2 in student.all_slm_pairs():
+                yield idx, slm1
+                idx += 1
+                yield idx, slm2
+                idx += 1
+        else:
+            yield 0, student.slm1
+            yield 1, student.slm2
+
     def phase_smoothness_loss(self, student, cached_wrapped_phases=None):
         terms = []
-        for idx, slm_layer in enumerate((student.slm1, student.slm2)):
+        for idx, slm_layer in self._iter_slm_layers(student):
             if cached_wrapped_phases is not None and idx in cached_wrapped_phases:
                 wrapped = cached_wrapped_phases[idx]
             else:
@@ -145,7 +163,7 @@ class CompositeOpticalFeatureLoss(nn.Module):
         spans = []
         circular_stds = []
         near_ratios = []
-        for idx, slm_layer in enumerate((student.slm1, student.slm2)):
+        for idx, slm_layer in self._iter_slm_layers(student):
             if cached_wrapped_phases is not None and idx in cached_wrapped_phases:
                 wrapped = cached_wrapped_phases[idx]
             else:
@@ -193,10 +211,11 @@ class CompositeOpticalFeatureLoss(nn.Module):
         loss_grad = self.gradient_loss(aligned_student, aligned_teacher)
         loss_freq = self.frequency_loss(aligned_student, aligned_teacher)
         loss_pearson = self.pearson_loss(filtered_student, filtered_teacher)
-        # Pre-compute wrapped_phase once and share between smoothness and diversity losses
+        # Pre-compute wrapped_phase once and share between smoothness and diversity losses.
+        # Uses _iter_slm_layers so that all heads are regularised in multi-head mode.
         cached_wrapped = {
-            0: student.slm1.wrapped_phase(),
-            1: student.slm2.wrapped_phase(),
+            idx: slm.wrapped_phase()
+            for idx, slm in self._iter_slm_layers(student)
         }
         loss_smooth = self.phase_smoothness_loss(student, cached_wrapped_phases=cached_wrapped)
         loss_div, std, span, circular_std, near_boundary = self.phase_diversity_loss(student, cached_wrapped_phases=cached_wrapped)

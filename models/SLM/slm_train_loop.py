@@ -129,8 +129,16 @@ def _set_trainable_both(student, detector, student_trainable, detector_trainable
     from models.SLM.utils_slm import set_trainable
     set_trainable(student, student_trainable)
     if student_trainable:
-        set_trainable(student.module.slm1 if hasattr(student, "module") else student.slm1, Config.TRAIN_SLM1)
-        set_trainable(student.module.slm2 if hasattr(student, "module") else student.slm2, Config.TRAIN_SLM2)
+        raw_student = student.module if hasattr(student, "module") else student
+        # Multi-head: toggle every head individually
+        if hasattr(raw_student, "slm1_heads"):
+            for slm1_head in raw_student.slm1_heads:
+                set_trainable(slm1_head, Config.TRAIN_SLM1)
+            for slm2_head in raw_student.slm2_heads:
+                set_trainable(slm2_head, Config.TRAIN_SLM2)
+        else:
+            set_trainable(raw_student.slm1, Config.TRAIN_SLM1)
+            set_trainable(raw_student.slm2, Config.TRAIN_SLM2)
     set_trainable(detector, detector_trainable)
 
 

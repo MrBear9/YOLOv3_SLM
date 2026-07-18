@@ -51,7 +51,14 @@ def setup_training(is_main, use_ddp):
     reference_detector.eval()
 
     # Student + trainable detector
-    student = OpticalStudent(Config).to(device)
+    multi_head_enabled = bool(getattr(Config, "SLM_MULTI_HEAD_ENABLED", False))
+    if multi_head_enabled:
+        from models.SLM.multi_head_slm import MultiHeadOpticalStudent
+        student = MultiHeadOpticalStudent(Config).to(device)
+        num_heads = int(getattr(Config, "SLM_MULTI_HEAD_NUM_HEADS", 4))
+        log_to_file(Config, f"Multi-head SLM enabled: K={num_heads} virtual pairs → {sum(p.numel() for p in student.parameters()):,} params")
+    else:
+        student = OpticalStudent(Config).to(device)
     init_mode = str(Config.SLM_INIT_MODE).strip().lower()
     if init_mode in {"checkpoint", "vortex_checkpoint", "double_helix_checkpoint", "dh_psf_checkpoint"}:
         student_info = load_student_checkpoint(student, Config.SLM_INIT_CHECKPOINT, device)

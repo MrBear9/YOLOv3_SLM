@@ -21,7 +21,7 @@ class ConfigSLM:
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light_free_blance_0.8309/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -33,10 +33,10 @@ class ConfigSLM:
     BATCH_SIZE = 16
     STRIDES = [8, 16, 32]
 
-    PHASE_FOCUS_EPOCHS = 145
-    DETECTOR_FOCUS_EPOCHS = 35
-    JOINT_FIT_EPOCHS = 100
-    NORM_JOINT_EPOCHS = 30
+    PHASE_FOCUS_EPOCHS = 345
+    DETECTOR_FOCUS_EPOCHS = 135
+    JOINT_FIT_EPOCHS = 0
+    NORM_JOINT_EPOCHS = 0
     EPOCHS = PHASE_FOCUS_EPOCHS + DETECTOR_FOCUS_EPOCHS + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
 
     # =========================================================================
@@ -74,6 +74,17 @@ class ConfigSLM:
     SLM2_PHASE_BLOCK_OVERLAP = 8
     SLM2_PHASE_BLOCK_INNER_SCALES = 2
     SLM2_PHASE_MLP_NUM_FREQS = 6
+    # -------- Plan D: multi-head virtual SLM (training-time capacity boost) --------
+    # When enabled, K parallel virtual SLM pairs are trained simultaneously and
+    # their outputs fused.  This increases modulation capacity without changing
+    # the deployment hardware (distill back to a single pair post-training).
+    SLM_MULTI_HEAD_ENABLED = True
+    SLM_MULTI_HEAD_NUM_HEADS = 4        # K: number of virtual SLM pairs
+    # Fusion strategy for combining head outputs:
+    #   "mean"         — equal-weight average (default, stable baseline)
+    #   "learned_gate" — input-dependent soft selection via a tiny conv gate
+    SLM_MULTI_HEAD_FUSION = "mean"
+
     # Layer-wise ablation controls. Keep both enabled for normal two-SLM training.
     TRAIN_SLM1 = True
     TRAIN_SLM2 = True
@@ -100,10 +111,10 @@ class ConfigSLM:
     SLM_INIT_MODE = "vortex"
     SLM_INIT_NOISE_STD = 0.02
     SLM_INIT_CHECKPOINT = r"output/OpticalSLM_YOLOv8Head_student/optical_student_best.pth"
-    SLM_VORTEX_CHARGE_1 = 1.0
-    SLM_VORTEX_CHARGE_2 = -1.0
+    SLM_VORTEX_CHARGE_1 = 3.0
+    SLM_VORTEX_CHARGE_2 = 3.0
     SLM_VORTEX_RADIAL_SCALE_1 = 0.35
-    SLM_VORTEX_RADIAL_SCALE_2 = -0.25
+    SLM_VORTEX_RADIAL_SCALE_2 = 0.25
     # Number of tiled vortex phase cells: 1.0 -> single cell, 2.0 -> 2 x 2 array, 3.0 -> 3 x 3 array.
     SLM_VORTEX_PERIODS = 1.0
     # When True and periods > 1, alternate charge sign in a checkerboard across cells.
@@ -275,12 +286,12 @@ class ConfigSLM:
     # Stage loss weights
     # =========================================================================
     FEATURE_LOSS_WEIGHT_PHASE_FOCUS = 1.1
-    DETECTION_LOSS_WEIGHT_PHASE_FOCUS = 0.0
+    DETECTION_LOSS_WEIGHT_PHASE_FOCUS = 1.0
     RESPONSE_LOSS_WEIGHT_PHASE_FOCUS = 0.0
     PRIVACY_LOSS_WEIGHT_PHASE_FOCUS = 0.0
 
-    FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
-    DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS = 1.0
+    FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS = 1.0
+    DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS = 1.1
     RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
     PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
 
@@ -334,7 +345,7 @@ class ConfigSLM:
     # =========================================================================
     # Visualization
     # =========================================================================
-    VIS_INTERVAL = 5
+    VIS_INTERVAL = 10
     VIS_BATCH_SIZE = 4
     VIS_DPI = 130
     # Options: "val", "train".
@@ -351,10 +362,10 @@ class ConfigSLM:
     # Data loading
     # =========================================================================
     _IS_WINDOWS = os.name == "nt"
-    NUM_WORKERS = (4 if _IS_WINDOWS else min(12, os.cpu_count() or 0))
+    NUM_WORKERS = (0 if _IS_WINDOWS else min(12, os.cpu_count() or 0))
     PIN_MEMORY = torch.cuda.is_available()
     PERSISTENT_WORKERS = (not _IS_WINDOWS)
-    PREFETCH_FACTOR = (2 if _IS_WINDOWS else 4)
+    PREFETCH_FACTOR = (0 if _IS_WINDOWS else 4)
     ENABLE_CHANNELS_LAST = True
     ENABLE_TF32 = True
     ENABLE_CUDNN_BENCHMARK = True
@@ -484,6 +495,8 @@ class ConfigSLM:
             "OPTICAL_SLM_NORM_JOINT_EPOCHS": ("NORM_JOINT_EPOCHS", int),
             "OPTICAL_SLM_NUM_WORKERS": ("NUM_WORKERS", int),
             "OPTICAL_SLM_PHASE_PARAM_MODE": ("SLM_PHASE_PARAM_MODE", str),
+            "OPTICAL_SLM_MULTI_HEAD_NUM_HEADS": ("SLM_MULTI_HEAD_NUM_HEADS", int),
+            "OPTICAL_SLM_MULTI_HEAD_FUSION": ("SLM_MULTI_HEAD_FUSION", str),
         }
         for env_name, (attr, caster) in overrides.items():
             value = os.environ.get(env_name)
@@ -500,6 +513,7 @@ class ConfigSLM:
             "OPTICAL_SLM_VORTEX_ALTERNATE_CHARGE": "SLM_VORTEX_ALTERNATE_CHARGE",
             "OPTICAL_SLM_TRAIN_SLM1": "TRAIN_SLM1",
             "OPTICAL_SLM_TRAIN_SLM2": "TRAIN_SLM2",
+            "OPTICAL_SLM_MULTI_HEAD_ENABLED": "SLM_MULTI_HEAD_ENABLED",
         }
         for env_name, attr in bool_overrides.items():
             value = os.environ.get(env_name)

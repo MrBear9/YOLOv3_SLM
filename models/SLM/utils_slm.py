@@ -109,16 +109,41 @@ def split_student_param_groups(student):
     return slm_params, other_params
 
 
+def _param_layer_name(name):
+    """Return ``"slm1"``, ``"slm2"``, or ``None`` from a parameter name.
+
+    Handles both single-head (``slm1.phase_field…``) and multi-head
+    (``slm1_heads.0.phase_field…``) naming patterns.
+    """
+    # Best-effort: find which SLM layer a parameter belongs to by looking for
+    # "slm1" / "slm2" appearing as a dot-delimited component.
+    parts = name.split(".")
+    for part in parts:
+        if part == "slm1" or part.startswith("slm1_"):
+            return "slm1"
+        if part == "slm2" or part.startswith("slm2_"):
+            return "slm2"
+    # Fallback: substring check for nested cases
+    if ".slm1." in name:
+        return "slm1"
+    if ".slm2." in name:
+        return "slm2"
+    return None
+
+
 def split_phase_param_groups(student):
     groups = {"slm1": [], "slm2": [], "other": []}
     for name, param in student.named_parameters():
         if not param.requires_grad:
             continue
         if _is_slm_phase_param(name):
-            if name.startswith("slm1."):
+            layer = _param_layer_name(name)
+            if layer == "slm1":
                 groups["slm1"].append(param)
-            elif name.startswith("slm2."):
+            elif layer == "slm2":
                 groups["slm2"].append(param)
+            else:
+                groups["other"].append(param)
         else:
             groups["other"].append(param)
     return groups
