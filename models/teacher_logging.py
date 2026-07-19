@@ -48,11 +48,7 @@ def log_all_parameters():
             f"Anchor-free TAL/DFL: head_ch={Config.ANCHOR_FREE_HEAD_CH}, reg_max={Config.ANCHOR_FREE_REG_MAX}, "
             f"topk={Config.TAL_TOPK}, alpha={Config.TAL_ALPHA}, beta={Config.TAL_BETA}",
         )
-        log_to_file(
-            Config,
-            f"Anchor-free classification: loss={Config.ANCHOR_FREE_CLS_LOSS}, "
-            f"varifocal_alpha={Config.VARIFOCAL_ALPHA}, varifocal_gamma={Config.VARIFOCAL_GAMMA}",
-        )
+        log_to_file(Config, "Anchor-free classification: BCE with TAL IoU soft targets")
     if Config.DETECTION_PROTOCOL == "anchor":
         log_to_file(Config, f"Focal alpha/gamma: {Config.FOCAL_ALPHA}/{Config.FOCAL_GAMMA}")
     if Config.DETECTION_PROTOCOL == "anchor":

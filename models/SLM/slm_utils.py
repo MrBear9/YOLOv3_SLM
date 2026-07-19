@@ -343,11 +343,7 @@ def log_config():
         f"center_radius={Config.CENTER_PRIOR_RADIUS}, top_n={Config.SIMOTA_TOP_N}, max_assign={Config.SIMOTA_MAX_ASSIGN}",
     )
     if Config.DETECTION_PROTOCOL == "anchor_free_tal":
-        log_to_file(
-            Config,
-            f"Anchor-free classification: loss={Config.ANCHOR_FREE_CLS_LOSS}, "
-            f"varifocal_alpha={Config.VARIFOCAL_ALPHA}, varifocal_gamma={Config.VARIFOCAL_GAMMA}",
-        )
+        log_to_file(Config, "Anchor-free classification: BCE with TAL IoU soft targets")
     log_to_file(
         Config,
         f"Metric conf/nms/max_det: {Config.METRIC_CONF_THRESH}/{Config.METRIC_NMS_THRESH}/{Config.METRIC_MAX_DET}",

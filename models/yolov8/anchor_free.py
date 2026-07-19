@@ -136,19 +136,6 @@ class AnchorFreeTALLoss(nn.Module):
             + F.cross_entropy(flat, right.reshape(-1), reduction="none").view_as(target) * wr
         ).mean(-1)
 
-    def classification_loss(self, logits, targets, score_sum):
-        loss_mode = str(getattr(self.config, "ANCHOR_FREE_CLS_LOSS", "bce")).strip().lower()
-        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
-        if loss_mode == "bce":
-            return bce.sum() / score_sum
-        if loss_mode != "varifocal":
-            raise ValueError("ANCHOR_FREE_CLS_LOSS must be 'bce' or 'varifocal'.")
-        alpha = float(getattr(self.config, "VARIFOCAL_ALPHA", 0.75))
-        gamma = float(getattr(self.config, "VARIFOCAL_GAMMA", 2.0))
-        probabilities = logits.sigmoid()
-        weights = targets + alpha * probabilities.pow(gamma) * (targets <= 0).to(logits.dtype)
-        return (bce * weights).sum() / score_sum
-
     def forward(self, predictions, targets):
         cls_logits, reg_logits = flatten_predictions(predictions, self.reg_max)
         points, strides = make_anchor_points(predictions, self.config.STRIDES, cls_logits.dtype, cls_logits.device)
@@ -161,7 +148,7 @@ class AnchorFreeTALLoss(nn.Module):
                 cls_logits[b].sigmoid(), decoded[b].detach(), points, gt_boxes, gt_classes
             )
         score_sum = target_scores.sum().clamp(min=1.0)
-        cls_loss = self.classification_loss(cls_logits, target_scores, score_sum)
+        cls_loss = F.binary_cross_entropy_with_logits(cls_logits, target_scores, reduction="sum") / score_sum
         if foreground.any():
             weights = target_scores.sum(-1)[foreground].clamp(min=1e-3)
             boxes = target_boxes[foreground]

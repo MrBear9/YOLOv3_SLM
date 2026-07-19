@@ -434,14 +434,18 @@ def train():
             f"edge={avg_train['slm_edge']:.4f}",
         )
         # 每个 epoch 结束后同步所有 rank（唯一 barrier，确保所有 rank 完成本 epoch 的全部工作后再进入下一 epoch）
-        if use_ddp:
-            torch.distributed.barrier()
-
-        if (
+        # Rank 0 owns early-stopping state; all ranks must take the same exit path.
+        should_stop = bool(
             val_metrics is not None
             and Config.TEACHER_EARLY_STOP_PATIENCE > 0
             and no_improve_epochs >= Config.TEACHER_EARLY_STOP_PATIENCE
-        ):
+        ) if is_main else False
+        if use_ddp:
+            stop_tensor = torch.tensor(int(should_stop), device=device, dtype=torch.int32)
+            torch.distributed.broadcast(stop_tensor, src=0)
+            should_stop = bool(stop_tensor.item())
+
+        if should_stop:
             log_to_file(
                 Config,
                 f"Early stopping teacher after {no_improve_epochs} epochs without mAP50 improvement. "

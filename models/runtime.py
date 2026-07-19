@@ -192,6 +192,7 @@ def get_dataloader_kwargs(config, shuffle=False, sampler=None):
     if config.NUM_WORKERS > 0:
         kwargs["persistent_workers"] = config.PERSISTENT_WORKERS
         kwargs["prefetch_factor"] = config.PREFETCH_FACTOR
+        kwargs["timeout"] = int(getattr(config, "DATALOADER_TIMEOUT", 0))
     return kwargs
 
 

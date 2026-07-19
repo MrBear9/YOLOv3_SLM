@@ -72,7 +72,7 @@ class ConfigYOLOv8Anchor:
     # Training scale
     # =========================================================================
     IMG_SIZE = 640
-    BATCH_SIZE = 16
+    BATCH_SIZE = 8
     STRIDES = [8, 16, 32]
 
     STAGE1_LOCATE_EPOCHS = 40
@@ -138,12 +138,7 @@ class ConfigYOLOv8Anchor:
     ANCHOR_FREE_PRE_NMS_TOPK = 3000
     TAL_TOPK = 10
     TAL_ALPHA = 0.5
-    TAL_BETA = 6.0
-    # "varifocal" aligns classification confidence with TAL IoU scores;
-    # set to "bce" for a strict reproduction of the 0.8309 baseline.
-    ANCHOR_FREE_CLS_LOSS = "varifocal"
-    VARIFOCAL_ALPHA = 0.75
-    VARIFOCAL_GAMMA = 2.0
+    TAL_BETA = 5.0
     DETECTOR_INVERT_FEATURE = True   # invert teacher feature (dark→bright) before detector
 
     # -------- DETECTOR_HEAD_TYPE = "compact" | "center_detect" --------
@@ -344,10 +339,11 @@ class ConfigYOLOv8Anchor:
 
     # Windows 使用 spawn 创建多进程，开销远大于 Linux 的 fork，需要降低 worker 数量
     _IS_WINDOWS = os.name == "nt"
-    NUM_WORKERS = (0 if _IS_WINDOWS else min(12, os.cpu_count() or 0))
+    NUM_WORKERS = (0 if _IS_WINDOWS else min(4, os.cpu_count() or 0))
     PIN_MEMORY = torch.cuda.is_available()
-    PERSISTENT_WORKERS = (not _IS_WINDOWS)
-    PREFETCH_FACTOR = (0 if _IS_WINDOWS else 4)
+    PERSISTENT_WORKERS = False
+    PREFETCH_FACTOR = (0 if _IS_WINDOWS else 2)
+    DATALOADER_TIMEOUT = (0 if _IS_WINDOWS else 300)
     ENABLE_CUDNN_BENCHMARK = True
     ENABLE_CHANNELS_LAST = True
     ENABLE_TF32 = True
@@ -379,9 +375,6 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_DETECTION_PROTOCOL": ("DETECTION_PROTOCOL", str),
             "OPTICAL_TEACHER_ANCHOR_FREE_HEAD_CH": ("ANCHOR_FREE_HEAD_CH", int),
             "OPTICAL_TEACHER_ANCHOR_FREE_REG_MAX": ("ANCHOR_FREE_REG_MAX", int),
-            "OPTICAL_TEACHER_ANCHOR_FREE_CLS_LOSS": ("ANCHOR_FREE_CLS_LOSS", str),
-            "OPTICAL_TEACHER_VARIFOCAL_ALPHA": ("VARIFOCAL_ALPHA", float),
-            "OPTICAL_TEACHER_VARIFOCAL_GAMMA": ("VARIFOCAL_GAMMA", float),
             "OPTICAL_TEACHER_V1_BASE_CHANNELS": ("TEACHER_V1_BASE_CHANNELS", int),
             "OPTICAL_TEACHER_V1_C2F_BLOCKS": ("TEACHER_V1_C2F_BLOCKS", int),
             "OPTICAL_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),
@@ -421,6 +414,7 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_SLM_CIPHER_PEAK_WEIGHT": ("TEACHER_SLM_CIPHER_PEAK_WEIGHT", float),
             "OPTICAL_TEACHER_SLM_CIPHER_EDGE_WEIGHT": ("TEACHER_SLM_CIPHER_EDGE_WEIGHT", float),
             "OPTICAL_TEACHER_NUM_WORKERS": ("NUM_WORKERS", int),
+            "OPTICAL_TEACHER_DATALOADER_TIMEOUT": ("DATALOADER_TIMEOUT", int),
             "OPTICAL_TEACHER_AMP_DTYPE": ("AMP_DTYPE", str),
             "OPTICAL_COMPACT_BASE_CH": ("COMPACT_BASE_CH", int),
             "OPTICAL_COMPACT_HEAD_CH": ("COMPACT_HEAD_CH", int),
