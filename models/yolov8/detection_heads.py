@@ -256,8 +256,18 @@ class YOLOLightHead(nn.Module):
         if self.detection_protocol == "anchor_free_tal":
             reg_max = int(getattr(config, "ANCHOR_FREE_REG_MAX", 16))
             head_ch = int(getattr(config, "ANCHOR_FREE_HEAD_CH", max(c2, 16)))
+            p2_ch = int(getattr(config, "ANCHOR_FREE_P2_FUSION_CH", c2))
+            p2_head_ch = int(getattr(config, "ANCHOR_FREE_P2_HEAD_CH", p2_ch))
+            self.p2_from_s4 = ConvBNAct(c4, p2_ch, 1)
+            self.p2_from_p3 = ConvBNAct(c2, p2_ch, 1)
+            self.p2_fuse = nn.Sequential(
+                ConvBNAct(p2_ch * 2, p2_ch, 1),
+                ConvBNAct(p2_ch, p2_ch, 3, groups=p2_ch),
+                ECABlock(p2_ch),
+            )
             self.anchor_free_heads = nn.ModuleList(
-                AnchorFreeDetectBranch(ch, config.NUM_CLASSES, reg_max, head_ch) for ch in (c2, c4, c8)
+                [AnchorFreeDetectBranch(p2_ch, config.NUM_CLASSES, reg_max, p2_head_ch)]
+                + [AnchorFreeDetectBranch(ch, config.NUM_CLASSES, reg_max, head_ch) for ch in (c2, c4, c8)]
             )
             return
         if self.detection_protocol != "anchor":
@@ -330,10 +340,16 @@ class YOLOLightHead(nn.Module):
         p5_pan = self.pan_p5(torch.cat([p4_down, p5_feat], dim=1))
 
         # Detection heads — direct 1×1 per scale (方案A)
-        prediction_features = (self.head_dropout(p3_fused), self.head_dropout(p4_pan), self.head_dropout(p5_pan))
         if self.detection_protocol == "anchor_free_tal":
+            p3_up = F.interpolate(p3_fused, size=s4.shape[-2:], mode="nearest")
+            p2_fused = self.p2_fuse(torch.cat([self.p2_from_s4(s4), self.p2_from_p3(p3_up)], dim=1))
+            prediction_features = (
+                self.head_dropout(p2_fused), self.head_dropout(p3_fused),
+                self.head_dropout(p4_pan), self.head_dropout(p5_pan),
+            )
             predictions = tuple(head(feat) for head, feat in zip(self.anchor_free_heads, prediction_features))
         else:
+            prediction_features = (self.head_dropout(p3_fused), self.head_dropout(p4_pan), self.head_dropout(p5_pan))
             predictions = (
                 self._decode_head(self.head_p3_box, self.head_p3_obj, self.head_p3_cls, prediction_features[0]),
                 self._decode_head(self.head_p4_box, self.head_p4_obj, self.head_p4_cls, prediction_features[1]),

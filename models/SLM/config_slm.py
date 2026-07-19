@@ -32,6 +32,7 @@ class ConfigSLM:
     IMG_SIZE = 640
     BATCH_SIZE = 16
     STRIDES = [8, 16, 32]
+    ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
     PHASE_FOCUS_EPOCHS = 145
     DETECTOR_FOCUS_EPOCHS = 35
@@ -157,6 +158,8 @@ class ConfigSLM:
     # -------- DETECTOR_HEAD_TYPE = "light" --------
     YOLO_LIGHT_BASE_CH = 8  # A: halved from 16
     ANCHOR_FREE_HEAD_CH = 24
+    ANCHOR_FREE_P2_FUSION_CH = 16
+    ANCHOR_FREE_P2_HEAD_CH = 16
     ANCHOR_FREE_REG_MAX = 16
     ANCHOR_FREE_BOX_WEIGHT = 7.5
     ANCHOR_FREE_CLS_WEIGHT = 0.5
@@ -164,7 +167,7 @@ class ConfigSLM:
     ANCHOR_FREE_PRE_NMS_TOPK = 3000
     TAL_TOPK = 10
     TAL_ALPHA = 0.5
-    TAL_BETA = 5.0
+    TAL_BETA = 6.0
 
     # =========================================================================
     # Anchors
@@ -379,6 +382,8 @@ class ConfigSLM:
             "OPTICAL_SLM_DETECTION_PROTOCOL": ("DETECTION_PROTOCOL", str),
             "OPTICAL_SLM_ANCHOR_FREE_HEAD_CH": ("ANCHOR_FREE_HEAD_CH", int),
             "OPTICAL_SLM_ANCHOR_FREE_REG_MAX": ("ANCHOR_FREE_REG_MAX", int),
+            "OPTICAL_SLM_ANCHOR_FREE_P2_FUSION_CH": ("ANCHOR_FREE_P2_FUSION_CH", int),
+            "OPTICAL_SLM_ANCHOR_FREE_P2_HEAD_CH": ("ANCHOR_FREE_P2_HEAD_CH", int),
             "OPTICAL_SLM_INIT_MODE": ("SLM_INIT_MODE", str),
             "OPTICAL_SLM_INIT_CHECKPOINT": ("SLM_INIT_CHECKPOINT", str),
             "OPTICAL_SLM_VORTEX_PERIODS": ("SLM_VORTEX_PERIODS", float),

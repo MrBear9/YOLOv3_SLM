@@ -37,7 +37,8 @@ def log_all_parameters():
         f"Head factory: type={Config.DETECTOR_HEAD_TYPE}, protocol={Config.DETECTION_PROTOCOL}, light_base_ch={Config.YOLO_LIGHT_BASE_CH}, "
         f"yolov8_base_ch={Config.YOLOV8_BASE_CHANNELS}, c2f_blocks={Config.YOLOV8_C2F_BLOCKS}",
     )
-    log_to_file(Config, f"Strides: {Config.STRIDES}")
+    active_strides = Config.ANCHOR_FREE_STRIDES if Config.DETECTION_PROTOCOL == "anchor_free_tal" else Config.STRIDES
+    log_to_file(Config, f"Strides: {active_strides}")
     if Config.DETECTION_PROTOCOL == "anchor":
         log_to_file(Config, f"Anchor source: {Config.ANCHOR_SOURCE}")
         log_to_file(Config, f"Anchors: {Config.ANCHORS}")
@@ -47,6 +48,10 @@ def log_all_parameters():
             Config,
             f"Anchor-free TAL/DFL: head_ch={Config.ANCHOR_FREE_HEAD_CH}, reg_max={Config.ANCHOR_FREE_REG_MAX}, "
             f"topk={Config.TAL_TOPK}, alpha={Config.TAL_ALPHA}, beta={Config.TAL_BETA}",
+        )
+        log_to_file(
+            Config,
+            f"Light P2: fusion_ch={Config.ANCHOR_FREE_P2_FUSION_CH}, head_ch={Config.ANCHOR_FREE_P2_HEAD_CH}",
         )
         log_to_file(Config, "Anchor-free classification: BCE with TAL IoU soft targets")
     if Config.DETECTION_PROTOCOL == "anchor":

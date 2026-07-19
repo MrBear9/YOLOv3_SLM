@@ -7,6 +7,10 @@ import torch.nn.functional as F
 from torchvision.ops import batched_nms
 
 
+def get_anchor_free_strides(config):
+    return getattr(config, "ANCHOR_FREE_STRIDES", config.STRIDES)
+
+
 def make_anchor_points(predictions, strides, dtype, device):
     points, stride_values = [], []
     for pred, stride in zip(predictions, strides):
@@ -138,7 +142,7 @@ class AnchorFreeTALLoss(nn.Module):
 
     def forward(self, predictions, targets):
         cls_logits, reg_logits = flatten_predictions(predictions, self.reg_max)
-        points, strides = make_anchor_points(predictions, self.config.STRIDES, cls_logits.dtype, cls_logits.device)
+        points, strides = make_anchor_points(predictions, get_anchor_free_strides(self.config), cls_logits.dtype, cls_logits.device)
         decoded = decode_boxes(reg_logits, points, strides, self.reg_max)
         target_scores, target_boxes = torch.zeros_like(cls_logits), torch.zeros_like(decoded)
         foreground = torch.zeros(cls_logits.shape[:2], device=cls_logits.device, dtype=torch.bool)
@@ -185,7 +189,7 @@ def decode_anchor_free(config, predictions, conf_thresh=None, nms_thresh=None, m
     max_det = int(config.MAX_DET if max_det is None else max_det)
     reg_max = int(getattr(config, "ANCHOR_FREE_REG_MAX", 16))
     cls_logits, reg_logits = flatten_predictions(predictions, reg_max)
-    points, strides = make_anchor_points(predictions, config.STRIDES, cls_logits.dtype, cls_logits.device)
+    points, strides = make_anchor_points(predictions, get_anchor_free_strides(config), cls_logits.dtype, cls_logits.device)
     boxes, scores = decode_boxes(reg_logits, points, strides, reg_max), cls_logits.sigmoid()
     detections, pre_topk = [], int(getattr(config, "ANCHOR_FREE_PRE_NMS_TOPK", 3000))
     for b in range(scores.shape[0]):
