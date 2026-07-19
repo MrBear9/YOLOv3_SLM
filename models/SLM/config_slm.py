@@ -30,7 +30,7 @@ class ConfigSLM:
     # Training scale
     # =========================================================================
     IMG_SIZE = 640
-    BATCH_SIZE = 16
+    BATCH_SIZE = 8
     STRIDES = [8, 16, 32]
 
     PHASE_FOCUS_EPOCHS = 345
@@ -78,12 +78,15 @@ class ConfigSLM:
     # When enabled, K parallel virtual SLM pairs are trained simultaneously and
     # their outputs fused.  This increases modulation capacity without changing
     # the deployment hardware (distill back to a single pair post-training).
+    #
+    # IMPORTANT: mean fusion dilutes gradient per head by 1/K.  Phase LR must
+    # be scaled up proportionally — see PHASE_FOCUS_PHASE_PARAM_LR note below.
     SLM_MULTI_HEAD_ENABLED = True
     SLM_MULTI_HEAD_NUM_HEADS = 4        # K: number of virtual SLM pairs
     # Fusion strategy for combining head outputs:
     #   "mean"         — equal-weight average (default, stable baseline)
     #   "learned_gate" — input-dependent soft selection via a tiny conv gate
-    SLM_MULTI_HEAD_FUSION = "mean"
+    SLM_MULTI_HEAD_FUSION = "learned_gate"
 
     # Layer-wise ablation controls. Keep both enabled for normal two-SLM training.
     TRAIN_SLM1 = True
@@ -308,7 +311,7 @@ class ConfigSLM:
     # =========================================================================
     # Optimizer & LR schedule
     # =========================================================================
-    PHASE_FOCUS_PHASE_PARAM_LR = 3e-3
+    PHASE_FOCUS_PHASE_PARAM_LR = 9e-3  # 3× baseline (3e-3); compensates K=4 mean-fusion gradient dilution
     DETECTOR_LR = 3e-4
     JOINT_PHASE_PARAM_LR = 5e-4
     JOINT_DETECTOR_LR = 5e-5
@@ -345,7 +348,7 @@ class ConfigSLM:
     # =========================================================================
     # Visualization
     # =========================================================================
-    VIS_INTERVAL = 10
+    VIS_INTERVAL = 5
     VIS_BATCH_SIZE = 4
     VIS_DPI = 130
     # Options: "val", "train".
