@@ -86,7 +86,7 @@ class ConfigSLM:
     # Fusion strategy for combining head outputs:
     #   "mean"         — equal-weight average (default, stable baseline)
     #   "learned_gate" — input-dependent soft selection via a tiny conv gate
-    SLM_MULTI_HEAD_FUSION = "learned_gate"
+    SLM_MULTI_HEAD_FUSION = "mean"
 
     # Layer-wise ablation controls. Keep both enabled for normal two-SLM training.
     TRAIN_SLM1 = True
@@ -178,10 +178,7 @@ class ConfigSLM:
     ANCHOR_FREE_PRE_NMS_TOPK = 3000
     TAL_TOPK = 10
     TAL_ALPHA = 0.5
-    TAL_BETA = 6.0
-    ANCHOR_FREE_CLS_LOSS = "varifocal"
-    VARIFOCAL_ALPHA = 0.75
-    VARIFOCAL_GAMMA = 2.0
+    TAL_BETA = 5.0
 
     # =========================================================================
     # Anchors
@@ -289,12 +286,12 @@ class ConfigSLM:
     # Stage loss weights
     # =========================================================================
     FEATURE_LOSS_WEIGHT_PHASE_FOCUS = 1.1
-    DETECTION_LOSS_WEIGHT_PHASE_FOCUS = 1.0
+    DETECTION_LOSS_WEIGHT_PHASE_FOCUS = 0.0
     RESPONSE_LOSS_WEIGHT_PHASE_FOCUS = 0.0
     PRIVACY_LOSS_WEIGHT_PHASE_FOCUS = 0.0
 
-    FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS = 1.0
-    DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS = 1.1
+    FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
+    DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS = 1.0
     RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
     PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
 
@@ -311,7 +308,7 @@ class ConfigSLM:
     # =========================================================================
     # Optimizer & LR schedule
     # =========================================================================
-    PHASE_FOCUS_PHASE_PARAM_LR = 9e-3  # 3× baseline (3e-3); compensates K=4 mean-fusion gradient dilution
+    PHASE_FOCUS_PHASE_PARAM_LR = 3e-3
     DETECTOR_LR = 3e-4
     JOINT_PHASE_PARAM_LR = 5e-4
     JOINT_DETECTOR_LR = 5e-5
@@ -396,9 +393,6 @@ class ConfigSLM:
             "OPTICAL_SLM_DETECTION_PROTOCOL": ("DETECTION_PROTOCOL", str),
             "OPTICAL_SLM_ANCHOR_FREE_HEAD_CH": ("ANCHOR_FREE_HEAD_CH", int),
             "OPTICAL_SLM_ANCHOR_FREE_REG_MAX": ("ANCHOR_FREE_REG_MAX", int),
-            "OPTICAL_SLM_ANCHOR_FREE_CLS_LOSS": ("ANCHOR_FREE_CLS_LOSS", str),
-            "OPTICAL_SLM_VARIFOCAL_ALPHA": ("VARIFOCAL_ALPHA", float),
-            "OPTICAL_SLM_VARIFOCAL_GAMMA": ("VARIFOCAL_GAMMA", float),
             "OPTICAL_SLM_INIT_MODE": ("SLM_INIT_MODE", str),
             "OPTICAL_SLM_INIT_CHECKPOINT": ("SLM_INIT_CHECKPOINT", str),
             "OPTICAL_SLM_VORTEX_PERIODS": ("SLM_VORTEX_PERIODS", float),

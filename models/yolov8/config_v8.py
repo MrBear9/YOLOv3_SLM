@@ -138,12 +138,7 @@ class ConfigYOLOv8Anchor:
     ANCHOR_FREE_PRE_NMS_TOPK = 3000
     TAL_TOPK = 10
     TAL_ALPHA = 0.5
-    TAL_BETA = 6.0
-    # "varifocal" aligns classification confidence with TAL IoU scores;
-    # set to "bce" for a strict reproduction of the 0.8309 baseline.
-    ANCHOR_FREE_CLS_LOSS = "varifocal"
-    VARIFOCAL_ALPHA = 0.75
-    VARIFOCAL_GAMMA = 2.0
+    TAL_BETA = 5.0
     DETECTOR_INVERT_FEATURE = True   # invert teacher feature (dark→bright) before detector
 
     # -------- DETECTOR_HEAD_TYPE = "compact" | "center_detect" --------
@@ -379,9 +374,6 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_DETECTION_PROTOCOL": ("DETECTION_PROTOCOL", str),
             "OPTICAL_TEACHER_ANCHOR_FREE_HEAD_CH": ("ANCHOR_FREE_HEAD_CH", int),
             "OPTICAL_TEACHER_ANCHOR_FREE_REG_MAX": ("ANCHOR_FREE_REG_MAX", int),
-            "OPTICAL_TEACHER_ANCHOR_FREE_CLS_LOSS": ("ANCHOR_FREE_CLS_LOSS", str),
-            "OPTICAL_TEACHER_VARIFOCAL_ALPHA": ("VARIFOCAL_ALPHA", float),
-            "OPTICAL_TEACHER_VARIFOCAL_GAMMA": ("VARIFOCAL_GAMMA", float),
             "OPTICAL_TEACHER_V1_BASE_CHANNELS": ("TEACHER_V1_BASE_CHANNELS", int),
             "OPTICAL_TEACHER_V1_C2F_BLOCKS": ("TEACHER_V1_C2F_BLOCKS", int),
             "OPTICAL_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),

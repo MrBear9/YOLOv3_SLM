@@ -122,9 +122,15 @@ def enhance_feature_for_display(feature_map):
     feature_map = np.asarray(feature_map, dtype=np.float32)
     low = np.percentile(feature_map, 2)
     high = np.percentile(feature_map, 98)
-    if high - low < 1e-6:
-        return np.zeros_like(feature_map)
-    feature_map = np.clip((feature_map - low) / (high - low), 0.0, 1.0)
+    span = high - low
+    if span < 1e-6:
+        # Low-contrast fallback (e.g. multi-head mean fusion): use min-max.
+        f_min, f_max = feature_map.min(), feature_map.max()
+        span = f_max - f_min
+        if span < 1e-8:
+            return np.zeros_like(feature_map)
+        low, high = f_min, f_max
+    feature_map = np.clip((feature_map - low) / span, 0.0, 1.0)
     return np.power(feature_map, 0.8)
 
 
