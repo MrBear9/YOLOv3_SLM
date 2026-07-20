@@ -336,6 +336,8 @@ def train():
                 train_component_sums[key] = train_component_sums.get(key, 0.0) + loss_stats.get(key, 0.0)
 
         avg_train = {key: value / max(len(train_loader), 1) for key, value in train_component_sums.items()}
+        copy_paste_stats = train_dataset.get_copy_paste_stats(reset=True)
+        avg_train.update({f"copy_paste_{key}": value for key, value in copy_paste_stats.items()})
         history["train_total"].append(avg_train["total"])
         scheduler.step()
         current_lr = max(group["lr"] for group in optimizer.param_groups)

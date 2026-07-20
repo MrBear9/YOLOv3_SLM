@@ -73,6 +73,12 @@ def log_all_parameters():
         f"Training data: letterbox=True, augment={Config.TRAIN_AUGMENT}, hflip={Config.AUG_HFLIP_PROB}, "
         f"rotate={Config.AUG_ROTATE_DEG}, scale={Config.AUG_SCALE_MIN}-{Config.AUG_SCALE_MAX}, translate={Config.AUG_TRANSLATE}",
     )
+    log_to_file(
+        Config,
+        f"Small-soldier Copy-Paste: enabled={Config.SOLDIER_COPY_PASTE}, prob={Config.SOLDIER_COPY_PASTE_PROB}, "
+        f"max_objects={Config.SOLDIER_COPY_PASTE_MAX_OBJECTS}, area_max={Config.SOLDIER_COPY_PASTE_AREA_MAX}, "
+        f"scale={Config.SOLDIER_COPY_PASTE_SCALE_MIN}-{Config.SOLDIER_COPY_PASTE_SCALE_MAX}, ioa_max={Config.SOLDIER_COPY_PASTE_IOA_MAX}",
+    )
     log_to_file(Config, f"Output: {Config.TEACHER_OUTPUT_DIR}")
     teacher = build_teacher(Config)
     detector = build_detector_head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
@@ -117,7 +123,9 @@ def write_teacher_tensorboard_scalars(writer, step, train_losses, val_losses=Non
     if writer is None:
         return
     for key, value in train_losses.items():
-        if key.startswith("positive_"):
+        if key.startswith("copy_paste_"):
+            add_tensorboard_scalar(writer, f"Augmentation/CopyPaste/{key.removeprefix('copy_paste_')}", value, step)
+        elif key.startswith("positive_"):
             assignment_name = key.removeprefix("positive_")
             if assignment_name.startswith("class_"):
                 cls_id = int(assignment_name.removeprefix("class_"))

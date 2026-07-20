@@ -1,10 +1,11 @@
 import os
 import math
+import multiprocessing as mp
 import random
 from collections import Counter
 
 import torch
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 from torch.utils.data import Dataset, Sampler, WeightedRandomSampler
 from torchvision import tv_tensors
 from torchvision.transforms import v2
@@ -19,12 +20,20 @@ def identity_collate(batch):
     return batch
 
 
+def letterbox_content_bounds(image_size, output_size):
+    src_w, src_h = image_size
+    scale = min(output_size / src_w, output_size / src_h)
+    new_w, new_h = max(1, round(src_w * scale)), max(1, round(src_h * scale))
+    left, top = (output_size - new_w) // 2, (output_size - new_h) // 2
+    return left, top, left + new_w, top + new_h
+
+
 def letterbox_image_targets(img, targets, image_size, fill=114):
     src_w, src_h = img.size
     scale = min(image_size / src_w, image_size / src_h)
     new_w, new_h = max(1, round(src_w * scale)), max(1, round(src_h * scale))
     resized = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
-    left, top = (image_size - new_w) // 2, (image_size - new_h) // 2
+    left, top, _, _ = letterbox_content_bounds((src_w, src_h), image_size)
     canvas = Image.new("RGB", (image_size, image_size), color=(fill, fill, fill))
     canvas.paste(resized, (left, top))
     if targets.numel():
@@ -58,6 +67,12 @@ class YOLODataset(Dataset):
         self.num_classes = config.NUM_CLASSES
         self._sampling_metadata = None
         self.augment = split == "train" and bool(getattr(config, "TRAIN_AUGMENT", False))
+        self.copy_paste_enabled = self.augment and bool(getattr(config, "SOLDIER_COPY_PASTE", False))
+        self.copy_paste_class = int(getattr(config, "SOLDIER_CLASS_ID", 1))
+        self._copy_paste_donors = []
+        self._copy_paste_attempted = mp.Value("q", 0)
+        self._copy_paste_images = mp.Value("q", 0)
+        self._copy_paste_objects = mp.Value("q", 0)
 
     def __len__(self):
         return len(self.files)
@@ -71,6 +86,8 @@ class YOLODataset(Dataset):
         image_class_counters = []
         class_box_counts = Counter()
         empty_image_count = 0
+        copy_paste_donors = []
+        donor_max_area = float(getattr(self.config, "SOLDIER_COPY_PASTE_AREA_MAX", 32 * 32))
         for img_path in self.files:
             label_path = self.get_label_path(img_path)
             image_class_counter = Counter()
@@ -87,6 +104,13 @@ class YOLODataset(Dataset):
                         if 0 <= cls_id < self.num_classes:
                             image_class_counter[cls_id] += 1
                             class_box_counts[cls_id] += 1
+                            if (
+                                self.copy_paste_enabled and cls_id == self.copy_paste_class
+                                and len(parts) >= 5
+                            ):
+                                box = tuple(float(value) for value in parts[1:5])
+                                if box[2] * box[3] * self.img_size ** 2 <= donor_max_area:
+                                    copy_paste_donors.append((img_path, box))
             if len(image_class_counter) == 0:
                 empty_image_count += 1
             image_class_counters.append(image_class_counter)
@@ -94,10 +118,14 @@ class YOLODataset(Dataset):
             "image_class_counters": image_class_counters,
             "class_box_counts": class_box_counts,
             "empty_image_count": empty_image_count,
+            "copy_paste_donors": copy_paste_donors,
         }
+        self._copy_paste_donors = copy_paste_donors
         return self._sampling_metadata
 
     def __getitem__(self, idx):
+        if self.copy_paste_enabled and not self._copy_paste_donors:
+            self.get_sampling_metadata()
         img_path = self.files[idx]
         img = Image.open(img_path).convert("RGB")
         label_path = self.get_label_path(img_path)
@@ -109,8 +137,10 @@ class YOLODataset(Dataset):
                     if len(parts) >= 5:
                         targets.append([int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])])
         targets = torch.tensor(targets, dtype=torch.float32) if targets else torch.zeros((0, 5), dtype=torch.float32)
+        content_bounds = letterbox_content_bounds(img.size, self.img_size)
         img, targets = self._letterbox(img, targets)
         if self.augment:
+            img, targets = self._copy_paste_small_soldiers(img, targets, content_bounds)
             img, targets = self._augment(img, targets)
         img_tensor = TF.to_tensor(TF.to_grayscale(img, num_output_channels=1))
         if self.augment and random.random() < float(getattr(self.config, "AUG_NOISE_PROB", 0.10)):
@@ -120,6 +150,92 @@ class YOLODataset(Dataset):
 
     def _letterbox(self, img, targets):
         return letterbox_image_targets(img, targets, self.img_size)
+
+    def get_copy_paste_stats(self, reset=False):
+        values = {
+            "attempted_images": self._copy_paste_attempted.value,
+            "successful_images": self._copy_paste_images.value,
+            "pasted_objects": self._copy_paste_objects.value,
+        }
+        if reset:
+            for counter in (self._copy_paste_attempted, self._copy_paste_images, self._copy_paste_objects):
+                with counter.get_lock():
+                    counter.value = 0
+        return values
+
+    @staticmethod
+    def _box_ioa(candidate, existing):
+        if existing.numel() == 0:
+            return candidate.new_zeros(0)
+        lt = torch.maximum(candidate[:2], existing[:, :2])
+        rb = torch.minimum(candidate[2:], existing[:, 2:])
+        intersection = (rb - lt).clamp(min=0).prod(-1)
+        candidate_area = (candidate[2:] - candidate[:2]).clamp(min=1).prod()
+        return intersection / candidate_area
+
+    def _copy_paste_small_soldiers(self, img, targets, content_bounds=None):
+        if not self._copy_paste_donors or random.random() >= float(getattr(self.config, "SOLDIER_COPY_PASTE_PROB", 0.2)):
+            return img, targets
+        with self._copy_paste_attempted.get_lock():
+            self._copy_paste_attempted.value += 1
+
+        existing = torch.as_tensor(self._targets_to_xyxy(targets)).clone()
+        pasted = []
+        max_objects = int(getattr(self.config, "SOLDIER_COPY_PASTE_MAX_OBJECTS", 2))
+        max_ioa = float(getattr(self.config, "SOLDIER_COPY_PASTE_IOA_MAX", 0.2))
+        scale_min = float(getattr(self.config, "SOLDIER_COPY_PASTE_SCALE_MIN", 0.9))
+        scale_max = float(getattr(self.config, "SOLDIER_COPY_PASTE_SCALE_MAX", 1.15))
+        attempts = max_objects * 8
+        content_left, content_top, content_right, content_bottom = content_bounds or (0, 0, self.img_size, self.img_size)
+        for _ in range(attempts):
+            if len(pasted) >= max_objects:
+                break
+            donor_path, donor_box = random.choice(self._copy_paste_donors)
+            with Image.open(donor_path) as donor_image:
+                donor_image = donor_image.convert("RGB")
+                dw, dh = donor_image.size
+                cx, cy, bw, bh = donor_box
+                crop_box = (
+                    max(0, round((cx - bw / 2) * dw)), max(0, round((cy - bh / 2) * dh)),
+                    min(dw, round((cx + bw / 2) * dw)), min(dh, round((cy + bh / 2) * dh)),
+                )
+                crop = donor_image.crop(crop_box).copy()
+            if crop.width < 2 or crop.height < 2:
+                continue
+            scale = random.uniform(scale_min, scale_max)
+            paste_w = max(2, round(donor_box[2] * self.img_size * scale))
+            paste_h = max(2, round(donor_box[3] * self.img_size * scale))
+            if paste_w >= content_right - content_left or paste_h >= content_bottom - content_top:
+                continue
+            x1 = random.randint(content_left, content_right - paste_w)
+            y1 = random.randint(content_top, content_bottom - paste_h)
+            candidate = existing.new_tensor([x1, y1, x1 + paste_w, y1 + paste_h])
+            overlaps_existing = existing.numel() and self._box_ioa(candidate, existing).max().item() > max_ioa
+            if overlaps_existing:
+                continue
+
+            crop = crop.resize((paste_w, paste_h), Image.Resampling.BILINEAR)
+            feather = int(getattr(self.config, "SOLDIER_COPY_PASTE_EDGE_FEATHER", 2))
+            mask = Image.new("L", (paste_w, paste_h), 0)
+            inset = min(feather, max((min(paste_w, paste_h) - 1) // 2, 0))
+            ImageDraw.Draw(mask).rectangle((inset, inset, paste_w - 1 - inset, paste_h - 1 - inset), fill=255)
+            if inset > 0:
+                mask = mask.filter(ImageFilter.GaussianBlur(feather))
+            img.paste(crop, (x1, y1), mask)
+            existing = torch.cat((existing, candidate.unsqueeze(0)), dim=0)
+            pasted.append([
+                self.copy_paste_class,
+                (x1 + paste_w / 2) / self.img_size, (y1 + paste_h / 2) / self.img_size,
+                paste_w / self.img_size, paste_h / self.img_size,
+            ])
+
+        if pasted:
+            targets = torch.cat((targets, targets.new_tensor(pasted)), dim=0)
+            with self._copy_paste_images.get_lock():
+                self._copy_paste_images.value += 1
+            with self._copy_paste_objects.get_lock():
+                self._copy_paste_objects.value += len(pasted)
+        return img, targets
 
     def _augment(self, img, targets):
         if random.random() < float(getattr(self.config, "AUG_HFLIP_PROB", 0.5)):
@@ -240,5 +356,6 @@ def build_class_balanced_train_sampler(config, dataset, num_replicas=None, rank=
         "min_weight": round(float(weights_tensor.min().item()), 4),
         "max_weight": round(float(weights_tensor.max().item()), 4),
         "mean_weight": round(float(weights_tensor.mean().item()), 4),
+        "copy_paste_donors": len(metadata.get("copy_paste_donors", [])),
     }
     return sampler, summary

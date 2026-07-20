@@ -341,6 +341,17 @@ class ConfigYOLOv8Anchor:
     AUG_NOISE_PROB = 0.10
     AUG_NOISE_STD = 0.01
 
+    # Targeted training-only augmentation for the remaining small-soldier gap.
+    SOLDIER_COPY_PASTE = True
+    SOLDIER_CLASS_ID = 1
+    SOLDIER_COPY_PASTE_PROB = 0.20
+    SOLDIER_COPY_PASTE_MAX_OBJECTS = 2
+    SOLDIER_COPY_PASTE_AREA_MAX = 32 * 32
+    SOLDIER_COPY_PASTE_SCALE_MIN = 0.90
+    SOLDIER_COPY_PASTE_SCALE_MAX = 1.15
+    SOLDIER_COPY_PASTE_IOA_MAX = 0.20
+    SOLDIER_COPY_PASTE_EDGE_FEATHER = 2
+
     # Windows 使用 spawn 创建多进程，开销远大于 Linux 的 fork，需要降低 worker 数量
     _IS_WINDOWS = os.name == "nt"
     NUM_WORKERS = (0 if _IS_WINDOWS else min(4, os.cpu_count() or 0))
@@ -402,6 +413,9 @@ class ConfigYOLOv8Anchor:
             "OPTICAL_TEACHER_SIMOTA_MAX_ASSIGN": ("SIMOTA_MAX_ASSIGN", int),
             "OPTICAL_TEACHER_SIMOTA_OBJ_POS_THRESH": ("SIMOTA_OBJ_POS_THRESH", float),
             "OPTICAL_TEACHER_BATCH_SIZE": ("BATCH_SIZE", int),
+            "OPTICAL_TEACHER_SOLDIER_COPY_PASTE": ("SOLDIER_COPY_PASTE", bool),
+            "OPTICAL_TEACHER_SOLDIER_COPY_PASTE_PROB": ("SOLDIER_COPY_PASTE_PROB", float),
+            "OPTICAL_TEACHER_SOLDIER_COPY_PASTE_MAX_OBJECTS": ("SOLDIER_COPY_PASTE_MAX_OBJECTS", int),
             "OPTICAL_TEACHER_EPOCHS": ("EPOCHS", int),
             "OPTICAL_TEACHER_EARLY_STOP_PATIENCE": ("TEACHER_EARLY_STOP_PATIENCE", int),
             "OPTICAL_TEACHER_EARLY_STOP_MIN_DELTA": ("TEACHER_EARLY_STOP_MIN_DELTA", float),
