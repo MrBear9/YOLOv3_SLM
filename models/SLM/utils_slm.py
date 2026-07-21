@@ -262,6 +262,7 @@ def save_student_best(config, student, path, epoch, loss_value, extra=None):
         "loss": float(loss_value),
         "student_enable_norm": bool(getattr(student, "enable_norm", False)),
         "num_layers": int(getattr(student, "num_layers", 2)),
+        "num_heads": int(getattr(student, "num_heads", 1)),
     }
     # Pre-computed wrapped phases for all layers
     _save_wrapped_phases(payload, student)
@@ -288,6 +289,7 @@ def save_detector_best(detector, path, epoch, loss_value, extra=None,
         payload["student_state_dict"] = student_state
         payload["student_enable_norm"] = bool(getattr(student, "enable_norm", False))
         payload["num_layers"] = int(getattr(student, "num_layers", 2))
+        payload["num_heads"] = int(getattr(student, "num_heads", 1))
         _save_wrapped_phases(payload, student)
         for key, value in student_state.items():
             if "phase_raw" in key:
