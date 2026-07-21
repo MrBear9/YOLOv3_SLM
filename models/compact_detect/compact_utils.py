@@ -77,7 +77,7 @@ def save_checkpoint(path, student, detector, epoch, loss_value, metrics=None):
         "model_type": "compact_center_detector",
         "student_enable_norm": bool(getattr(student, "enable_norm", False)),
     }
-    for layer_name in ("slm1", "slm2"):
+    for layer_name in _slm_layer_names(student):
         slm = getattr(student, layer_name)
         payload[f"{layer_name}_wrapped_phase"] = slm.wrapped_phase().detach().cpu()
     torch.save(payload, path)
@@ -85,3 +85,18 @@ def save_checkpoint(path, student, detector, epoch, loss_value, metrics=None):
 
 def module_param_count(module):
     return sum(p.numel() for p in module.parameters())
+
+
+def _slm_layer_names(student):
+    """Return list of SLM layer names, preferring all_slm_layers()."""
+    if hasattr(student, "all_slm_layers"):
+        return sorted(set(name for name, _ in student.all_slm_layers()),
+                      key=lambda n: int(n.replace("slm", "").split("_")[0]) if n.startswith("slm") else 0)
+    # Fallback: detect from attributes
+    names = []
+    for attr in dir(student):
+        if attr.startswith("slm") and attr[3:].isdigit():
+            names.append(attr)
+    if names:
+        return sorted(names, key=lambda n: int(n[3:]))
+    return ["slm1", "slm2"]

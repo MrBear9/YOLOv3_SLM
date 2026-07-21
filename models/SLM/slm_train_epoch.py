@@ -116,7 +116,8 @@ def run_epoch(
     epoch_privacy_t = torch.zeros((), device=device)
     phase_snapshot = collect_phase_snapshot(student_raw)
     epoch_phase_grad_norm = 0.0
-    epoch_phase_grad_norms = {"slm1": 0.0, "slm2": 0.0}
+    # Use list to accumulate across batches → dict built at epoch end
+    _phase_grad_norms_accum = []
 
     for batch in tqdm(train_loader, desc=f"Epoch {global_epoch + 1}/{Config.EPOCHS} [{stage_name}]", leave=True, disable=not is_main):
         gray, rgb, targets = prepare_batch(batch, device)
@@ -158,9 +159,7 @@ def run_epoch(
         )
 
         total_loss.backward()
-        batch_phase_grad_norms = collect_phase_grad_norms(student_raw)
-        for layer_name, value in batch_phase_grad_norms.items():
-            epoch_phase_grad_norms[layer_name] += value
+        _phase_grad_norms_accum.append(collect_phase_grad_norms(student_raw))
         phase_grad_norm = collect_phase_grad_norm(student_raw)
         if stage_name in {"joint_fit", "norm_joint"}:
             clipped_norm = clip_phase_grad_norm(student_raw, Config.PHASE_GRAD_CLIP_NORM)
@@ -184,11 +183,21 @@ def run_epoch(
     avg_response = float(epoch_response_t.item()) / num_batches
     avg_privacy = float(epoch_privacy_t.item()) / num_batches
     avg_phase_grad_norm = epoch_phase_grad_norm / num_batches
+
+    # Merge per-batch grad norms into epoch-level stats
+    from collections import defaultdict
+    epoch_phase_grad_norms = defaultdict(float)
+    for batch_norms in _phase_grad_norms_accum:
+        for k, v in batch_norms.items():
+            epoch_phase_grad_norms[k] += v
+    for k in epoch_phase_grad_norms:
+        epoch_phase_grad_norms[k] /= num_batches
+
     phase_update_norm, phase_update_rel = collect_phase_update_norm(student_raw, phase_snapshot)
     phase_layer_updates = collect_phase_update_norms(student_raw, phase_snapshot)
     phase_layer_stats = {
         layer_name: {
-            "grad_norm": epoch_phase_grad_norms[layer_name] / num_batches,
+            "grad_norm": epoch_phase_grad_norms[layer_name],
             **phase_layer_updates[layer_name],
         }
         for layer_name in epoch_phase_grad_norms
@@ -200,16 +209,7 @@ def run_epoch(
     history["train_privacy"].append(avg_privacy)
     display_epoch = global_epoch + 1
     slm_stats = collect_slm_statistics(student_raw)
-    slm_ok = (
-        slm_stats["slm1_wrapped_std"] >= Config.PHASE_BEST_MIN_STD
-        and slm_stats["slm2_wrapped_std"] >= Config.PHASE_BEST_MIN_STD
-        and slm_stats["slm1_circular_std"] >= Config.PHASE_BEST_MIN_CIRCULAR_STD
-        and slm_stats["slm2_circular_std"] >= Config.PHASE_BEST_MIN_CIRCULAR_STD
-        and slm_stats["slm1_near_boundary_ratio"] <= Config.PHASE_BEST_MAX_NEAR_BOUNDARY_RATIO
-        and slm_stats["slm2_near_boundary_ratio"] <= Config.PHASE_BEST_MAX_NEAR_BOUNDARY_RATIO
-        and slm_stats["slm1_wrapped_span"] >= Config.PHASE_BEST_MIN_SPAN
-        and slm_stats["slm2_wrapped_span"] >= Config.PHASE_BEST_MIN_SPAN
-    )
+    slm_ok = _check_slm_quality(slm_stats, Config)
 
     # Validation
     val_losses = None
@@ -425,3 +425,20 @@ def run_epoch(
         torch.distributed.barrier()
 
     return best_map50, best_student_map50, best_student_loss, best_detector_loss, detector_no_improve_delta
+
+
+def _check_slm_quality(slm_stats, config):
+    """Check SLM quality thresholds across all layers dynamically."""
+    layer_names = set()
+    for key in slm_stats:
+        if key.endswith("_wrapped_std"):
+            layer_names.add(key.replace("_wrapped_std", ""))
+    if not layer_names:
+        return True  # No SLM stats → pass
+    for name in sorted(layer_names):
+        if not (slm_stats.get(f"{name}_wrapped_std", 0) >= config.PHASE_BEST_MIN_STD
+                and slm_stats.get(f"{name}_circular_std", 0) >= config.PHASE_BEST_MIN_CIRCULAR_STD
+                and slm_stats.get(f"{name}_near_boundary_ratio", 1) <= config.PHASE_BEST_MAX_NEAR_BOUNDARY_RATIO
+                and slm_stats.get(f"{name}_wrapped_span", 0) >= config.PHASE_BEST_MIN_SPAN):
+            return False
+    return True

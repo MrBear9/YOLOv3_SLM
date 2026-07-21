@@ -130,15 +130,20 @@ def _set_trainable_both(student, detector, student_trainable, detector_trainable
     set_trainable(student, student_trainable)
     if student_trainable:
         raw_student = student.module if hasattr(student, "module") else student
-        # Multi-head: toggle every head individually
+        num_layers = int(getattr(raw_student, "num_layers", 2))
+        # Multi-head: toggle every head of every layer
         if hasattr(raw_student, "slm1_heads"):
-            for slm1_head in raw_student.slm1_heads:
-                set_trainable(slm1_head, Config.TRAIN_SLM1)
-            for slm2_head in raw_student.slm2_heads:
-                set_trainable(slm2_head, Config.TRAIN_SLM2)
+            for layer_idx in range(1, num_layers + 1):
+                heads = getattr(raw_student, f"slm{layer_idx}_heads")
+                trainable = Config.is_trainable(layer_idx) if hasattr(Config, "is_trainable") else getattr(Config, f"TRAIN_SLM{layer_idx}", True)
+                for head in heads:
+                    set_trainable(head, trainable)
         else:
-            set_trainable(raw_student.slm1, Config.TRAIN_SLM1)
-            set_trainable(raw_student.slm2, Config.TRAIN_SLM2)
+            for layer_idx in range(1, num_layers + 1):
+                slm = getattr(raw_student, f"slm{layer_idx}", None)
+                if slm is not None:
+                    trainable = Config.is_trainable(layer_idx) if hasattr(Config, "is_trainable") else getattr(Config, f"TRAIN_SLM{layer_idx}", True)
+                    set_trainable(slm, trainable)
     set_trainable(detector, detector_trainable)
 
 

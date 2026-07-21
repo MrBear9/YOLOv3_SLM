@@ -129,15 +129,11 @@ class CompositeOpticalFeatureLoss(nn.Module):
         """Yield (index, slm_layer) for all SLM layers across all heads.
 
         Handles both single-head (``OpticalStudent``) and multi-head
-        (``MultiHeadOpticalStudent``) students transparently.
+        (``MultiHeadOpticalStudent``) via the ``all_slm_layers()`` interface.
         """
-        if hasattr(student, "all_slm_pairs"):
-            idx = 0
-            for slm1, slm2 in student.all_slm_pairs():
-                yield idx, slm1
-                idx += 1
-                yield idx, slm2
-                idx += 1
+        if hasattr(student, "all_slm_layers"):
+            for idx, (_, slm) in enumerate(student.all_slm_layers()):
+                yield idx, slm
         else:
             yield 0, student.slm1
             yield 1, student.slm2

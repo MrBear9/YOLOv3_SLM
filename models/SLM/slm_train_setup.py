@@ -77,7 +77,12 @@ def setup_training(is_main, use_ddp):
     detector_raw = detector
     # Layer-wise ablations freeze one SLM after DDP has registered all parameters.
     # Let DDP mark that layer unused instead of waiting for gradients that never arrive.
-    student_find_unused = not (Config.TRAIN_SLM1 and Config.TRAIN_SLM2)
+    num_layers = int(getattr(Config, "NUM_LAYERS", 2))
+    student_find_unused = not all(
+        Config.is_trainable(i) if hasattr(Config, "is_trainable")
+        else getattr(Config, f"TRAIN_SLM{i}", True)
+        for i in range(1, num_layers + 1)
+    )
     student = wrap_data_parallel(
         Config,
         student,
