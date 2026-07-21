@@ -6,6 +6,7 @@ original train_helpers_slm.py so each module stays focused and small.
 """
 
 import os
+import re
 
 import matplotlib
 matplotlib.use("Agg")
@@ -15,7 +16,7 @@ import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from models.SLM.config_slm import ConfigSLM as Config
-from models.SLM.utils_slm import save_student_best
+from models.SLM.utils_slm import save_student_best, _layer_names_from_student
 from models.runtime import log_to_file
 from models.training_utils import add_tensorboard_scalar
 
@@ -176,17 +177,11 @@ def write_slm_tensorboard_scalars(
                 writer, f"MetricsOperating/{threshold_tag}/All_Stages/{key}", val_metrics.get(key), step
             )
     if slm_stats is not None:
-        for key in (
-            "slm1_wrapped_std",
-            "slm2_wrapped_std",
-            "slm1_circular_std",
-            "slm2_circular_std",
-            "slm1_near_boundary_ratio",
-            "slm2_near_boundary_ratio",
-            "slm1_wrapped_span",
-            "slm2_wrapped_span",
-        ):
-            add_tensorboard_scalar(writer, f"SLM/{stage_name}/{key}", slm_stats.get(key), step)
+        for key, value in slm_stats.items():
+            if any(key.endswith(suffix) for suffix in (
+                "_wrapped_std", "_wrapped_span", "_circular_std", "_near_boundary_ratio",
+            )):
+                add_tensorboard_scalar(writer, f"SLM/{stage_name}/{key}", value, step)
     add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_grad_norm", phase_grad_norm, step)
     add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_update_norm", phase_update_norm, step)
     add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_update_rel", phase_update_rel, step)
@@ -207,6 +202,11 @@ def is_phase_parameter(name):
     return any(token in name for token in ("phase_raw", "amp_raw", "phase_field", "scale_params", "mlp_field"))
 
 
+def _init_layer_dict(student, value=0.0):
+    """Create a dict {layer_name: value} for all SLM layers."""
+    return {k: value for k in _layer_names_from_student(student)}
+
+
 def collect_phase_snapshot(student):
     return {
         name: param.detach().float().clone()
@@ -216,15 +216,16 @@ def collect_phase_snapshot(student):
 
 
 def collect_phase_grad_norms(student):
-    totals = {"slm1": 0.0, "slm2": 0.0}
+    # Dynamically detect layer names from student or parameter names
+    totals = _init_layer_dict(student, 0.0)
     for name, param in student.named_parameters():
         if not is_phase_parameter(name) or param.grad is None:
             continue
         for layer_name in totals:
-            if name.startswith(f"{layer_name}."):
+            if name.startswith(f"{layer_name}.") or name.startswith(f"{layer_name}_"):
                 totals[layer_name] += float(torch.sum(param.grad.detach().float().square()).item())
                 break
-    return {layer_name: total_sq ** 0.5 for layer_name, total_sq in totals.items()}
+    return {k: v ** 0.5 for k, v in totals.items()}
 
 
 def collect_phase_grad_norm(student):
@@ -246,12 +247,13 @@ def clip_phase_grad_norm(student, max_norm):
 
 
 def collect_phase_update_norms(student, snapshot):
-    update_sq = {"slm1": 0.0, "slm2": 0.0}
-    param_sq = {"slm1": 0.0, "slm2": 0.0}
+    layer_names = _layer_names_from_student(student)
+    update_sq = {k: 0.0 for k in layer_names}
+    param_sq = {k: 0.0 for k in layer_names}
     for name, param in student.named_parameters():
         if name not in snapshot:
             continue
-        layer_name = next((layer for layer in update_sq if name.startswith(f"{layer}.")), None)
+        layer_name = next((layer for layer in layer_names if name.startswith(f"{layer}.") or name.startswith(f"{layer}_")), None)
         if layer_name is None:
             continue
         current = param.detach().float()
@@ -260,11 +262,11 @@ def collect_phase_update_norms(student, snapshot):
         update_sq[layer_name] += float(torch.sum(diff * diff).item())
         param_sq[layer_name] += float(torch.sum(before * before).item())
     return {
-        layer_name: {
-            "update_norm": update_sq[layer_name] ** 0.5,
-            "update_rel": (update_sq[layer_name] ** 0.5) / ((param_sq[layer_name] ** 0.5) + 1e-12),
+        k: {
+            "update_norm": update_sq[k] ** 0.5,
+            "update_rel": (update_sq[k] ** 0.5) / ((param_sq[k] ** 0.5) + 1e-12),
         }
-        for layer_name in update_sq
+        for k in update_sq
     }
 
 
@@ -328,101 +330,33 @@ def save_current_student_checkpoint(
 
 
 def log_config():
+    """Compact config summary — details go to TensorBoard hparams."""
     log_to_file(Config, "=" * 80)
-    log_to_file(Config, "Optical SLM student training with YOLOv8-head teacher")
+    log_to_file(Config, "Optical SLM student training — key config")
     log_to_file(Config, "=" * 80)
-    log_to_file(Config, f"Dataset: {Config.YAML_PATH}")
-    log_to_file(Config, f"Output: {Config.OUTPUT_DIR}")
-    log_to_file(Config, f"Teacher detector checkpoint: {Config.TEACHER_DETECTOR_CHECKPOINT}")
-    log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}")
-    log_to_file(Config, f"Detector head type: {Config.DETECTOR_HEAD_TYPE}")
+    log_to_file(Config, f"Dataset: {Config.YAML_PATH}  |  Output: {Config.OUTPUT_DIR}")
+    log_to_file(Config, f"Teacher: {Config.TEACHER_ARCH}  |  Detector: {Config.DETECTOR_HEAD_TYPE} ({Config.DETECTION_PROTOCOL})")
+    num_layers = int(getattr(Config, "NUM_LAYERS", 2))
+    multi = bool(getattr(Config, "SLM_MULTI_HEAD_ENABLED", False))
+    log_to_file(Config, f"Optical: {num_layers}-layer, multi_head={multi}, phase_mode={Config.SLM_PHASE_PARAM_MODE}, init={Config.SLM_INIT_MODE}")
     log_to_file(
         Config,
-        f"Detection protocol: {Config.DETECTION_PROTOCOL}; anchor matching: mode={Config.ANCHOR_MATCH_MODE}, ratio_thresh={Config.ANCHOR_MATCH_RATIO_THRESH}, "
-        f"neighbor_cells={Config.ASSIGN_NEIGHBOR_CELLS}, simota_iou={Config.ANCHOR_MATCH_IOU_THRESH}, "
-        f"center_radius={Config.CENTER_PRIOR_RADIUS}, top_n={Config.SIMOTA_TOP_N}, max_assign={Config.SIMOTA_MAX_ASSIGN}",
-    )
-    if Config.DETECTION_PROTOCOL == "anchor_free_tal":
-        log_to_file(Config, "Anchor-free classification: BCE with TAL IoU soft targets")
-    log_to_file(
-        Config,
-        f"Metric conf/nms/max_det: {Config.METRIC_CONF_THRESH}/{Config.METRIC_NMS_THRESH}/{Config.METRIC_MAX_DET}",
-    )
-    log_to_file(Config, f"Classes: {Config.CLASS_NAMES}")
-    log_to_file(
-        Config,
-        f"Epochs phase_focus/detector_focus/joint_fit/norm_joint: "
-        f"{Config.PHASE_FOCUS_EPOCHS}/{Config.DETECTOR_FOCUS_EPOCHS}/"
-        f"{Config.JOINT_FIT_EPOCHS}/{Config.NORM_JOINT_EPOCHS}",
-    )
-    log_to_file(Config, f"Save paired detector best: {Config.get_detector_best_path()}")
-    log_to_file(Config, f"Save paired student mirror: {Config.get_student_best_path()}")
-    log_to_file(Config, f"Save current optical student snapshot: {Config.get_student_current_path()}")
-    log_to_file(
-        Config,
-        "Recommended inference checkpoint: detector_best.pth, because it carries the detector and "
-        "the paired student_state_dict from the same best-mAP epoch.",
+        f"Stages: phase_focus={Config.PHASE_FOCUS_EPOCHS}  detector_focus={Config.DETECTOR_FOCUS_EPOCHS}  "
+        f"joint={Config.JOINT_FIT_EPOCHS}  norm_joint={Config.NORM_JOINT_EPOCHS}",
     )
     log_to_file(
         Config,
-        f"LR phase_focus_phase/detector/joint_phase/joint_detector/norm_joint_phase/norm_joint_detector: "
-        f"{Config.PHASE_FOCUS_PHASE_PARAM_LR}/{Config.DETECTOR_LR}/"
-        f"{Config.JOINT_PHASE_PARAM_LR}/{Config.JOINT_DETECTOR_LR}/"
-        f"{Config.NORM_JOINT_PHASE_PARAM_LR}/{Config.NORM_JOINT_DETECTOR_LR}",
-    )
-    log_to_file(Config, f"Phase gradient clip norm: {Config.PHASE_GRAD_CLIP_NORM}")
-    log_to_file(Config, f"LR scheduler: {Config.LR_SCHEDULER}, eta_min={Config.ETA_MIN}")
-    log_to_file(Config, f"Validation interval: {Config.VAL_INTERVAL}")
-    log_to_file(Config, f"Visualization: split={Config.VIS_DATASET_SPLIT}, interval={Config.VIS_INTERVAL}")
-    log_to_file(Config, f"SLM init mode: {Config.SLM_INIT_MODE}")
-    log_to_file(Config, f"SLM init checkpoint: {Config.SLM_INIT_CHECKPOINT}")
-    log_to_file(
-        Config,
-        f"Student normalization: enabled={Config.ENABLE_STUDENT_NORM}, schedule={Config.STUDENT_NORM_SCHEDULE}, "
-        f"deployment_mode={Config.STUDENT_NORM_MODE}, "
-        f"percentile={Config.STUDENT_NORM_PERCENTILE}, clamp_max={Config.STUDENT_OUTPUT_CLAMP_MAX}, "
-        f"blur_kernel={Config.STUDENT_OUTPUT_BLUR_KERNEL}",
+        f"LR: phase={Config.PHASE_FOCUS_PHASE_PARAM_LR}  detector={Config.DETECTOR_LR}  "
+        f"joint_ph={Config.JOINT_PHASE_PARAM_LR}/{Config.JOINT_DETECTOR_LR}  "
+        f"norm_ph={Config.NORM_JOINT_PHASE_PARAM_LR}/{Config.NORM_JOINT_DETECTOR_LR}",
     )
     log_to_file(
         Config,
-        "Feature loss weights full/low1/low2/ssim/grad/freq/pearson: "
-        f"{Config.LOSS_FULL_WEIGHT}/{Config.LOSS_LOW1_WEIGHT}/{Config.LOSS_LOW2_WEIGHT}/"
-        f"{Config.LOSS_SSIM_WEIGHT}/{Config.LOSS_GRAD_WEIGHT}/{Config.LOSS_FREQ_WEIGHT}/{Config.LOSS_PEARSON_WEIGHT}",
+        f"Norm: {Config.STUDENT_NORM_MODE} p={Config.STUDENT_NORM_PERCENTILE} clamp={Config.STUDENT_OUTPUT_CLAMP_MAX}  "
+        f"Align: {Config.FEATURE_DOMAIN_ALIGN_MODE}  "
+        f"Loss: f={Config.FEATURE_LOSS_WEIGHT_PHASE_FOCUS}/{Config.DETECTION_LOSS_WEIGHT_PHASE_FOCUS}  "
+        f"d={Config.FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS}/{Config.DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS}  "
+        f"j={Config.FEATURE_LOSS_WEIGHT_JOINT}/{Config.DETECTION_LOSS_WEIGHT_JOINT}  "
+        f"nj={Config.FEATURE_LOSS_WEIGHT_NORM_JOINT}/{Config.DETECTION_LOSS_WEIGHT_NORM_JOINT}",
     )
-    log_to_file(Config, f"Feature loss prefilter kernel: {Config.FEATURE_LOSS_PREFILTER_KERNEL}")
-    log_to_file(
-        Config,
-        f"Phase regularization by stage: phase_focus={Config.get_phase_regularization_weights('phase_focus')}, "
-        f"detector_focus={Config.get_phase_regularization_weights('detector_focus')}, "
-        f"joint_fit={Config.get_phase_regularization_weights('joint_fit')}, "
-        f"norm_joint={Config.get_phase_regularization_weights('norm_joint')}",
-    )
-    log_to_file(
-        Config,
-        f"Feature domain alignment: enabled={Config.ENABLE_FEATURE_DOMAIN_ALIGNMENT}, "
-        f"mode={Config.FEATURE_DOMAIN_ALIGN_MODE}",
-    )
-    log_to_file(
-        Config,
-        f"Stage loss weights: phase_focus={Config.get_stage_loss_weights('phase_focus')}, "
-        f"detector_focus={Config.get_stage_loss_weights('detector_focus')}, "
-        f"joint_fit={Config.get_stage_loss_weights('joint_fit')}, "
-        f"norm_joint={Config.get_stage_loss_weights('norm_joint')}",
-    )
-    log_to_file(
-        Config,
-        f"Privacy targets corr/ssim: {Config.PRIVACY_CORR_TARGET}/{Config.PRIVACY_SSIM_TARGET}",
-    )
-    log_to_file(
-        Config,
-        f"Detector-focus early stop: enabled={Config.ENABLE_DETECTOR_FOCUS_EARLY_STOP}, "
-        f"patience={Config.DETECTOR_FOCUS_EARLY_STOP_PATIENCE}, "
-        f"min_delta={Config.DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA}",
-    )
-    log_to_file(
-        Config,
-        "Phase regularization weight/targets diversity/std/span/circular: "
-        f"{Config.LOSS_PHASE_DIVERSITY_WEIGHT}/{Config.PHASE_STD_TARGET}/"
-        f"{Config.PHASE_SPAN_TARGET}/{Config.PHASE_CIRCULAR_STD_TARGET}",
-    )
-    log_to_file(Config, "Checkpoint payload intentionally omits a 'phase' key for SLM extraction compatibility.")
+    log_to_file(Config, f"Phase reg: smooth/diversity by stage — see config for details")

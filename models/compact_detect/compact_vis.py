@@ -16,6 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import colormaps
 
+from models.compact_detect.compact_utils import _slm_layer_names
 from models.runtime import log_to_file, unwrap_module
 from models.teacher_guidance import enhance_feature_for_display
 
@@ -157,7 +158,7 @@ def add_tensorboard_visualization(writer, step, dataset, student, detector, devi
 
     student_module = unwrap_module(student)
     phase_images = []
-    for layer_name in ("slm1", "slm2"):
+    for layer_name in _slm_layer_names(student_module):
         slm = getattr(student_module, layer_name, None)
         if slm is None:
             continue

@@ -7,6 +7,38 @@ import torch.nn.functional as F
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _resolve_prop_distance(config, layer_idx):
+    """Resolve propagation distance for a given layer."""
+    if hasattr(config, "prop_distance"):
+        return config.prop_distance(layer_idx)
+    return getattr(config, f"PROP_DISTANCE_{layer_idx}", 0.10)
+
+
+def _get_phase_cfg(config, key, layer_index, default):
+    """Resolve a per-layer phase config, preferring OpticalConfig accessors.
+
+    Priority:
+    1. ``config.phase_{key}(layer_index)``  — OpticalConfig accessor
+    2. ``config.SLM{layer_index}_PHASE_{key}`` — old flat attr
+    3. ``config.SLM_PHASE_{key}`` — shared fallback
+    4. ``default``
+    """
+    accessor_name = f"phase_{key.lower()}"
+    if hasattr(config, accessor_name):
+        return int(getattr(config, accessor_name)(layer_index))
+    old_per_layer = f"SLM{layer_index}_PHASE_{key}"
+    if hasattr(config, old_per_layer):
+        return int(getattr(config, old_per_layer))
+    old_shared = f"SLM_PHASE_{key}"
+    if hasattr(config, old_shared):
+        return int(getattr(config, old_shared))
+    return int(default)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Plan C: Fourier Feature Neural Field — coordinate-based smooth phase generator
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -90,11 +122,14 @@ class MultiScalePhaseField(nn.Module):
         self.resolution = resolution
         self.layer_index = layer_index
 
-        layer_prefix = f"SLM{layer_index}_PHASE_"
-        num_scales = int(getattr(config, f"{layer_prefix}NUM_SCALES", getattr(config, "SLM_PHASE_NUM_SCALES", 4)))
-        mlp_hidden = int(getattr(config, "SLM_PHASE_MLP_HIDDEN", 64))
-        mlp_freqs = int(getattr(config, f"{layer_prefix}MLP_NUM_FREQS", getattr(config, "SLM_PHASE_MLP_NUM_FREQS", 6)))
-        mlp_layers = int(getattr(config, "SLM_PHASE_MLP_LAYERS", 3))
+        # Shared settings (may come from OpticalConfig or ConfigSLM)
+        num_scales = int(getattr(config, "SLM_PHASE_NUM_SCALES",
+                                getattr(config, "PHASE_NUM_SCALES", 4)))
+        mlp_hidden = int(getattr(config, "SLM_PHASE_MLP_HIDDEN",
+                                getattr(config, "PHASE_MLP_HIDDEN", 64)))
+        mlp_layers = int(getattr(config, "SLM_PHASE_MLP_LAYERS",
+                                getattr(config, "PHASE_MLP_LAYERS", 3)))
+        mlp_freqs = _get_phase_cfg(config, "MLP_NUM_FREQS", layer_index, 6)
 
         # --- Plan C: smooth neural-field base ---
         self.mlp_field = FourierFeatureField(
@@ -105,9 +140,10 @@ class MultiScalePhaseField(nn.Module):
         )
 
         # --- Plan B config ---
-        self.use_blockwise = bool(getattr(config, "SLM_PHASE_USE_BLOCKWISE", True))
-        block_grid = int(getattr(config, f"{layer_prefix}BLOCK_GRID", getattr(config, "SLM_PHASE_BLOCK_GRID", 4)))
-        block_overlap = int(getattr(config, f"{layer_prefix}BLOCK_OVERLAP", getattr(config, "SLM_PHASE_BLOCK_OVERLAP", 16)))
+        self.use_blockwise = bool(getattr(config, "SLM_PHASE_USE_BLOCKWISE",
+                                          getattr(config, "PHASE_USE_BLOCKWISE", True)))
+        block_grid = _get_phase_cfg(config, "BLOCK_GRID", layer_index, 4)
+        block_overlap = _get_phase_cfg(config, "BLOCK_OVERLAP", layer_index, 16)
         h, w = resolution
 
         # --- Plan A: global multi-scale parameters (coarse → medium-fine) ---
@@ -154,9 +190,7 @@ class MultiScalePhaseField(nn.Module):
             # different spatial regions can learn different frequency mixes.
             # block_inner_scales=1  →  single scale (legacy, same as before)
             # block_inner_scales=2  →  coarse (//4) + fine (//1)   lightweight
-            block_inner_scales = int(
-                getattr(config, f"{layer_prefix}BLOCK_INNER_SCALES", getattr(config, "SLM_PHASE_BLOCK_INNER_SCALES", 2))
-            )
+            block_inner_scales = _get_phase_cfg(config, "BLOCK_INNER_SCALES", layer_index, 2)
             self._block_inner_scales = max(block_inner_scales, 1)
 
             factors = [2 ** (self._block_inner_scales - k) for k in range(self._block_inner_scales - 1)] + [1]
@@ -377,12 +411,11 @@ class SLMLayer(nn.Module):
         if init_mode in {"vortex", "vortex_checkpoint"}:
             height, width, yy, xx = self._phase_grid(resolution)
             periods = max(float(getattr(self.config, "SLM_VORTEX_PERIODS", 1.0)), 1.0)
-            if self.layer_index == 1:
-                charge = float(getattr(self.config, "SLM_VORTEX_CHARGE_1", 1.0))
-                radial_scale = float(getattr(self.config, "SLM_VORTEX_RADIAL_SCALE_1", 0.35))
+            if hasattr(self.config, "vortex_init"):
+                charge, radial_scale = self.config.vortex_init(self.layer_index)
             else:
-                charge = float(getattr(self.config, "SLM_VORTEX_CHARGE_2", -1.0))
-                radial_scale = float(getattr(self.config, "SLM_VORTEX_RADIAL_SCALE_2", -0.25))
+                charge = float(getattr(self.config, f"SLM_VORTEX_CHARGE_{self.layer_index}", 1.0))
+                radial_scale = float(getattr(self.config, f"SLM_VORTEX_RADIAL_SCALE_{self.layer_index}", 0.35))
 
             if periods > 1.0:
                 # Map global coords to cell-local coords in [-1, 1]
@@ -411,12 +444,11 @@ class SLMLayer(nn.Module):
             saddle_scale = float(getattr(self.config, "SLM_DH_PSF_SADDLE_SCALE", 0.08))
             spiral_offset = float(getattr(self.config, "SLM_DH_PSF_SPIRAL_OFFSET", 0.0))
             aperture_radius = float(getattr(self.config, "SLM_DH_PSF_APERTURE_RADIUS", 2.0))
-            if self.layer_index == 1:
-                rotation = float(getattr(self.config, "SLM_DH_PSF_ROTATION_1", 0.0))
-                handedness = float(getattr(self.config, "SLM_DH_PSF_HANDEDNESS_1", 1.0))
+            if hasattr(self.config, "dh_psf_init"):
+                rotation, handedness = self.config.dh_psf_init(self.layer_index)
             else:
-                rotation = float(getattr(self.config, "SLM_DH_PSF_ROTATION_2", np.pi / 2))
-                handedness = float(getattr(self.config, "SLM_DH_PSF_HANDEDNESS_2", -1.0))
+                rotation = float(getattr(self.config, f"SLM_DH_PSF_ROTATION_{self.layer_index}", 0.0))
+                handedness = float(getattr(self.config, f"SLM_DH_PSF_HANDEDNESS_{self.layer_index}", 1.0))
 
             cell_x = torch.remainder((xx + 1.0) * periods / 2.0, 1.0) * 2.0 - 1.0
             cell_y = torch.remainder((yy + 1.0) * periods / 2.0, 1.0) * 2.0 - 1.0
@@ -534,20 +566,36 @@ class ASMPropagation(nn.Module):
 
 
 class OpticalStudent(nn.Module):
+    """N-layer optical student: SLM1→Prop1→SLM2→Prop2→...→SLM_N→Prop_N.
+
+    Number of layers controlled by ``config.NUM_LAYERS`` (default 2).
+    Each layer has its own ``SLMLayer`` and ``ASMPropagation``.
+    Backward-compatible ``slm1``/``slm2``/``prop1``/``prop2`` attributes
+    are set for the first two layers.
+    """
+
     def __init__(self, config, enable_norm=None):
         super().__init__()
         self.config = config
-        self.slm1 = SLMLayer(config, layer_index=1)
-        self.prop1 = ASMPropagation(config, config.PROP_DISTANCE_1)
-        self.slm2 = SLMLayer(config, layer_index=2)
-        self.prop2 = ASMPropagation(config, config.PROP_DISTANCE_2)
-        self.enable_norm = config.ENABLE_STUDENT_NORM if enable_norm is None else enable_norm
+        self.num_layers = int(getattr(config, "NUM_LAYERS", 2))
+
+        for layer_idx in range(1, self.num_layers + 1):
+            slm = SLMLayer(config, layer_index=layer_idx)
+            dist = _resolve_prop_distance(config, layer_idx)
+            prop = ASMPropagation(config, dist)
+            setattr(self, f"slm{layer_idx}", slm)
+            setattr(self, f"prop{layer_idx}", prop)
+
+        self.enable_norm = (
+            config.ENABLE_STUDENT_NORM if enable_norm is None else enable_norm
+        )
 
     def forward(self, intensity):
         amp = torch.sqrt(intensity.clamp(min=0) + self.config.OPTICAL_FIELD_EPS)
         field = torch.complex(amp, torch.zeros_like(amp))
-        field = self.prop1(self.slm1(field))
-        field = self.prop2(self.slm2(field))
+        for layer_idx in range(1, self.num_layers + 1):
+            field = getattr(self, f"slm{layer_idx}")(field)
+            field = getattr(self, f"prop{layer_idx}")(field)
         out = torch.abs(field) ** 2
         blur_kernel = int(getattr(self.config, "STUDENT_OUTPUT_BLUR_KERNEL", 1))
         if blur_kernel > 1:
@@ -555,22 +603,36 @@ class OpticalStudent(nn.Module):
                 blur_kernel += 1
             out = F.avg_pool2d(out, kernel_size=blur_kernel, stride=1, padding=blur_kernel // 2)
         if self.enable_norm:
-            norm_mode = str(getattr(self.config, "STUDENT_NORM_MODE", "mean")).lower()
-            if norm_mode == "max":
-                scale = out.amax(dim=[2, 3], keepdim=True)
-            elif norm_mode == "percentile":
-                flat = out.flatten(2)
-                q = float(getattr(self.config, "STUDENT_NORM_PERCENTILE", 0.995))
-                scale = torch.quantile(flat, q, dim=2, keepdim=True).view(out.shape[0], out.shape[1], 1, 1)
-            elif norm_mode == "none":
-                scale = torch.ones_like(out.mean(dim=[2, 3], keepdim=True))
-            else:
-                scale = out.mean(dim=[2, 3], keepdim=True)
-            out = out / (scale + self.config.OPTICAL_NORM_EPS)
-            clamp_max = float(getattr(self.config, "STUDENT_OUTPUT_CLAMP_MAX", 0.0))
-            if clamp_max > 0:
-                out = out.clamp(max=clamp_max)
+            out = self._apply_norm(out)
         return out
+
+    def _apply_norm(self, out):
+        """Per-sample normalisation (shared with MultiHeadOpticalStudent)."""
+        norm_mode = str(getattr(self.config, "STUDENT_NORM_MODE", "mean")).lower()
+        if norm_mode == "max":
+            scale = out.amax(dim=[2, 3], keepdim=True)
+        elif norm_mode == "percentile":
+            flat = out.flatten(2)
+            q = float(getattr(self.config, "STUDENT_NORM_PERCENTILE", 0.995))
+            scale = torch.quantile(flat, q, dim=2, keepdim=True).view(
+                out.shape[0], out.shape[1], 1, 1
+            )
+        elif norm_mode == "none":
+            scale = torch.ones_like(out.mean(dim=[2, 3], keepdim=True))
+        else:
+            scale = out.mean(dim=[2, 3], keepdim=True)
+        out = out / (scale + self.config.OPTICAL_NORM_EPS)
+        clamp_max = float(getattr(self.config, "STUDENT_OUTPUT_CLAMP_MAX", 0.0))
+        if clamp_max > 0:
+            out = out.clamp(max=clamp_max)
+        return out
+
+    # ── iteration interface (used by losses / stats / save) ──────────────
+
+    def all_slm_layers(self):
+        """Yield ``(name, slm_layer)`` for every SLM layer."""
+        for i in range(1, self.num_layers + 1):
+            yield f"slm{i}", getattr(self, f"slm{i}")
 
 
 class OpticalStudentWithDetector(nn.Module):
@@ -620,7 +682,8 @@ if __name__ == "__main__":
     for row, periods in enumerate((1.0, 2.0)):
         Config.SLM_DH_PSF_PERIODS = periods
         student = OpticalStudent(Config)
-        for col, layer_name in enumerate(("slm1", "slm2")):
+        layer_names = [name for name, _ in student.all_slm_layers()][:2]  # slm1, slm2
+        for col, layer_name in enumerate(layer_names):
             phase = getattr(student, layer_name).wrapped_phase().detach().squeeze().cpu().numpy()
             ax = axes[row, col]
             im = ax.imshow(phase, cmap="turbo", vmin=0.0, vmax=2 * np.pi)

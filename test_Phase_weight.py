@@ -71,48 +71,60 @@ def safe_name(name):
 
 
 def find_phase_layers(state_dict, checkpoint_top=None):
-    """Find phase tensors in state dict or checkpoint top-level keys.
+    """Find pre-computed wrapped phases at checkpoint top level.
+
+    Looks for ``{name}_wrapped_phase`` keys (new save format) or legacy
+    ``*_wrapped_slm_0_2pi`` keys.  Returns a dict, grouping multi-head
+    entries under their base layer name when possible.
 
     Priority:
-    1. Pre-computed ``slm*_wrapped_phase`` keys at checkpoint top level
-       (saved by the updated utils_slm.save_*_best functions).
-    2. Legacy ``*_wrapped_slm_0_2pi`` keys generated from old ``phase_raw``.
-    3. Raw ``phase_raw`` tensors inside the state dict (old checkpoints).
+    1. ``slm*_wrapped_phase`` — pre-computed by save_*_best
+    2. ``*_wrapped_slm_0_2pi`` — legacy format
+    3. Raw ``phase_raw`` tensors in state dict (old checkpoints)
     """
     phase_layers = {}
 
-    # Priority 1 & 2: pre-computed wrapped phases at checkpoint top level
     if isinstance(checkpoint_top, dict):
         for key, value in checkpoint_top.items():
             if not isinstance(value, torch.Tensor):
                 continue
-            # New format: slm1_wrapped_phase, slm2_wrapped_phase
             if key.endswith("_wrapped_phase") and value.ndim in (2, 3, 4):
                 phase_layers[key] = value
-            # Legacy format: phase_raw replaced with wrapped_slm_0_2pi
             elif "wrapped_slm_0_2pi" in key and value.ndim in (2, 3, 4):
                 phase_layers[key] = value
 
     if phase_layers:
-        return phase_layers
+        # Sort: slm1, slm2, slm3, slm4
+        return dict(sorted(phase_layers.items(), key=_layer_sort_key))
 
-    # Fallback: search state dict for raw phase tensors
-    keywords = ("phase_raw", "phase", "slm")
+    # Fallback: search state dict
     for key, value in state_dict.items():
         if not isinstance(value, torch.Tensor):
             continue
-        key_lower = key.lower()
-        if any(keyword in key_lower for keyword in keywords):
-            if value.ndim in (2, 3, 4) or (value.ndim == 1 and int(np.sqrt(value.numel())) ** 2 == value.numel()):
+        if any(kw in key.lower() for kw in ("phase_raw", "phase", "slm")):
+            if value.ndim in (2, 3, 4):
                 phase_layers[key] = value
     if phase_layers:
-        return phase_layers
+        return dict(sorted(phase_layers.items(), key=_layer_sort_key))
 
-    # Last resort: find any 1×1×H×W tensor
+    # Last resort: 1×1×H×W tensors
     for key, value in state_dict.items():
-        if isinstance(value, torch.Tensor) and value.ndim == 4 and value.shape[0] == 1 and value.shape[1] == 1:
+        if isinstance(value, torch.Tensor) and value.ndim == 4 and value.shape[:2] == (1, 1):
             phase_layers[key] = value
-    return phase_layers
+    return dict(sorted(phase_layers.items(), key=_layer_sort_key))
+
+
+def _layer_sort_key(item):
+    """Sort key: slm1 < slm2 < slm3 < slm4, heads grouped after base layer."""
+    name = item[0] if isinstance(item, tuple) else item
+    # Extract layer number: slm1, slm2_head0 → 1
+    import re
+    m = re.search(r'slm(\d+)', name)
+    layer_num = int(m.group(1)) if m else 999
+    # Within same layer, sort by head index if present
+    m2 = re.search(r'head(\d+)', name)
+    head_num = int(m2.group(1)) if m2 else 0
+    return (layer_num, head_num)
 
 
 def save_histogram(raw_phase, wrapped_phase, centered_phase, layer_name, output_dir):
@@ -171,21 +183,62 @@ def write_layer_info(path, layer_name, original_shape, raw_phase, wrapped_phase,
 
 
 def save_combined_plot(saved_layers, output_dir):
+    """Create a combined wrapped-phase plot for all layers (2+)."""
     if len(saved_layers) < 2:
         return None
-    path = output_dir / "combined_wrapped_phase_plot.png"
-    layers = saved_layers[:2]
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    for ax, item in zip(axes, layers):
+
+    # Group by logical layer: prefer base names without _head suffix
+    base_layers = []
+    seen_bases = set()
+    for item in saved_layers:
+        base = _base_layer_name(item["name"])
+        if base not in seen_bases:
+            base_layers.append(item)
+            seen_bases.add(base)
+
+    n = len(base_layers)
+    if n < 2:
+        return None
+
+    cols = min(n, 4)
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 6, rows * 5.5))
+    flat_axes = axes.ravel() if hasattr(axes, "ravel") else [axes]
+
+    for idx, item in enumerate(base_layers):
+        ax = flat_axes[idx]
         data = np.load(item["wrapped_npy_path"])
         im = ax.imshow(data, cmap="viridis", vmin=0.0, vmax=TWO_PI)
-        ax.set_title(f"{item['name']}\nstd={item['wrapped_std']:.4f}, range={item['wrapped_range']:.4f}")
+        ax.set_title(f"{item['name']}\nstd={item['wrapped_std']:.4f} span={item['wrapped_range']:.4f}")
         ax.axis("off")
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="phase (rad)")
+
+    for idx in range(n, len(flat_axes)):
+        flat_axes[idx].axis("off")
+
     plt.tight_layout()
+    path = output_dir / "combined_wrapped_phase_plot.png"
     plt.savefig(path, dpi=220, bbox_inches="tight")
     plt.close(fig)
     return path
+
+
+def _base_layer_name(name):
+    """Return the canonical base layer name: slm1_head0 → slm1, slm1 → slm1."""
+    import re
+    m = re.match(r'(slm\d+)', name)
+    return m.group(1) if m else name
+
+
+def _detect_num_heads(checkpoint):
+    """Count distinct head indices from _wrapped_phase keys."""
+    import re
+    heads = set()
+    for key in checkpoint:
+        m = re.search(r'head(\d+)_wrapped_phase', key)
+        if m:
+            heads.add(int(m.group(1)))
+    return max(heads) + 1 if heads else 1
 
 
 def save_phase_layers(pth_file_path, output_dir="output/optical_phase_layers"):
@@ -194,15 +247,19 @@ def save_phase_layers(pth_file_path, output_dir="output/optical_phase_layers"):
     checkpoint = torch_load_safe(pth_file_path)
     state_dict, source = extract_state_dict(checkpoint)
 
+    # Detect num_layers metadata
+    num_layers = 2
+    num_heads = 1
+    if isinstance(checkpoint, dict):
+        num_layers = int(checkpoint.get("num_layers", 2))
+        num_heads = int(checkpoint.get("num_heads", 1) if "num_heads" in checkpoint else _detect_num_heads(checkpoint))
+
     print("=" * 70)
     print("Optical SLM phase extraction")
     print("=" * 70)
     print(f"Model file: {pth_file_path}")
     print(f"Output dir: {output_dir.resolve()}")
-    print(f"Checkpoint type: {type(checkpoint)}")
-    print(f"State dict source: {source}")
-    if isinstance(checkpoint, dict):
-        print(f"Top-level keys: {list(checkpoint.keys())}")
+    print(f"Layers: {num_layers}  |  Heads: {num_heads}")
 
     phase_layers = find_phase_layers(state_dict, checkpoint_top=checkpoint)
 

@@ -4,10 +4,11 @@ from datetime import datetime
 import numpy as np
 import torch
 
+from models.SLM.config_optical import OpticalConfig
 from models.yolov8.config_v8 import load_anchor_groups, load_class_names, resolve_project_path
 
 
-class ConfigSLM:
+class ConfigSLM(OpticalConfig):
     # =========================================================================
     # Common paths, device, I/O
     # =========================================================================
@@ -21,7 +22,7 @@ class ConfigSLM:
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light_free_blance_0.8309/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -30,14 +31,14 @@ class ConfigSLM:
     # Training scale
     # =========================================================================
     IMG_SIZE = 640
-    BATCH_SIZE = 16
+    BATCH_SIZE = 8
     STRIDES = [8, 16, 32]
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
-    PHASE_FOCUS_EPOCHS = 145
-    DETECTOR_FOCUS_EPOCHS = 35
-    JOINT_FIT_EPOCHS = 100
-    NORM_JOINT_EPOCHS = 30
+    PHASE_FOCUS_EPOCHS = 245
+    DETECTOR_FOCUS_EPOCHS = 135
+    JOINT_FIT_EPOCHS = 0
+    NORM_JOINT_EPOCHS = 0
     EPOCHS = PHASE_FOCUS_EPOCHS + DETECTOR_FOCUS_EPOCHS + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
 
     # =========================================================================
@@ -45,8 +46,7 @@ class ConfigSLM:
     # =========================================================================
     WAVELENGTH = 532e-9
     PIXEL_SIZE = 6.4e-6
-    PROP_DISTANCE_1 = 0.10 # 10cm
-    PROP_DISTANCE_2 = 0.10 # 10cm
+    # PROP_DISTANCE per-layer: see OpticalConfig.prop_distance(layer_idx)
     # Options: "phase", "amp_phase".
     SLM_MODE = "phase"
     RESOLUTION = (640, 640)
@@ -58,30 +58,15 @@ class ConfigSLM:
     # "multiscale_mlp": Plan A+C multi-scale pyramid + neural-field MLP
     SLM_PHASE_PARAM_MODE = "multiscale_mlp"
 
-    # Shared phase-field settings.
-    SLM_PHASE_NUM_SCALES = 5
-    SLM_PHASE_USE_BLOCKWISE = True
-    SLM_PHASE_MLP_HIDDEN = 32
-    SLM_PHASE_MLP_LAYERS = 2
+    # Per-layer block/freq overrides: see OpticalConfig accessors
+    #   phase_block_grid(layer_idx), phase_mlp_num_freqs(layer_idx), …
+    # Per-layer trainable flag and LR multipliers: see OpticalConfig accessors
+    #   is_trainable(layer_idx), layer_lr_mult(layer_idx, stage)
 
-    # SLM1: main modulation and fine spatial detail.
-    SLM1_PHASE_BLOCK_GRID = 6
-    SLM1_PHASE_BLOCK_OVERLAP = 8
-    SLM1_PHASE_BLOCK_INNER_SCALES = 3
-    SLM1_PHASE_MLP_NUM_FREQS = 10
-
-    # SLM2: coarser post-propagation residual shaping.
-    SLM2_PHASE_BLOCK_GRID = 4
-    SLM2_PHASE_BLOCK_OVERLAP = 8
-    SLM2_PHASE_BLOCK_INNER_SCALES = 2
-    SLM2_PHASE_MLP_NUM_FREQS = 6
-    # Layer-wise ablation controls. Keep both enabled for normal two-SLM training.
-    TRAIN_SLM1 = True
-    TRAIN_SLM2 = True
-    # Per-layer phase learning-rate multipliers; 1.0 preserves the shared-LR baseline.
-    SLM2_PHASE_FOCUS_LR_MULT = 1.0
-    SLM2_JOINT_LR_MULT = 1.0
-    SLM2_NORM_JOINT_LR_MULT = 1.0
+    # -------- Plan D: multi-head virtual SLM (training-time capacity boost) --------
+    SLM_MULTI_HEAD_ENABLED = False
+    SLM_MULTI_HEAD_NUM_HEADS = 4
+    SLM_MULTI_HEAD_FUSION = "mean"
 
     # -------- Student normalization --------
     ENABLE_STUDENT_NORM = True
@@ -101,10 +86,7 @@ class ConfigSLM:
     SLM_INIT_MODE = "vortex"
     SLM_INIT_NOISE_STD = 0.02
     SLM_INIT_CHECKPOINT = r"output/OpticalSLM_YOLOv8Head_student/optical_student_best.pth"
-    SLM_VORTEX_CHARGE_1 = 1.0
-    SLM_VORTEX_CHARGE_2 = -1.0
-    SLM_VORTEX_RADIAL_SCALE_1 = 0.35
-    SLM_VORTEX_RADIAL_SCALE_2 = -0.25
+    # Per-layer vortex/DH-PSF init: see OpticalConfig.vortex_init(layer_idx), dh_psf_init(layer_idx)
     # Number of tiled vortex phase cells: 1.0 -> single cell, 2.0 -> 2 x 2 array, 3.0 -> 3 x 3 array.
     SLM_VORTEX_PERIODS = 1.0
     # When True and periods > 1, alternate charge sign in a checkerboard across cells.
@@ -117,10 +99,7 @@ class ConfigSLM:
     SLM_DH_PSF_SADDLE_SCALE = 0.08
     SLM_DH_PSF_SPIRAL_OFFSET = 0.0
     SLM_DH_PSF_APERTURE_RADIUS = 2.0
-    SLM_DH_PSF_ROTATION_1 = 0.0
-    SLM_DH_PSF_ROTATION_2 = np.pi / 2
-    SLM_DH_PSF_HANDEDNESS_1 = 1.0
-    SLM_DH_PSF_HANDEDNESS_2 = -1.0
+    # Per-layer rotation/handedness: see OpticalConfig.dh_psf_init(layer_idx)
 
     # =========================================================================
     # TEACHER_ARCH  (must match teacher-training checkpoint)
@@ -243,7 +222,7 @@ class ConfigSLM:
     LOSS_PEARSON_WEIGHT = 0.45
     LOSS_PHASE_SMOOTH_WEIGHT = 0.000
     LOSS_PHASE_DIVERSITY_WEIGHT = 0.015
-    PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.003
+    PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.001
     PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS = 0.03
     PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS = 0.0
     PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS = 0.0
@@ -261,15 +240,15 @@ class ConfigSLM:
     PRIVACY_SSIM_TARGET = 0.20
 
     # -------- Phase quality constraints --------
-    PHASE_STD_TARGET = 0.60
-    PHASE_SPAN_TARGET = 3.50
-    PHASE_CIRCULAR_STD_TARGET = 0.50
+    PHASE_STD_TARGET = 0.40 # 0.60 -> 0.40
+    PHASE_SPAN_TARGET = 2.50 # 3.50 -> 2.50
+    PHASE_CIRCULAR_STD_TARGET = 0.35 # 0.50 -> 0.35
     PHASE_NEAR_BOUNDARY_LIMIT = 0.85
     PHASE_NEAR_BOUNDARY_EPS = 0.05
-    PHASE_BEST_MIN_STD = 0.10
-    PHASE_BEST_MIN_CIRCULAR_STD = 0.15
+    PHASE_BEST_MIN_STD = 0.01 # 0.10 -> 0.01
+    PHASE_BEST_MIN_CIRCULAR_STD = 0.01 # 0.15 -> 0.01
     PHASE_BEST_MAX_NEAR_BOUNDARY_RATIO = 0.90
-    PHASE_BEST_MIN_SPAN = 1.10
+    PHASE_BEST_MIN_SPAN = 0.01 # 0.01 -> 0.01
 
     # =========================================================================
     # Stage loss weights
@@ -351,10 +330,10 @@ class ConfigSLM:
     # Data loading
     # =========================================================================
     _IS_WINDOWS = os.name == "nt"
-    NUM_WORKERS = (4 if _IS_WINDOWS else min(12, os.cpu_count() or 0))
+    NUM_WORKERS = (0 if _IS_WINDOWS else min(12, os.cpu_count() or 0))
     PIN_MEMORY = torch.cuda.is_available()
     PERSISTENT_WORKERS = (not _IS_WINDOWS)
-    PREFETCH_FACTOR = (2 if _IS_WINDOWS else 4)
+    PREFETCH_FACTOR = (0 if _IS_WINDOWS else 4)
     ENABLE_CHANNELS_LAST = True
     ENABLE_TF32 = True
     ENABLE_CUDNN_BENCHMARK = True
@@ -373,141 +352,7 @@ class ConfigSLM:
     SKIP_FILE_LOG_MESSAGES = ("best checkpoint updated",)
 
     @classmethod
-    def apply_runtime_overrides(cls):
-        overrides = {
-            "OPTICAL_SLM_YAML_PATH": ("YAML_PATH", str),
-            "OPTICAL_SLM_OUTPUT_DIR": ("OUTPUT_DIR", str),
-            "OPTICAL_SLM_TEACHER_DETECTOR_CHECKPOINT": ("TEACHER_DETECTOR_CHECKPOINT", str),
-            "OPTICAL_SLM_DETECTOR_HEAD_TYPE": ("DETECTOR_HEAD_TYPE", str),
-            "OPTICAL_SLM_DETECTION_PROTOCOL": ("DETECTION_PROTOCOL", str),
-            "OPTICAL_SLM_ANCHOR_FREE_HEAD_CH": ("ANCHOR_FREE_HEAD_CH", int),
-            "OPTICAL_SLM_ANCHOR_FREE_REG_MAX": ("ANCHOR_FREE_REG_MAX", int),
-            "OPTICAL_SLM_ANCHOR_FREE_P2_FUSION_CH": ("ANCHOR_FREE_P2_FUSION_CH", int),
-            "OPTICAL_SLM_ANCHOR_FREE_P2_HEAD_CH": ("ANCHOR_FREE_P2_HEAD_CH", int),
-            "OPTICAL_SLM_INIT_MODE": ("SLM_INIT_MODE", str),
-            "OPTICAL_SLM_INIT_CHECKPOINT": ("SLM_INIT_CHECKPOINT", str),
-            "OPTICAL_SLM_VORTEX_PERIODS": ("SLM_VORTEX_PERIODS", float),
-            "OPTICAL_SLM_VORTEX_CHARGE_1": ("SLM_VORTEX_CHARGE_1", float),
-            "OPTICAL_SLM_VORTEX_CHARGE_2": ("SLM_VORTEX_CHARGE_2", float),
-            "OPTICAL_SLM_VORTEX_RADIAL_SCALE_1": ("SLM_VORTEX_RADIAL_SCALE_1", float),
-            "OPTICAL_SLM_VORTEX_RADIAL_SCALE_2": ("SLM_VORTEX_RADIAL_SCALE_2", float),
-            "OPTICAL_SLM_DH_PSF_PERIODS": ("SLM_DH_PSF_PERIODS", float),
-            "OPTICAL_SLM_DH_PSF_CHARGE": ("SLM_DH_PSF_CHARGE", float),
-            "OPTICAL_SLM_DH_PSF_RADIAL_SCALE": ("SLM_DH_PSF_RADIAL_SCALE", float),
-            "OPTICAL_SLM_DH_PSF_SADDLE_SCALE": ("SLM_DH_PSF_SADDLE_SCALE", float),
-            "OPTICAL_SLM_DH_PSF_SPIRAL_OFFSET": ("SLM_DH_PSF_SPIRAL_OFFSET", float),
-            "OPTICAL_SLM_DH_PSF_APERTURE_RADIUS": ("SLM_DH_PSF_APERTURE_RADIUS", float),
-            "OPTICAL_SLM_DH_PSF_ROTATION_1": ("SLM_DH_PSF_ROTATION_1", float),
-            "OPTICAL_SLM_DH_PSF_ROTATION_2": ("SLM_DH_PSF_ROTATION_2", float),
-            "OPTICAL_SLM_DH_PSF_HANDEDNESS_1": ("SLM_DH_PSF_HANDEDNESS_1", float),
-            "OPTICAL_SLM_DH_PSF_HANDEDNESS_2": ("SLM_DH_PSF_HANDEDNESS_2", float),
-            "OPTICAL_SLM_TEACHER_ARCH": ("TEACHER_ARCH", str),
-            "OPTICAL_SLM_TEACHER_V1_BASE_CHANNELS": ("TEACHER_V1_BASE_CHANNELS", int),
-            "OPTICAL_SLM_TEACHER_V1_C2F_BLOCKS": ("TEACHER_V1_C2F_BLOCKS", int),
-            "OPTICAL_SLM_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),
-            "OPTICAL_SLM_TEACHER_V2_C2F_BLOCKS": ("TEACHER_V2_C2F_BLOCKS", int),
-            "OPTICAL_SLM_TEACHER_V2_SYNTHETIC_WAVELENGTHS": ("TEACHER_V2_SYNTHETIC_WAVELENGTHS", int),
-            "OPTICAL_SLM_TEACHER_V2_COMPLEX_KERNEL_SIZE": ("TEACHER_V2_COMPLEX_KERNEL_SIZE", int),
-            "OPTICAL_SLM_TEACHER_V3_BASE_CHANNELS": ("TEACHER_V3_BASE_CHANNELS", int),
-            "OPTICAL_SLM_TEACHER_V3_C2F_BLOCKS": ("TEACHER_V3_C2F_BLOCKS", int),
-            "OPTICAL_SLM_YOLO_LIGHT_BASE_CH": ("YOLO_LIGHT_BASE_CH", int),
-            "OPTICAL_SLM_TEACHER_V3_RESIDUAL_SCALE": ("TEACHER_V3_RESIDUAL_SCALE", float),
-            "OPTICAL_SLM_ANCHOR_MATCH_MODE": ("ANCHOR_MATCH_MODE", str),
-            "OPTICAL_SLM_ANCHOR_MATCH_IOU_THRESH": ("ANCHOR_MATCH_IOU_THRESH", float),
-            "OPTICAL_SLM_CENTER_PRIOR_RADIUS": ("CENTER_PRIOR_RADIUS", float),
-            "OPTICAL_SLM_CENTER_PRIOR_WEIGHT": ("CENTER_PRIOR_WEIGHT", float),
-            "OPTICAL_SLM_SIMOTA_TOP_N": ("SIMOTA_TOP_N", int),
-            "OPTICAL_SLM_SIMOTA_MAX_ASSIGN": ("SIMOTA_MAX_ASSIGN", int),
-            "OPTICAL_SLM_SIMOTA_OBJ_POS_THRESH": ("SIMOTA_OBJ_POS_THRESH", float),
-            "OPTICAL_SLM_STUDENT_NORM_SCHEDULE": ("STUDENT_NORM_SCHEDULE", str),
-            "OPTICAL_SLM_STUDENT_NORM_MODE": ("STUDENT_NORM_MODE", str),
-            "OPTICAL_SLM_STUDENT_NORM_PERCENTILE": ("STUDENT_NORM_PERCENTILE", float),
-            "OPTICAL_SLM_STUDENT_OUTPUT_CLAMP_MAX": ("STUDENT_OUTPUT_CLAMP_MAX", float),
-            "OPTICAL_SLM_STUDENT_OUTPUT_BLUR_KERNEL": ("STUDENT_OUTPUT_BLUR_KERNEL", int),
-            "OPTICAL_SLM_SLM1_PHASE_BLOCK_GRID": ("SLM1_PHASE_BLOCK_GRID", int),
-            "OPTICAL_SLM_SLM1_PHASE_BLOCK_INNER_SCALES": ("SLM1_PHASE_BLOCK_INNER_SCALES", int),
-            "OPTICAL_SLM_SLM1_PHASE_MLP_NUM_FREQS": ("SLM1_PHASE_MLP_NUM_FREQS", int),
-            "OPTICAL_SLM_SLM2_PHASE_BLOCK_GRID": ("SLM2_PHASE_BLOCK_GRID", int),
-            "OPTICAL_SLM_SLM2_PHASE_BLOCK_INNER_SCALES": ("SLM2_PHASE_BLOCK_INNER_SCALES", int),
-            "OPTICAL_SLM_SLM2_PHASE_MLP_NUM_FREQS": ("SLM2_PHASE_MLP_NUM_FREQS", int),
-            "OPTICAL_SLM_PHASE_FOCUS_PHASE_PARAM_LR": ("PHASE_FOCUS_PHASE_PARAM_LR", float),
-            "OPTICAL_SLM_SLM2_PHASE_FOCUS_LR_MULT": ("SLM2_PHASE_FOCUS_LR_MULT", float),
-            "OPTICAL_SLM_DETECTOR_LR": ("DETECTOR_LR", float),
-            "OPTICAL_SLM_JOINT_PHASE_PARAM_LR": ("JOINT_PHASE_PARAM_LR", float),
-            "OPTICAL_SLM_SLM2_JOINT_LR_MULT": ("SLM2_JOINT_LR_MULT", float),
-            "OPTICAL_SLM_JOINT_DETECTOR_LR": ("JOINT_DETECTOR_LR", float),
-            "OPTICAL_SLM_NORM_JOINT_PHASE_PARAM_LR": ("NORM_JOINT_PHASE_PARAM_LR", float),
-            "OPTICAL_SLM_SLM2_NORM_JOINT_LR_MULT": ("SLM2_NORM_JOINT_LR_MULT", float),
-            "OPTICAL_SLM_NORM_JOINT_DETECTOR_LR": ("NORM_JOINT_DETECTOR_LR", float),
-            "OPTICAL_SLM_PHASE_GRAD_CLIP_NORM": ("PHASE_GRAD_CLIP_NORM", float),
-            "OPTICAL_SLM_LOSS_SSIM_WEIGHT": ("LOSS_SSIM_WEIGHT", float),
-            "OPTICAL_SLM_LOSS_GRAD_WEIGHT": ("LOSS_GRAD_WEIGHT", float),
-            "OPTICAL_SLM_LOSS_FREQ_WEIGHT": ("LOSS_FREQ_WEIGHT", float),
-            "OPTICAL_SLM_LOSS_PEARSON_WEIGHT": ("LOSS_PEARSON_WEIGHT", float),
-            "OPTICAL_SLM_FEATURE_LOSS_WEIGHT_PHASE_FOCUS": ("FEATURE_LOSS_WEIGHT_PHASE_FOCUS", float),
-            "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_PHASE_FOCUS": ("DETECTION_LOSS_WEIGHT_PHASE_FOCUS", float),
-            "OPTICAL_SLM_RESPONSE_LOSS_WEIGHT_PHASE_FOCUS": ("RESPONSE_LOSS_WEIGHT_PHASE_FOCUS", float),
-            "OPTICAL_SLM_PRIVACY_LOSS_WEIGHT_PHASE_FOCUS": ("PRIVACY_LOSS_WEIGHT_PHASE_FOCUS", float),
-            "OPTICAL_SLM_FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS": ("FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS", float),
-            "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS": ("DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS", float),
-            "OPTICAL_SLM_RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS": ("RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS", float),
-            "OPTICAL_SLM_PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS": ("PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS", float),
-            "OPTICAL_SLM_FEATURE_LOSS_WEIGHT_JOINT": ("FEATURE_LOSS_WEIGHT_JOINT", float),
-            "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_JOINT": ("DETECTION_LOSS_WEIGHT_JOINT", float),
-            "OPTICAL_SLM_RESPONSE_LOSS_WEIGHT_JOINT": ("RESPONSE_LOSS_WEIGHT_JOINT", float),
-            "OPTICAL_SLM_PRIVACY_LOSS_WEIGHT_JOINT": ("PRIVACY_LOSS_WEIGHT_JOINT", float),
-            "OPTICAL_SLM_FEATURE_LOSS_WEIGHT_NORM_JOINT": ("FEATURE_LOSS_WEIGHT_NORM_JOINT", float),
-            "OPTICAL_SLM_DETECTION_LOSS_WEIGHT_NORM_JOINT": ("DETECTION_LOSS_WEIGHT_NORM_JOINT", float),
-            "OPTICAL_SLM_RESPONSE_LOSS_WEIGHT_NORM_JOINT": ("RESPONSE_LOSS_WEIGHT_NORM_JOINT", float),
-            "OPTICAL_SLM_PRIVACY_LOSS_WEIGHT_NORM_JOINT": ("PRIVACY_LOSS_WEIGHT_NORM_JOINT", float),
-            "OPTICAL_SLM_PHASE_SMOOTH_WEIGHT_PHASE_FOCUS": ("PHASE_SMOOTH_WEIGHT_PHASE_FOCUS", float),
-            "OPTICAL_SLM_PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS": ("PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS", float),
-            "OPTICAL_SLM_PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS": ("PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS", float),
-            "OPTICAL_SLM_PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS": ("PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS", float),
-            "OPTICAL_SLM_PHASE_SMOOTH_WEIGHT_JOINT": ("PHASE_SMOOTH_WEIGHT_JOINT", float),
-            "OPTICAL_SLM_PHASE_DIVERSITY_WEIGHT_JOINT": ("PHASE_DIVERSITY_WEIGHT_JOINT", float),
-            "OPTICAL_SLM_PHASE_SMOOTH_WEIGHT_NORM_JOINT": ("PHASE_SMOOTH_WEIGHT_NORM_JOINT", float),
-            "OPTICAL_SLM_PHASE_DIVERSITY_WEIGHT_NORM_JOINT": ("PHASE_DIVERSITY_WEIGHT_NORM_JOINT", float),
-            "OPTICAL_SLM_FEATURE_DOMAIN_ALIGN_MODE": ("FEATURE_DOMAIN_ALIGN_MODE", str),
-            "OPTICAL_SLM_PRIVACY_CORR_TARGET": ("PRIVACY_CORR_TARGET", float),
-            "OPTICAL_SLM_PRIVACY_SSIM_TARGET": ("PRIVACY_SSIM_TARGET", float),
-            "OPTICAL_SLM_DETECTOR_FOCUS_EARLY_STOP_PATIENCE": ("DETECTOR_FOCUS_EARLY_STOP_PATIENCE", int),
-            "OPTICAL_SLM_DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA": ("DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA", float),
-            "OPTICAL_SLM_LR_SCHEDULER": ("LR_SCHEDULER", str),
-            "OPTICAL_SLM_ETA_MIN": ("ETA_MIN", float),
-            "OPTICAL_SLM_BATCH_SIZE": ("BATCH_SIZE", int),
-            "OPTICAL_SLM_TRAIN_DATASET_REPEAT": ("TRAIN_DATASET_REPEAT", int),
-            "OPTICAL_SLM_PHASE_FOCUS_EPOCHS": ("PHASE_FOCUS_EPOCHS", int),
-            "OPTICAL_SLM_DETECTOR_FOCUS_EPOCHS": ("DETECTOR_FOCUS_EPOCHS", int),
-            "OPTICAL_SLM_JOINT_FIT_EPOCHS": ("JOINT_FIT_EPOCHS", int),
-            "OPTICAL_SLM_NORM_JOINT_EPOCHS": ("NORM_JOINT_EPOCHS", int),
-            "OPTICAL_SLM_NUM_WORKERS": ("NUM_WORKERS", int),
-            "OPTICAL_SLM_PHASE_PARAM_MODE": ("SLM_PHASE_PARAM_MODE", str),
-        }
-        for env_name, (attr, caster) in overrides.items():
-            value = os.environ.get(env_name)
-            if value:
-                setattr(cls, attr, caster(value))
-
-        align = os.environ.get("OPTICAL_SLM_ENABLE_FEATURE_DOMAIN_ALIGNMENT")
-        if align:
-            cls.ENABLE_FEATURE_DOMAIN_ALIGNMENT = align.strip().lower() in {"1", "true", "yes", "on"}
-        early_stop = os.environ.get("OPTICAL_SLM_ENABLE_DETECTOR_FOCUS_EARLY_STOP")
-        if early_stop:
-            cls.ENABLE_DETECTOR_FOCUS_EARLY_STOP = early_stop.strip().lower() in {"1", "true", "yes", "on"}
-        bool_overrides = {
-            "OPTICAL_SLM_VORTEX_ALTERNATE_CHARGE": "SLM_VORTEX_ALTERNATE_CHARGE",
-            "OPTICAL_SLM_TRAIN_SLM1": "TRAIN_SLM1",
-            "OPTICAL_SLM_TRAIN_SLM2": "TRAIN_SLM2",
-        }
-        for env_name, attr in bool_overrides.items():
-            value = os.environ.get(env_name)
-            if value:
-                setattr(cls, attr, value.strip().lower() in {"1", "true", "yes", "on"})
-
-    @classmethod
     def initialize(cls):
-        cls.apply_runtime_overrides()
         cls.EPOCHS = cls.PHASE_FOCUS_EPOCHS + cls.DETECTOR_FOCUS_EPOCHS + cls.JOINT_FIT_EPOCHS + cls.NORM_JOINT_EPOCHS
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
         cls.OUTPUT_DIR = resolve_project_path(cls.OUTPUT_DIR)
