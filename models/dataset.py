@@ -69,6 +69,8 @@ class YOLODataset(Dataset):
         self.augment = split == "train" and bool(getattr(config, "TRAIN_AUGMENT", False))
         self.copy_paste_enabled = self.augment and bool(getattr(config, "SOLDIER_COPY_PASTE", False))
         self.copy_paste_class = int(getattr(config, "SOLDIER_CLASS_ID", 1))
+        self._current_epoch = mp.Value("q", 0)
+        self._copy_paste_force_disabled = mp.Value("b", False)
         self._copy_paste_donors = []
         self._copy_paste_attempted = mp.Value("q", 0)
         self._copy_paste_images = mp.Value("q", 0)
@@ -163,6 +165,20 @@ class YOLODataset(Dataset):
                     counter.value = 0
         return values
 
+    def set_epoch(self, epoch):
+        with self._current_epoch.get_lock():
+            self._current_epoch.value = int(epoch)
+
+    @property
+    def copy_paste_force_disabled(self):
+        return bool(self._copy_paste_force_disabled.value)
+
+    def disable_copy_paste(self):
+        with self._copy_paste_force_disabled.get_lock():
+            was_enabled = not self._copy_paste_force_disabled.value
+            self._copy_paste_force_disabled.value = True
+        return was_enabled
+
     @staticmethod
     def _box_ioa(candidate, existing):
         if existing.numel() == 0:
@@ -174,17 +190,27 @@ class YOLODataset(Dataset):
         return intersection / candidate_area
 
     def _copy_paste_small_soldiers(self, img, targets, content_bounds=None):
-        if not self._copy_paste_donors or random.random() >= float(getattr(self.config, "SOLDIER_COPY_PASTE_PROB", 0.2)):
+        disable_last = int(getattr(self.config, "SOLDIER_COPY_PASTE_DISABLE_LAST_EPOCHS", 0))
+        disable_from = max(int(getattr(self.config, "EPOCHS", 0)) - disable_last, 0)
+        max_existing = int(getattr(self.config, "SOLDIER_COPY_PASTE_MAX_EXISTING", 2))
+        soldier_count = int((targets[:, 0] == self.copy_paste_class).sum().item()) if targets.numel() else 0
+        if (
+            not self._copy_paste_donors
+            or self.copy_paste_force_disabled
+            or (disable_last > 0 and self._current_epoch.value >= disable_from)
+            or soldier_count >= max_existing
+            or random.random() >= float(getattr(self.config, "SOLDIER_COPY_PASTE_PROB", 0.12))
+        ):
             return img, targets
         with self._copy_paste_attempted.get_lock():
             self._copy_paste_attempted.value += 1
 
         existing = torch.as_tensor(self._targets_to_xyxy(targets)).clone()
         pasted = []
-        max_objects = int(getattr(self.config, "SOLDIER_COPY_PASTE_MAX_OBJECTS", 2))
-        max_ioa = float(getattr(self.config, "SOLDIER_COPY_PASTE_IOA_MAX", 0.2))
+        max_objects = int(getattr(self.config, "SOLDIER_COPY_PASTE_MAX_OBJECTS", 1))
+        max_ioa = float(getattr(self.config, "SOLDIER_COPY_PASTE_IOA_MAX", 0.15))
         scale_min = float(getattr(self.config, "SOLDIER_COPY_PASTE_SCALE_MIN", 0.9))
-        scale_max = float(getattr(self.config, "SOLDIER_COPY_PASTE_SCALE_MAX", 1.15))
+        scale_max = float(getattr(self.config, "SOLDIER_COPY_PASTE_SCALE_MAX", 1.10))
         attempts = max_objects * 8
         content_left, content_top, content_right, content_bottom = content_bounds or (0, 0, self.img_size, self.img_size)
         for _ in range(attempts):
