@@ -88,13 +88,14 @@ class ConfigYOLOv8Anchor:
     TEACHER_V1_C2F_BLOCKS = 3
 
     # =========================================================================
-    # TEACHER_ARCH = "convteacher_v2" | "v2"  (deep semantic projection, default)
+    # TEACHER_ARCH = "convteacher_v2" | "v2"  (Fourier + C2fCIB + V3 output)
     # =========================================================================
     TEACHER_ARCH = "convteacher"
     TEACHER_V2_BASE_CHANNELS = 32
     TEACHER_V2_C2F_BLOCKS = 3
-    TEACHER_V2_SYNTHETIC_WAVELENGTHS = 3
-    TEACHER_V2_COMPLEX_KERNEL_SIZE = 5
+    TEACHER_V2_FOURIER_BANDS = 8
+    TEACHER_V2_FOURIER_LOW_PASS_SIGMA = 0.5
+    TEACHER_V2_RESIDUAL_SCALE = 0.30
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v3" | "v3"  (residual + gate)

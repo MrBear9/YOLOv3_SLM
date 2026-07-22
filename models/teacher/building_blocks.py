@@ -2,7 +2,7 @@
 
 Shared NN modules used by the various teacher architecture variants:
 SqueezeExcite, TeacherResidualBlock, TeacherConvBNAct, TeacherBottleneck,
-TeacherC2f, TeacherSPPF, SyntheticWavelengthComplexConv, CVOCAStage.
+TeacherC2f, TeacherSPPF, CIB, C2fCIB, FeedbackGuidance, RawImageBridge.
 """
 
 import torch
@@ -176,6 +176,59 @@ class TeacherC2f(nn.Module):
         return self.cv2(torch.cat(parts, dim=1))
 
 
+class CIB(nn.Module):
+    """Conv Inverted Bottleneck (YOLOv10-style efficient block).
+
+    1x1 expansion → 3x3 depthwise → 1x1 projection, with an optional residual
+    shortcut.  Provides more capacity than a plain bottleneck while keeping the
+    FLOPs low, making it suitable for the optical-teacher backbone.
+    """
+
+    def __init__(self, channels, expansion=2.0, shortcut=True):
+        super().__init__()
+        hidden = max(int(channels * expansion), 8)
+        self.cv1 = TeacherConvBNAct(channels, hidden, 1)
+        self.cv2 = TeacherConvBNAct(hidden, hidden, 3, groups=hidden)
+        self.cv3 = nn.Sequential(
+            nn.Conv2d(hidden, channels, 1, bias=False),
+            nn.BatchNorm2d(channels),
+        )
+        self.act = nn.SiLU()
+        self.shortcut = shortcut
+
+    def forward(self, x):
+        identity = x
+        y = self.cv3(self.cv2(self.cv1(x)))
+        if self.shortcut:
+            y = self.act(y + identity)
+        else:
+            y = self.act(y)
+        return y
+
+
+class C2fCIB(nn.Module):
+    """C2f block where each bottleneck is a CIB (YOLOv10-style).
+
+    Used by the Fourier-enhanced v2 teacher to replace the heavier standard
+    C2f stages without changing the v1/v3 code paths.
+    """
+
+    def __init__(self, in_channels, out_channels, num_blocks=2, shortcut=True, expansion=0.5, bottle_expansion=2.0):
+        super().__init__()
+        hidden = max(int(out_channels * expansion), 8)
+        self.cv1 = TeacherConvBNAct(in_channels, 2 * hidden, 1)
+        self.blocks = nn.ModuleList(
+            CIB(hidden, expansion=bottle_expansion, shortcut=shortcut) for _ in range(num_blocks)
+        )
+        self.cv2 = TeacherConvBNAct((2 + num_blocks) * hidden, out_channels, 1)
+
+    def forward(self, x):
+        parts = list(self.cv1(x).chunk(2, dim=1))
+        for block in self.blocks:
+            parts.append(block(parts[-1]))
+        return self.cv2(torch.cat(parts, dim=1))
+
+
 class TeacherSPPF(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=5):
         super().__init__()
@@ -192,82 +245,3 @@ class TeacherSPPF(nn.Module):
         return self.cv2(torch.cat([x, y1, y2, y3], dim=1))
 
 
-class SyntheticWavelengthComplexConv(nn.Module):
-    """Trainable complex convolution bank with non-coherent intensity fusion."""
-
-    def __init__(self, channels, kernel_size=5, num_wavelengths=3):
-        super().__init__()
-        padding = kernel_size // 2
-        self.num_wavelengths = max(int(num_wavelengths), 1)
-        self.real_filters = nn.ModuleList(
-            nn.Conv2d(channels, channels, kernel_size, padding=padding, groups=channels, bias=False)
-            for _ in range(self.num_wavelengths)
-        )
-        self.imag_filters = nn.ModuleList(
-            nn.Conv2d(channels, channels, kernel_size, padding=padding, groups=channels, bias=False)
-            for _ in range(self.num_wavelengths)
-        )
-        self.phase_offsets = nn.Parameter(torch.linspace(0.0, 3.141592653589793, self.num_wavelengths))
-        self.branch_logits = nn.Parameter(torch.zeros(self.num_wavelengths))
-        self.mix = nn.Sequential(
-            nn.Conv2d(channels * self.num_wavelengths, channels, 1, bias=False),
-            nn.BatchNorm2d(channels),
-            nn.SiLU(),
-        )
-
-    def forward(self, real, imag):
-        intensities = []
-        branch_weights = torch.softmax(self.branch_logits, dim=0)
-        for idx, (real_filter, imag_filter) in enumerate(zip(self.real_filters, self.imag_filters)):
-            phase = self.phase_offsets[idx]
-            cos_p = torch.cos(phase)
-            sin_p = torch.sin(phase)
-            real_rot = real * cos_p - imag * sin_p
-            imag_rot = real * sin_p + imag * cos_p
-            out_real = real_filter(real_rot) - imag_filter(imag_rot)
-            out_imag = real_filter(imag_rot) + imag_filter(real_rot)
-            intensities.append(branch_weights[idx] * (out_real.square() + out_imag.square()))
-        return self.mix(torch.cat(intensities, dim=1))
-
-
-class CVOCAStage(nn.Module):
-    """One optical feature stage: phase modulation, complex convolution, intensity readout."""
-
-    def __init__(self, in_channels, out_channels, kernel_size=5, num_wavelengths=3, stride=1, residual=True):
-        super().__init__()
-        self.amp = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, 3, stride, 1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.SiLU(),
-        )
-        self.phase = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, 3, stride, 1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.Tanh(),
-        )
-        self.optical_conv = SyntheticWavelengthComplexConv(
-            out_channels,
-            kernel_size=kernel_size,
-            num_wavelengths=num_wavelengths,
-        )
-        self.post = nn.Sequential(
-            TeacherConvBNAct(out_channels, out_channels, 1),
-            TeacherResidualBlock(out_channels, dilation=1),
-        )
-        use_projection = residual and (stride != 1 or in_channels != out_channels)
-        if residual and not use_projection:
-            self.skip = nn.Identity()
-        elif use_projection:
-            self.skip = TeacherConvBNAct(in_channels, out_channels, 1, stride=stride)
-        else:
-            self.skip = None
-
-    def forward(self, x):
-        amp = F.softplus(self.amp(x))
-        phase = 3.141592653589793 * self.phase(x)
-        real = amp * torch.cos(phase)
-        imag = amp * torch.sin(phase)
-        out = self.post(self.optical_conv(real, imag))
-        if self.skip is not None:
-            out = out + self.skip(x)
-        return out
