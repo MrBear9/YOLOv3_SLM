@@ -39,9 +39,12 @@ def extract_dataset(yaml_path, split, num, output_dir):
     # Random sampling
     selected = random.sample(image_files, num)
 
-    # Prepare output directory
+    # Prepare output directory with images/ and labels/ subdirectories
     out = Path(output_dir).resolve()
-    out.mkdir(parents=True, exist_ok=True)
+    out_images = out / 'images'
+    out_labels = out / 'labels'
+    out_images.mkdir(parents=True, exist_ok=True)
+    out_labels.mkdir(parents=True, exist_ok=True)
 
     digits = max(4, len(str(num)))  # at least 4-digit zero-padding like Origin0001
 
@@ -50,14 +53,14 @@ def extract_dataset(yaml_path, split, num, output_dir):
         new_name = f"Origin{i:0{digits}d}"
 
         # Copy image
-        dst_img = out / f"{new_name}{ext}"
+        dst_img = out_images / f"{new_name}{ext}"
         shutil.copy2(img_path, dst_img)
-        print(f"[{i:0{digits}d}/{num}] {img_path.name} -> {dst_img.name}")
+        print(f"[{i:0{digits}d}/{num}] {img_path.name} -> images/{dst_img.name}")
 
         # Copy label if exists
         label_path = labels_dir / f"{img_path.stem}.txt"
         if label_path.exists():
-            dst_label = out / f"{new_name}.txt"
+            dst_label = out_labels / f"{new_name}.txt"
             shutil.copy2(label_path, dst_label)
         else:
             print(f"  Warning: label not found for {img_path.name}")

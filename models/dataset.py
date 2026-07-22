@@ -175,7 +175,7 @@ class YOLODataset(Dataset):
 
     def _copy_paste_small_soldiers(self, img, targets, content_bounds=None):
         if not self._copy_paste_donors or random.random() >= float(
-            getattr(self.config, "SOLDIER_COPY_PASTE_PROB", 0.20)
+            getattr(self.config, "SOLDIER_COPY_PASTE_PROB", 0.12)
         ):
             return img, targets
         with self._copy_paste_attempted.get_lock():
@@ -183,10 +183,10 @@ class YOLODataset(Dataset):
 
         existing = torch.as_tensor(self._targets_to_xyxy(targets)).clone()
         pasted = []
-        max_objects = int(getattr(self.config, "SOLDIER_COPY_PASTE_MAX_OBJECTS", 2))
-        max_ioa = float(getattr(self.config, "SOLDIER_COPY_PASTE_IOA_MAX", 0.20))
+        max_objects = int(getattr(self.config, "SOLDIER_COPY_PASTE_MAX_OBJECTS", 1))
+        max_ioa = float(getattr(self.config, "SOLDIER_COPY_PASTE_IOA_MAX", 0.15))
         scale_min = float(getattr(self.config, "SOLDIER_COPY_PASTE_SCALE_MIN", 0.9))
-        scale_max = float(getattr(self.config, "SOLDIER_COPY_PASTE_SCALE_MAX", 1.15))
+        scale_max = float(getattr(self.config, "SOLDIER_COPY_PASTE_SCALE_MAX", 1.10))
         attempts = max_objects * 8
         content_left, content_top, content_right, content_bottom = content_bounds or (0, 0, self.img_size, self.img_size)
         for _ in range(attempts):

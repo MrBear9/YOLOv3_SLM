@@ -39,6 +39,7 @@ from models.training_utils import (
     build_optimizer_from_model,
     create_tensorboard_writer,
     initialize_teacher_weights,
+    load_joint_teacher_detector_checkpoint,
     save_training_curves,
     set_detector_trainable,
 )
@@ -172,17 +173,27 @@ def train():
     if amp_enabled:
         log_to_file(Config, f"Using AMP autocast dtype={amp_dtype}")
     teacher = build_teacher(Config)
-    loaded_teacher, teacher_message = initialize_teacher_weights(Config, teacher, device)
-    log_to_file(Config, teacher_message)
-    freeze_teacher = Config.FREEZE_TEACHER and loaded_teacher
-    for p in teacher.parameters():
-        p.requires_grad = not freeze_teacher
-    log_to_file(Config, f"Teacher status: {'frozen' if freeze_teacher else 'trainable'}")
 
     arch_lower = str(Config.TEACHER_ARCH).strip().lower()
     is_v3 = arch_lower in {"convteacher_v3", "v3"}
 
     detector = build_detector_head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
+    resume_checkpoint = None
+    if Config.get_teacher_init_mode() == "joint_checkpoint":
+        resume_checkpoint, init_message = load_joint_teacher_detector_checkpoint(
+            Config, teacher, detector, Config.get_teacher_init_checkpoint(), device
+        )
+        if resume_checkpoint is None:
+            raise RuntimeError(init_message)
+        loaded_teacher = True
+        log_to_file(Config, init_message)
+    else:
+        loaded_teacher, teacher_message = initialize_teacher_weights(Config, teacher, device)
+        log_to_file(Config, teacher_message)
+    freeze_teacher = Config.FREEZE_TEACHER and loaded_teacher
+    for p in teacher.parameters():
+        p.requires_grad = not freeze_teacher
+    log_to_file(Config, f"Teacher status: {'frozen' if freeze_teacher else 'trainable'}")
     model = wrap_data_parallel(Config, TeacherWithDetector(Config, teacher=teacher, detector=detector), module_name="TeacherWithDetector")
     set_detector_trainable(model, True)
 
@@ -237,7 +248,8 @@ def train():
 
     history = {"train_total": [], "val_total": [], "precision": [], "recall": [], "f1": [], "map50": [], "precision_op": [], "recall_op": [], "f1_op": []}
     best_loss = float("inf")
-    best_map50 = -1.0
+    best_map50 = float(resume_checkpoint.get("val_map50", -1.0)) if resume_checkpoint is not None else -1.0
+    early_stop_map50 = best_map50
     no_improve_epochs = 0
     last_epoch = -1
     current_phase = None
@@ -253,7 +265,12 @@ def train():
         _write_teacher_tensorboard_model_summary(tensorboard_writer, model)
         snapshot_parameters(model)  # 初始化参数快照用于变化追踪
 
-    for epoch in range(Config.EPOCHS):
+    start_epoch = int(resume_checkpoint.get("epoch", -1)) + 1 if resume_checkpoint is not None else 0
+    if resume_checkpoint is not None and is_main:
+        torch.save(resume_checkpoint, joint_best_path)
+        log_to_file(Config, f"Protected baseline checkpoint at mAP50={best_map50:.4f}; resuming from epoch {start_epoch}.")
+
+    for epoch in range(start_epoch, Config.EPOCHS):
         last_epoch = epoch
         if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
             train_sampler.set_epoch(epoch)
@@ -276,6 +293,12 @@ def train():
             "slm_edge": 0.0,
         }
         stage_settings = Config.get_stage_settings(epoch)
+        if resume_checkpoint is not None:
+            stage_settings = {
+                **stage_settings,
+                "teacher_lr": Config.JOINT_RESUME_TEACHER_LR,
+                "detector_lr": Config.JOINT_RESUME_DETECTOR_LR,
+            }
         phase = criterion.set_epoch_weights(epoch)
         if phase != current_phase:
             current_phase = phase
@@ -381,9 +404,15 @@ def train():
                 )
 
         is_best = False
-        if val_metrics is not None and val_metrics["map50"] > best_map50 + Config.TEACHER_EARLY_STOP_MIN_DELTA:
-            best_map50 = val_metrics["map50"]
-            is_best = True
+        significant_improvement = False
+        if val_metrics is not None:
+            current_map50 = val_metrics["map50"]
+            if current_map50 > best_map50:
+                best_map50 = current_map50
+                is_best = True
+            if current_map50 > early_stop_map50 + Config.TEACHER_EARLY_STOP_MIN_DELTA:
+                early_stop_map50 = current_map50
+                significant_improvement = True
         elif val_loader is None and avg_train["total"] < best_loss:
             is_best = True
 
@@ -405,6 +434,7 @@ def train():
                     },
                     joint_best_path,
                 )
+        if significant_improvement:
             no_improve_epochs = 0
         elif val_metrics is not None:
             no_improve_epochs += Config.VAL_INTERVAL

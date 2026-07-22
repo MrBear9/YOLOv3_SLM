@@ -54,6 +54,28 @@ def initialize_teacher_weights(config, teacher, device):
     return False, f"Teacher init mode: checkpoint requested but unavailable, fallback to scratch ({message})"
 
 
+def load_joint_teacher_detector_checkpoint(config, teacher, detector, checkpoint_path, device):
+    if not checkpoint_path:
+        return None, "Joint checkpoint: not configured"
+    checkpoint_path = checkpoint_path if os.path.isabs(checkpoint_path) else os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), checkpoint_path
+    )
+    if not os.path.exists(checkpoint_path):
+        return None, f"Joint checkpoint not found: {checkpoint_path}"
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    if not isinstance(checkpoint, dict) or "teacher_state_dict" not in checkpoint or "detector_state_dict" not in checkpoint:
+        return None, f"Joint checkpoint is missing teacher/detector state dictionaries: {checkpoint_path}"
+    teacher.load_state_dict(checkpoint["teacher_state_dict"], strict=True)
+    detector.load_state_dict(checkpoint["detector_state_dict"], strict=True)
+    return checkpoint, (
+        f"Loaded joint teacher/detector checkpoint: {checkpoint_path} "
+        f"(epoch={checkpoint.get('epoch')}, mAP50={checkpoint.get('val_map50')})"
+    )
+
+
 def build_optimizer_from_model(config, model, teacher_lr=None, detector_lr=None):
     model_core = _unwrap(model)
     teacher_lr = config.LEARNING_RATE if teacher_lr is None else teacher_lr

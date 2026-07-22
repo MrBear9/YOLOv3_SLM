@@ -115,8 +115,8 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Teacher init / freeze
     # =========================================================================
-    TEACHER_INIT_MODE = "scratch"
-    TEACHER_INIT_CHECKPOINT = r"output/OpticalTeacherYOLO/teacher_final.pth"
+    TEACHER_INIT_MODE = "joint_checkpoint"
+    TEACHER_INIT_CHECKPOINT = r"output/Tv1_light_p2_0.8355/teacher_detector_best.pth"
     FREEZE_TEACHER = False
 
     # =========================================================================
@@ -280,6 +280,8 @@ class ConfigYOLOv8Anchor:
     PHASE1_DETECTOR_LR = 3e-4
     PHASE2_TEACHER_LR = 1.5e-4
     PHASE2_DETECTOR_LR = 1e-4
+    JOINT_RESUME_TEACHER_LR = 7.5e-5
+    JOINT_RESUME_DETECTOR_LR = 5e-5
     LEARNING_RATE = 3e-4
     WEIGHT_DECAY = 1e-3
     OPTIMIZER = "AdamW"
@@ -345,14 +347,13 @@ class ConfigYOLOv8Anchor:
     # Targeted training-only augmentation for the remaining small-soldier gap.
     SOLDIER_COPY_PASTE = True
     SOLDIER_CLASS_ID = 1
-    SOLDIER_COPY_PASTE_PROB = 0.20
-    SOLDIER_COPY_PASTE_MAX_OBJECTS = 2
-    # Keep augmentation active through early stopping. Linking it to
-    # no-improvement patience disabled it at epoch 101 in the latest run.
+    SOLDIER_COPY_PASTE_PROB = 0.12
+    SOLDIER_COPY_PASTE_MAX_OBJECTS = 1
+    # Keep this gentle augmentation active throughout checkpoint refinement.
     SOLDIER_COPY_PASTE_AREA_MAX = 32 * 32
     SOLDIER_COPY_PASTE_SCALE_MIN = 0.90
-    SOLDIER_COPY_PASTE_SCALE_MAX = 1.15
-    SOLDIER_COPY_PASTE_IOA_MAX = 0.20
+    SOLDIER_COPY_PASTE_SCALE_MAX = 1.10
+    SOLDIER_COPY_PASTE_IOA_MAX = 0.15
     SOLDIER_COPY_PASTE_EDGE_FEATHER = 2
 
     # Windows 使用 spawn 创建多进程，开销远大于 Linux 的 fork，需要降低 worker 数量
@@ -410,11 +411,11 @@ class ConfigYOLOv8Anchor:
     @classmethod
     def get_teacher_init_mode(cls):
         mode = str(cls.TEACHER_INIT_MODE).strip().lower()
-        return mode if mode in {"scratch", "checkpoint"} else "scratch"
+        return mode if mode in {"scratch", "checkpoint", "joint_checkpoint"} else "scratch"
 
     @classmethod
     def get_teacher_init_checkpoint(cls):
-        if cls.get_teacher_init_mode() != "checkpoint":
+        if cls.get_teacher_init_mode() not in {"checkpoint", "joint_checkpoint"}:
             return None
         checkpoint_path = str(cls.TEACHER_INIT_CHECKPOINT).strip()
         return checkpoint_path if checkpoint_path else None

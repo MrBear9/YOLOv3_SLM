@@ -66,6 +66,12 @@ def log_all_parameters():
     log_to_file(Config, f"Hard negative mining: ratio={Config.HARD_NEG_RATIO}, min={Config.HARD_NEG_MIN}")
     log_to_file(Config, f"Box decode range: {Config.BOX_DECODE_RANGE}")
     log_to_file(Config, f"LR teacher/detector: {Config.PHASE1_TEACHER_LR}/{Config.PHASE1_DETECTOR_LR} -> {Config.PHASE2_TEACHER_LR}/{Config.PHASE2_DETECTOR_LR}")
+    if Config.get_teacher_init_mode() == "joint_checkpoint":
+        log_to_file(
+            Config,
+            f"Joint resume checkpoint/LR: {Config.get_teacher_init_checkpoint()} -> "
+            f"{Config.JOINT_RESUME_TEACHER_LR}/{Config.JOINT_RESUME_DETECTOR_LR}",
+        )
     log_to_file(Config, f"Detection conf/nms/max_det: {Config.CONF_THRESH}/{Config.NMS_THRESH}/{Config.MAX_DET}")
     log_to_file(Config, f"Metric conf/nms/max_det: {Config.METRIC_CONF_THRESH}/{Config.METRIC_NMS_THRESH}/{Config.METRIC_MAX_DET}")
     log_to_file(

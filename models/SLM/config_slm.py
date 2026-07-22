@@ -64,7 +64,7 @@ class ConfigSLM(OpticalConfig):
     #   is_trainable(layer_idx), layer_lr_mult(layer_idx, stage)
 
     # -------- Plan D: multi-head virtual SLM (training-time capacity boost) --------
-    SLM_MULTI_HEAD_ENABLED = True
+    SLM_MULTI_HEAD_ENABLED = False
     SLM_MULTI_HEAD_NUM_HEADS = 2
     SLM_MULTI_HEAD_FUSION = "mean" # "learned_gate"
 
