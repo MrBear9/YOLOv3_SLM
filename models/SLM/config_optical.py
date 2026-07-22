@@ -17,7 +17,7 @@ class OpticalConfig:
     # ═══════════════════════════════════════════════════════════════════════
     # 传播层数  2 | 3 | 4
     # ═══════════════════════════════════════════════════════════════════════
-    NUM_LAYERS = 4
+    NUM_LAYERS = 2
 
     # ═══════════════════════════════════════════════════════════════════════
     # 共享默认值（所有层共用，除非 per-layer dict 覆盖）
@@ -30,11 +30,11 @@ class OpticalConfig:
     # ═══════════════════════════════════════════════════════════════════════
     # Per-layer 配置  {layer_idx (1-based): value}
     # ═══════════════════════════════════════════════════════════════════════
-    PROP_DISTANCE = {1: 0.10, 2: 0.10, 3: 0.10, 4: 0.10}
+    PROP_DISTANCE = {1: 0.10, 2: 0.10, 3: 0.20, 4: 0.20}
     TRAIN_LAYER  = {1: True, 2: True, 3: True, 4: True}
 
     # Phase field block parameters
-    PHASE_BLOCK_GRID         = {1: 6, 2: 4, 3: 4, 4: 4}
+    PHASE_BLOCK_GRID         = {1: 6, 2: 4, 3: 5, 4: 7}
     PHASE_BLOCK_OVERLAP      = {1: 8, 2: 8, 3: 8, 4: 8}
     PHASE_BLOCK_INNER_SCALES = {1: 3, 2: 2, 3: 2, 4: 2}
     PHASE_MLP_NUM_FREQS      = {1: 10, 2: 6, 3: 6, 4: 6}
@@ -45,8 +45,8 @@ class OpticalConfig:
     NORM_JOINT_LR_MULT  = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
 
     # Vortex 初始化
-    VORTEX_CHARGE       = {1: 3.0, 2: 3.0,  3: 1.0, 4: -1.0}
-    VORTEX_RADIAL_SCALE = {1: 0.35, 2: 0.25, 3: 0.35, 4: -0.25}
+    VORTEX_CHARGE       = {1: 3.0, 2: 3.0,  3: 4.0, 4: 4.0}
+    VORTEX_RADIAL_SCALE = {1: 0.35, 2: 0.25, 3: 0.35, 4: 0.45}
 
     # DH-PSF 初始化
     DH_PSF_ROTATION    = {1: 0.0, 2: np.pi / 2, 3: 0.0, 4: np.pi / 2}

@@ -15,14 +15,14 @@ class ConfigSLM(OpticalConfig):
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    OUTPUT_DIR = r"output/SLM_Tv1_light"
+    OUTPUT_DIR = r"output/SLM_Tv1_light_p2"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light_free_blance_0.8309/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light_p2_0.8355/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -64,9 +64,9 @@ class ConfigSLM(OpticalConfig):
     #   is_trainable(layer_idx), layer_lr_mult(layer_idx, stage)
 
     # -------- Plan D: multi-head virtual SLM (training-time capacity boost) --------
-    SLM_MULTI_HEAD_ENABLED = False
-    SLM_MULTI_HEAD_NUM_HEADS = 4
-    SLM_MULTI_HEAD_FUSION = "mean"
+    SLM_MULTI_HEAD_ENABLED = True
+    SLM_MULTI_HEAD_NUM_HEADS = 2
+    SLM_MULTI_HEAD_FUSION = "mean" # "learned_gate"
 
     # -------- Student normalization --------
     ENABLE_STUDENT_NORM = True
