@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from models.SLM.config_optical import OpticalConfig
-from models.yolov8.config_v8 import load_anchor_groups, load_class_names, resolve_project_path
+from models.yolov8.config_v8 import load_class_names, resolve_project_path
 
 
 class ConfigSLM(OpticalConfig):
@@ -32,7 +32,6 @@ class ConfigSLM(OpticalConfig):
     # =========================================================================
     IMG_SIZE = 640
     BATCH_SIZE = 8
-    STRIDES = [8, 16, 32]
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
     PHASE_FOCUS_EPOCHS = 245
@@ -125,13 +124,11 @@ class ConfigSLM(OpticalConfig):
 
     # =========================================================================
     # DETECTOR_HEAD_TYPE  (must match teacher-training checkpoint)
-    # Options: "light", "yolov8_anchor".
+    # Options: "light".
     # =========================================================================
     DETECTOR_HEAD_TYPE = "light"
-    # Must match the teacher checkpoint: "anchor_free_tal" or legacy "anchor".
-    DETECTION_PROTOCOL = "anchor_free_tal"
 
-    # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
+    # -------- Shared backbone params (fallback for non-light head types) --------
     YOLOV8_BASE_CHANNELS = 32
     YOLOV8_C2F_BLOCKS = 3
 
@@ -148,68 +145,6 @@ class ConfigSLM(OpticalConfig):
     TAL_TOPK = 10
     TAL_ALPHA = 0.5
     TAL_BETA = 6.0
-
-    # =========================================================================
-    # Anchors
-    # =========================================================================
-    DEFAULT_ANCHORS = [
-        [[26, 23], [47, 49], [100, 67]],
-        [[103, 169], [203, 107], [351, 177]],
-        [[241, 354], [534, 299], [568, 528]],
-    ]
-    ANCHOR_CONFIG_PATH = r"output/anchor_clustering/yolo_anchors.yaml"
-    USE_EXTERNAL_ANCHORS = True
-    ANCHORS = None
-    ANCHOR_SOURCE = "default"
-
-    # =========================================================================
-    # Anchor assignment
-    # =========================================================================
-    # Choose explicitly between "ratio" and "yolo7_simota" before training.
-    ANCHOR_MATCH_MODE = "yolo7_simota"
-    ANCHOR_MATCH_RATIO_THRESH = 3.5
-    ASSIGN_NEIGHBOR_CELLS = True
-    NOOBJ_IGNORE_IOU = 0.68
-    ANCHOR_MATCH_IOU_THRESH = 0.20
-    CENTER_PRIOR_RADIUS = 2.5
-    CENTER_PRIOR_WEIGHT = 0.50
-    SIMOTA_TOP_N = 20
-    SIMOTA_MAX_ASSIGN = 15
-    SIMOTA_OBJ_POS_THRESH = 0.05
-    SIMOTA_USE_SIZE_WEIGHT_OVERRIDE = True
-    SIMOTA_SMALL_OBJ_WEIGHT = 1.5
-    SIMOTA_MEDIUM_OBJ_WEIGHT = 1.0
-    SIMOTA_LARGE_OBJ_WEIGHT = 0.8
-
-    # =========================================================================
-    # Box decode
-    # =========================================================================
-    BOX_DECODE_RANGE = 2.0
-
-    # =========================================================================
-    # Detection loss weights
-    # =========================================================================
-    BOX_WEIGHT_BASE = 5.0
-    OBJ_WEIGHT_BASE = 2.0
-    NOOBJ_WEIGHT_BASE = 2.0
-    CLS_WEIGHT_BASE = 1.8
-    LOSS_UNCERTAINTY_WEIGHTING = False
-
-    # -------- Object size weighting --------
-    SMALL_OBJ_AREA = 32 * 32
-    LARGE_OBJ_AREA = 128 * 128
-
-    # =========================================================================
-    # Focal loss
-    # =========================================================================
-    FOCAL_ALPHA = 0.35
-    FOCAL_GAMMA = 2.0
-
-    # =========================================================================
-    # Hard negative mining
-    # =========================================================================
-    HARD_NEG_RATIO = 30
-    HARD_NEG_MIN = 512
 
     # =========================================================================
     # SLM feature loss (student teacher feature matching)
@@ -359,17 +294,7 @@ class ConfigSLM(OpticalConfig):
         cls.OUTPUT_DIR = resolve_project_path(cls.OUTPUT_DIR)
         cls.TEACHER_DETECTOR_CHECKPOINT = resolve_project_path(cls.TEACHER_DETECTOR_CHECKPOINT)
         cls.SLM_INIT_CHECKPOINT = resolve_project_path(cls.SLM_INIT_CHECKPOINT)
-        cls.ANCHOR_CONFIG_PATH = resolve_project_path(cls.ANCHOR_CONFIG_PATH)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
-        cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
-        cls.ANCHOR_SOURCE = "default"
-        if cls.USE_EXTERNAL_ANCHORS:
-            try:
-                cls.ANCHORS = load_anchor_groups(cls.ANCHOR_CONFIG_PATH)
-                cls.ANCHOR_SOURCE = cls.ANCHOR_CONFIG_PATH
-            except Exception as exc:
-                cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
-                cls.ANCHOR_SOURCE = f"default (external load failed: {exc})"
         os.makedirs(cls.OUTPUT_DIR, exist_ok=True)
         cls.LOG_ROOT_DIR = os.path.join(cls.OUTPUT_DIR, "logs")
         cls.VISUALIZATION_DIR = os.path.join(cls.OUTPUT_DIR, "visualizations")

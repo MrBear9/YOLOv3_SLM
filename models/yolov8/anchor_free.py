@@ -8,7 +8,7 @@ from torchvision.ops import batched_nms
 
 
 def get_anchor_free_strides(config):
-    return getattr(config, "ANCHOR_FREE_STRIDES", config.STRIDES)
+    return config.ANCHOR_FREE_STRIDES
 
 
 def make_anchor_points(predictions, strides, dtype, device):

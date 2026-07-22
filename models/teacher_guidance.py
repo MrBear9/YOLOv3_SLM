@@ -191,7 +191,7 @@ def build_feature_distillation_loss(config):
         teacher_chs = (c, c * 4, c * 4)
 
     # Detector feature channels  {s8, s16, s32}
-    head_type = str(getattr(config, "DETECTOR_HEAD_TYPE", "yolov8_anchor")).strip().lower()
+    head_type = str(getattr(config, "DETECTOR_HEAD_TYPE", "light")).strip().lower()
     if head_type in {"light", "yolo_light"}:
         lc = int(getattr(config, "YOLO_LIGHT_BASE_CH", 8))
         detector_chs = (lc * 8, lc * 8, lc * 8)

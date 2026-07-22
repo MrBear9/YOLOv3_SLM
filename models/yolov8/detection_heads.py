@@ -1,26 +1,18 @@
-"""YOLOv8 detection head variants.
+"""YOLOv8 detection head variants — anchor-free TAL only.
 
-Contains the three detection head implementations:
-  - YOLOv8AnchorHead         : original C2f/PAN anchor head
-  - EnhancedYOLOv8AnchorHead  : ECA + deeper branches
-  - YOLOLightHead             : lightweight FPGA-friendly
+Active head:
+  - YOLOLightHead : lightweight, FPGA-friendly, 4-scale (P2-P5)
+
+Legacy anchor heads (YOLOv8AnchorHead, EnhancedYOLOv8AnchorHead) were
+removed together with the anchor protocol. See:
+  docs/HeadIdea/deprecated-matching-strategies.md
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.runtime import should_use_channels_last
-
-from .building_blocks import (
-    C2f,
-    C2fECA,
-    ConvBNAct,
-    ECABlock,
-    EnhancedDetectBranch,
-    SPPF,
-    YOLOv8AnchorDetectBranch,
-)
+from .building_blocks import ConvBNAct, ECABlock, SPPF
 
 
 class DepthwiseSeparableTower(nn.Module):
@@ -51,150 +43,6 @@ class AnchorFreeDetectBranch(nn.Module):
         return {"reg": self.box_pred(self.box_tower(x)), "cls": self.cls_pred(self.cls_tower(x))}
 
 
-class YOLOv8AnchorHead(nn.Module):
-    """YOLOv8-style C2f/PAN head with legacy YOLOv3 anchor-formatted outputs."""
-
-    def __init__(self, config, in_channels=1, out_channels=None, base_ch=None, c2f_blocks=None):
-        super().__init__()
-        self.config = config
-        out_channels = config.get_detector_output_channels() if out_channels is None else out_channels
-        base_ch = config.YOLOV8_BASE_CHANNELS if base_ch is None else base_ch
-        c2f_blocks = config.YOLOV8_C2F_BLOCKS if c2f_blocks is None else c2f_blocks
-        self.stem = ConvBNAct(in_channels, base_ch, 3)
-        self.down1 = ConvBNAct(base_ch, base_ch * 2, 3, 2)
-        self.c2f1 = C2f(base_ch * 2, base_ch * 2, c2f_blocks, shortcut=True)
-        self.down2 = ConvBNAct(base_ch * 2, base_ch * 4, 3, 2)
-        self.c2f2 = C2f(base_ch * 4, base_ch * 4, c2f_blocks, shortcut=True)
-        self.down3 = ConvBNAct(base_ch * 4, base_ch * 8, 3, 2)
-        self.c2f3 = C2f(base_ch * 8, base_ch * 8, c2f_blocks, shortcut=True)
-        self.down4 = ConvBNAct(base_ch * 8, base_ch * 8, 3, 2)
-        self.c2f4 = C2f(base_ch * 8, base_ch * 8, c2f_blocks, shortcut=True)
-        self.down5 = ConvBNAct(base_ch * 8, base_ch * 8, 3, 2)
-        self.sppf = SPPF(base_ch * 8, base_ch * 8)
-        self.up_p5 = nn.Upsample(scale_factor=2, mode="nearest")
-        self.fuse_p4 = C2f(base_ch * 16, base_ch * 4, c2f_blocks)
-        self.up_p4 = nn.Upsample(scale_factor=2, mode="nearest")
-        self.fuse_p3 = C2f(base_ch * 12, base_ch * 2, c2f_blocks)
-        self.down_p3 = ConvBNAct(base_ch * 2, base_ch * 4, 3, 2)
-        self.pan_p4 = C2f(base_ch * 8, base_ch * 4, c2f_blocks)
-        self.down_p4 = ConvBNAct(base_ch * 4, base_ch * 8, 3, 2)
-        self.pan_p5 = C2f(base_ch * 16, base_ch * 8, c2f_blocks)
-        self.head_dropout = nn.Dropout2d(0.1)
-        self.head_p3 = YOLOv8AnchorDetectBranch(base_ch * 2, out_channels)
-        self.head_p4 = YOLOv8AnchorDetectBranch(base_ch * 4, out_channels)
-        self.head_p5 = YOLOv8AnchorDetectBranch(base_ch * 8, out_channels)
-
-    def _preserve_layout_after_resize(self, x):
-        if x.is_floating_point() and x.dim() == 4 and should_use_channels_last(self.config):
-            return x.contiguous(memory_format=torch.channels_last)
-        return x.contiguous() if x.is_floating_point() else x
-
-    def forward(self, x, return_features=False):
-        x = self.stem(x)
-        x320 = self.c2f1(self.down1(x))
-        x160 = self.c2f2(self.down2(x320))
-        x80 = self.c2f3(self.down3(x160))
-        x40 = self.c2f4(self.down4(x80))
-        p5 = self.sppf(self.down5(x40))
-        p5_up = self._preserve_layout_after_resize(self.up_p5(p5))
-        p4 = self.fuse_p4(torch.cat([p5_up, x40], dim=1))
-        p4_up = self._preserve_layout_after_resize(self.up_p4(p4))
-        p3 = self.fuse_p3(torch.cat([p4_up, x80], dim=1))
-        p4 = self.pan_p4(torch.cat([self.down_p3(p3), p4], dim=1))
-        p5 = self.pan_p5(torch.cat([self.down_p4(p4), p5], dim=1))
-        preds = (self.head_p3(self.head_dropout(p3)), self.head_p4(self.head_dropout(p4)), self.head_p5(self.head_dropout(p5)))
-        if return_features:
-            return preds, {"s8": x80, "s16": x40, "s32": p5}
-        return preds
-
-
-class EnhancedYOLOv8AnchorHead(nn.Module):
-    """Enhanced YOLOv8-style anchor head with ECA attention + deeper detection branches.
-
-    Improvements over YOLOv8AnchorHead:
-      - C2fECA (C2f + ECA channel attention) in backbone and neck
-      - ECA at every FPN/PAN fusion point
-      - Deeper detection branches with residual + ECA (EnhancedDetectBranch)
-      - Better gradient flow and feature recalibration
-
-    Output format is identical to YOLOv8AnchorHead — fully compatible with
-    the existing loss (YOLOv3AnchorLossForV8Head) and decode functions.
-    """
-
-    def __init__(self, config, in_channels=1, out_channels=None, base_ch=None, c2f_blocks=None):
-        super().__init__()
-        self.config = config
-        out_channels = config.get_detector_output_channels() if out_channels is None else out_channels
-        base_ch = config.YOLOV8_BASE_CHANNELS if base_ch is None else base_ch
-        c2f_blocks = config.YOLOV8_C2F_BLOCKS if c2f_blocks is None else c2f_blocks
-
-        # Backbone with C2fECA
-        self.stem = ConvBNAct(in_channels, base_ch, 3)
-        self.down1 = ConvBNAct(base_ch, base_ch * 2, 3, 2)
-        self.c2f1 = C2fECA(base_ch * 2, base_ch * 2, c2f_blocks, shortcut=True)
-        self.down2 = ConvBNAct(base_ch * 2, base_ch * 4, 3, 2)
-        self.c2f2 = C2fECA(base_ch * 4, base_ch * 4, c2f_blocks, shortcut=True)
-        self.down3 = ConvBNAct(base_ch * 4, base_ch * 8, 3, 2)
-        self.c2f3 = C2fECA(base_ch * 8, base_ch * 8, c2f_blocks, shortcut=True)
-        self.down4 = ConvBNAct(base_ch * 8, base_ch * 8, 3, 2)
-        self.c2f4 = C2fECA(base_ch * 8, base_ch * 8, c2f_blocks, shortcut=True)
-        self.down5 = ConvBNAct(base_ch * 8, base_ch * 8, 3, 2)
-        self.sppf = SPPF(base_ch * 8, base_ch * 8)
-
-        # Neck — FPN top-down with ECA
-        self.up_p5 = nn.Upsample(scale_factor=2, mode="nearest")
-        self.fuse_p4 = nn.Sequential(C2fECA(base_ch * 16, base_ch * 4, c2f_blocks), ECABlock(base_ch * 4))
-        self.up_p4 = nn.Upsample(scale_factor=2, mode="nearest")
-        self.fuse_p3 = nn.Sequential(C2fECA(base_ch * 12, base_ch * 2, c2f_blocks), ECABlock(base_ch * 2))
-
-        # Neck — PAN bottom-up with ECA
-        self.down_p3 = ConvBNAct(base_ch * 2, base_ch * 4, 3, 2)
-        self.pan_p4 = nn.Sequential(C2fECA(base_ch * 8, base_ch * 4, c2f_blocks), ECABlock(base_ch * 4))
-        self.down_p4 = ConvBNAct(base_ch * 4, base_ch * 8, 3, 2)
-        self.pan_p5 = nn.Sequential(C2fECA(base_ch * 16, base_ch * 8, c2f_blocks), ECABlock(base_ch * 8))
-
-        self.head_dropout = nn.Dropout2d(0.1)
-
-        # Enhanced detection branches
-        self.head_p3 = EnhancedDetectBranch(base_ch * 2, out_channels)
-        self.head_p4 = EnhancedDetectBranch(base_ch * 4, out_channels)
-        self.head_p5 = EnhancedDetectBranch(base_ch * 8, out_channels)
-
-    def _preserve_layout_after_resize(self, x):
-        if x.is_floating_point() and x.dim() == 4 and should_use_channels_last(self.config):
-            return x.contiguous(memory_format=torch.channels_last)
-        return x.contiguous() if x.is_floating_point() else x
-
-    def forward(self, x, return_features=False):
-        # Backbone
-        x = self.stem(x)
-        x320 = self.c2f1(self.down1(x))
-        x160 = self.c2f2(self.down2(x320))
-        x80 = self.c2f3(self.down3(x160))
-        x40 = self.c2f4(self.down4(x80))
-        p5 = self.sppf(self.down5(x40))
-
-        # FPN top-down
-        p5_up = self._preserve_layout_after_resize(self.up_p5(p5))
-        p4 = self.fuse_p4(torch.cat([p5_up, x40], dim=1))
-        p4_up = self._preserve_layout_after_resize(self.up_p4(p4))
-        p3 = self.fuse_p3(torch.cat([p4_up, x80], dim=1))
-
-        # PAN bottom-up
-        p4 = self.pan_p4(torch.cat([self.down_p3(p3), p4], dim=1))
-        p5 = self.pan_p5(torch.cat([self.down_p4(p4), p5], dim=1))
-
-        # Detection heads
-        preds = (
-            self.head_p3(self.head_dropout(p3)),
-            self.head_p4(self.head_dropout(p4)),
-            self.head_p5(self.head_dropout(p5)),
-        )
-        if return_features:
-            return preds, {"s8": x80, "s16": x40, "s32": p5}
-        return preds
-
-
 class YOLOLightHead(nn.Module):
     """Lightweight FPGA-friendly detection head (方案 A — slimmed).
 
@@ -210,11 +58,9 @@ class YOLOLightHead(nn.Module):
     spatial mixing before task projections.
     """
 
-    def __init__(self, config, in_channels=1, out_channels=None, base_ch=None):
+    def __init__(self, config, in_channels=1, base_ch=None):
         super().__init__()
         self.config = config
-        self.detection_protocol = str(getattr(config, "DETECTION_PROTOCOL", "anchor_free_tal")).strip().lower()
-        out_channels = config.get_detector_output_channels() if out_channels is None else out_channels
         c = base_ch if base_ch is not None else int(getattr(config, "YOLO_LIGHT_BASE_CH", 8))
         c2, c4, c8 = c * 2, c * 4, c * 8
 
@@ -253,53 +99,22 @@ class YOLOLightHead(nn.Module):
 
         self.head_dropout = nn.Dropout2d(0.1)
 
-        if self.detection_protocol == "anchor_free_tal":
-            reg_max = int(getattr(config, "ANCHOR_FREE_REG_MAX", 16))
-            head_ch = int(getattr(config, "ANCHOR_FREE_HEAD_CH", max(c2, 16)))
-            p2_ch = int(getattr(config, "ANCHOR_FREE_P2_FUSION_CH", c2))
-            p2_head_ch = int(getattr(config, "ANCHOR_FREE_P2_HEAD_CH", p2_ch))
-            self.p2_from_s4 = ConvBNAct(c4, p2_ch, 1)
-            self.p2_from_p3 = ConvBNAct(c2, p2_ch, 1)
-            self.p2_fuse = nn.Sequential(
-                ConvBNAct(p2_ch * 2, p2_ch, 1),
-                ConvBNAct(p2_ch, p2_ch, 3, groups=p2_ch),
-                ECABlock(p2_ch),
-            )
-            self.anchor_free_heads = nn.ModuleList(
-                [AnchorFreeDetectBranch(p2_ch, config.NUM_CLASSES, reg_max, p2_head_ch)]
-                + [AnchorFreeDetectBranch(ch, config.NUM_CLASSES, reg_max, head_ch) for ch in (c2, c4, c8)]
-            )
-            return
-        if self.detection_protocol != "anchor":
-            raise ValueError("DETECTION_PROTOCOL must be 'anchor_free_tal' or 'anchor'.")
-
-        # 方案A: direct 1×1 projections — no shared 3×3 conv.
-        # FPN/PAN features already carry sufficient spatial context from
-        # the stem and multi-scale fusion; each task branch reads directly
-        # from its scale's features.
-        # P3 head (in=c2, ~16ch)
-        self.head_p3_box = nn.Conv2d(c2, 3 * 4, 1)
-        self.head_p3_obj = nn.Conv2d(c2, 3 * 1, 1)
-        self.head_p3_cls = nn.Conv2d(c2, out_channels - 3 * 5, 1)
-
-        # P4 head (in=c4, ~32ch)
-        self.head_p4_box = nn.Conv2d(c4, 3 * 4, 1)
-        self.head_p4_obj = nn.Conv2d(c4, 3 * 1, 1)
-        self.head_p4_cls = nn.Conv2d(c4, out_channels - 3 * 5, 1)
-
-        # P5 head (in=c8, ~64ch)
-        self.head_p5_box = nn.Conv2d(c8, 3 * 4, 1)
-        self.head_p5_obj = nn.Conv2d(c8, 3 * 1, 1)
-        self.head_p5_cls = nn.Conv2d(c8, out_channels - 3 * 5, 1)
-
-    @staticmethod
-    def _decode_head(box, obj, cls_conv, feat):
-        """Direct 1×1 projection — no shared spatial mixing (方案A)."""
-        b, _, h, w = feat.shape
-        box_out = box(feat).contiguous().view(b, 3, 4, h, w)
-        obj_out = obj(feat).contiguous().view(b, 3, 1, h, w)
-        cls_out = cls_conv(feat).contiguous().view(b, 3, -1, h, w)
-        return torch.cat([box_out, obj_out, cls_out], dim=2).contiguous().view(b, -1, h, w)
+        reg_max = int(getattr(config, "ANCHOR_FREE_REG_MAX", 16))
+        head_ch = int(getattr(config, "ANCHOR_FREE_HEAD_CH", max(c2, 16)))
+        p2_ch = int(getattr(config, "ANCHOR_FREE_P2_FUSION_CH", c2))
+        p2_head_ch = int(getattr(config, "ANCHOR_FREE_P2_HEAD_CH", p2_ch))
+        self.p2_from_s4 = ConvBNAct(c4, p2_ch, 1)
+        self.p2_from_p3 = ConvBNAct(c2, p2_ch, 1)
+        self.p2_fuse = nn.Sequential(
+            ConvBNAct(p2_ch * 2, p2_ch, 1),
+            ConvBNAct(p2_ch, p2_ch, 3, groups=p2_ch),
+            ECABlock(p2_ch),
+        )
+        self.anchor_free_heads = nn.ModuleList(
+            [AnchorFreeDetectBranch(p2_ch, config.NUM_CLASSES, reg_max, p2_head_ch)]
+            + [AnchorFreeDetectBranch(ch, config.NUM_CLASSES, reg_max, head_ch) for ch in (c2, c4, c8)]
+        )
+        return
 
     def forward(self, x, return_features=False):
         # CoordConv: prepend normalized [-1, 1] coordinate channels.
@@ -339,22 +154,14 @@ class YOLOLightHead(nn.Module):
         p4_down = self.down_p4(p4_pan)
         p5_pan = self.pan_p5(torch.cat([p4_down, p5_feat], dim=1))
 
-        # Detection heads — direct 1×1 per scale (方案A)
-        if self.detection_protocol == "anchor_free_tal":
-            p3_up = F.interpolate(p3_fused, size=s4.shape[-2:], mode="nearest")
-            p2_fused = self.p2_fuse(torch.cat([self.p2_from_s4(s4), self.p2_from_p3(p3_up)], dim=1))
-            prediction_features = (
-                self.head_dropout(p2_fused), self.head_dropout(p3_fused),
-                self.head_dropout(p4_pan), self.head_dropout(p5_pan),
-            )
-            predictions = tuple(head(feat) for head, feat in zip(self.anchor_free_heads, prediction_features))
-        else:
-            prediction_features = (self.head_dropout(p3_fused), self.head_dropout(p4_pan), self.head_dropout(p5_pan))
-            predictions = (
-                self._decode_head(self.head_p3_box, self.head_p3_obj, self.head_p3_cls, prediction_features[0]),
-                self._decode_head(self.head_p4_box, self.head_p4_obj, self.head_p4_cls, prediction_features[1]),
-                self._decode_head(self.head_p5_box, self.head_p5_obj, self.head_p5_cls, prediction_features[2]),
-            )
+        # Detection heads — anchor-free TAL with DFL
+        p3_up = F.interpolate(p3_fused, size=s4.shape[-2:], mode="nearest")
+        p2_fused = self.p2_fuse(torch.cat([self.p2_from_s4(s4), self.p2_from_p3(p3_up)], dim=1))
+        prediction_features = (
+            self.head_dropout(p2_fused), self.head_dropout(p3_fused),
+            self.head_dropout(p4_pan), self.head_dropout(p5_pan),
+        )
+        predictions = tuple(head(feat) for head, feat in zip(self.anchor_free_heads, prediction_features))
 
         if return_features:
             return predictions, {"s8": p3_feat, "s16": p4_feat, "s32": p5_feat}

@@ -13,7 +13,7 @@ def train():
     """Train with the appropriate loop based on DETECTOR_HEAD_TYPE config."""
     from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 
-    head_type = str(getattr(Config, "DETECTOR_HEAD_TYPE", "yolov8_anchor")).strip().lower()
+    head_type = str(getattr(Config, "DETECTOR_HEAD_TYPE", "light")).strip().lower()
 
     if head_type in ("compact", "center_detect"):
         from .teacher_train_compact import train as _train

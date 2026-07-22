@@ -85,7 +85,7 @@ def _write_teacher_tensorboard_model_summary(writer, model):
         f"Teacher architecture: {Config.TEACHER_ARCH}",
         f"Detector head type: {Config.DETECTOR_HEAD_TYPE}",
         f"Input tensor: (B, 3, {Config.IMG_SIZE}, {Config.IMG_SIZE})",
-        f"Detection strides: {Config.STRIDES}",
+        f"Detection strides: {Config.ANCHOR_FREE_STRIDES}",
         f"AMP enabled: {Config.ENABLE_AMP}",
         f"Feature distillation enabled: {getattr(Config, 'ENABLE_FEATURE_DISTILL', False)}",
     ])
@@ -257,7 +257,7 @@ def train():
     scheduler = None
 
     log_to_file(Config, "=" * 60)
-    log_to_file(Config, f"Training {Config.DETECTOR_HEAD_TYPE} detector with {Config.DETECTION_PROTOCOL} protocol")
+    log_to_file(Config, f"Training {Config.DETECTOR_HEAD_TYPE} detector with anchor_free_tal protocol")
     log_to_file(Config, "=" * 60)
     init_epoch_log_table(Config)
     tensorboard_writer = create_tensorboard_writer(Config, Config.TEACHER_OUTPUT_DIR, log_to_file) if is_main else None
@@ -430,7 +430,7 @@ def train():
                         "val_map50": best_map50 if val_metrics is not None else None,
                         "teacher_arch": Config.TEACHER_ARCH,
                         "head_type": Config.DETECTOR_HEAD_TYPE,
-                        "detection_protocol": Config.DETECTION_PROTOCOL,
+                        "detection_protocol": "anchor_free_tal",
                     },
                     joint_best_path,
                 )
@@ -496,7 +496,7 @@ def train():
                 "val_map50": best_map50 if best_map50 >= 0 else None,
                 "teacher_arch": Config.TEACHER_ARCH,
                 "head_type": Config.DETECTOR_HEAD_TYPE,
-                "detection_protocol": Config.DETECTION_PROTOCOL,
+                "detection_protocol": "anchor_free_tal",
             },
             joint_final_path,
         )

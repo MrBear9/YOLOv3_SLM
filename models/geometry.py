@@ -65,6 +65,7 @@ def bbox_iou_matrix_xywh(box1, box2, eps=1e-7):
 
 
 def weighted_mean(values, weights=None, eps=1e-6):
+    """Weighted mean; kept for compact-detect losses which still use it."""
     if values.numel() == 0:
         return torch.zeros((), device=values.device, dtype=values.dtype)
     if weights is None:
@@ -73,26 +74,3 @@ def weighted_mean(values, weights=None, eps=1e-6):
     if weights.shape != values.shape:
         weights = weights.expand_as(values)
     return (values * weights).sum() / weights.sum().clamp(min=eps)
-
-
-def apply_nms(config, detections, nms_thresh, max_det, class_agnostic=None):
-    if len(detections) == 0:
-        return np.zeros((0, 6), dtype=np.float32)
-    if class_agnostic is None:
-        class_agnostic = config.AGNOSTIC_NMS
-    det_tensor = torch.as_tensor(detections, dtype=torch.float32)
-    boxes_xyxy = xywh_to_xyxy(det_tensor[:, :4])
-    scores = det_tensor[:, 4]
-    class_ids = det_tensor[:, 5]
-    if class_agnostic:
-        det_tensor = det_tensor[nms(boxes_xyxy, scores, nms_thresh)]
-    else:
-        kept = []
-        for cls_id in class_ids.unique(sorted=False):
-            cls_mask = class_ids == cls_id
-            kept.append(det_tensor[cls_mask][nms(boxes_xyxy[cls_mask], scores[cls_mask], nms_thresh)])
-        if not kept:
-            return np.zeros((0, 6), dtype=np.float32)
-        det_tensor = torch.cat(kept, dim=0)
-    det_tensor = det_tensor[det_tensor[:, 4].argsort(descending=True)]
-    return det_tensor[:max_det].cpu().numpy()

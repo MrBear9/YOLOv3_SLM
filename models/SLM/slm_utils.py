@@ -335,7 +335,7 @@ def log_config():
     log_to_file(Config, "Optical SLM student training — key config")
     log_to_file(Config, "=" * 80)
     log_to_file(Config, f"Dataset: {Config.YAML_PATH}  |  Output: {Config.OUTPUT_DIR}")
-    log_to_file(Config, f"Teacher: {Config.TEACHER_ARCH}  |  Detector: {Config.DETECTOR_HEAD_TYPE} ({Config.DETECTION_PROTOCOL})")
+    log_to_file(Config, f"Teacher: {Config.TEACHER_ARCH}  |  Detector: {Config.DETECTOR_HEAD_TYPE} (anchor_free_tal)")
     num_layers = int(getattr(Config, "NUM_LAYERS", 2))
     multi = bool(getattr(Config, "SLM_MULTI_HEAD_ENABLED", False))
     log_to_file(Config, f"Optical: {num_layers}-layer, multi_head={multi}, phase_mode={Config.SLM_PHASE_PARAM_MODE}, init={Config.SLM_INIT_MODE}")

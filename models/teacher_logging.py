@@ -34,37 +34,20 @@ def log_all_parameters():
     log_to_file(Config, f"Image size / batch / epochs: {Config.IMG_SIZE} / {Config.BATCH_SIZE} / {Config.EPOCHS}")
     log_to_file(
         Config,
-        f"Head factory: type={Config.DETECTOR_HEAD_TYPE}, protocol={Config.DETECTION_PROTOCOL}, light_base_ch={Config.YOLO_LIGHT_BASE_CH}, "
+        f"Head factory: type={Config.DETECTOR_HEAD_TYPE}, light_base_ch={Config.YOLO_LIGHT_BASE_CH}, "
         f"yolov8_base_ch={Config.YOLOV8_BASE_CHANNELS}, c2f_blocks={Config.YOLOV8_C2F_BLOCKS}",
     )
-    active_strides = Config.ANCHOR_FREE_STRIDES if Config.DETECTION_PROTOCOL == "anchor_free_tal" else Config.STRIDES
-    log_to_file(Config, f"Strides: {active_strides}")
-    if Config.DETECTION_PROTOCOL == "anchor":
-        log_to_file(Config, f"Anchor source: {Config.ANCHOR_SOURCE}")
-        log_to_file(Config, f"Anchors: {Config.ANCHORS}")
-        log_to_file(Config, f"Loss weights box/obj/noobj/cls: {Config.BOX_WEIGHT_BASE}/{Config.OBJ_WEIGHT_BASE}/{Config.NOOBJ_WEIGHT_BASE}/{Config.CLS_WEIGHT_BASE}")
-    else:
-        log_to_file(
-            Config,
-            f"Anchor-free TAL/DFL: head_ch={Config.ANCHOR_FREE_HEAD_CH}, reg_max={Config.ANCHOR_FREE_REG_MAX}, "
-            f"topk={Config.TAL_TOPK}, alpha={Config.TAL_ALPHA}, beta={Config.TAL_BETA}",
-        )
-        log_to_file(
-            Config,
-            f"Light P2: fusion_ch={Config.ANCHOR_FREE_P2_FUSION_CH}, head_ch={Config.ANCHOR_FREE_P2_HEAD_CH}",
-        )
-        log_to_file(Config, "Anchor-free classification: BCE with TAL IoU soft targets")
-    if Config.DETECTION_PROTOCOL == "anchor":
-        log_to_file(Config, f"Focal alpha/gamma: {Config.FOCAL_ALPHA}/{Config.FOCAL_GAMMA}")
-    if Config.DETECTION_PROTOCOL == "anchor":
-        log_to_file(
-            Config,
-            f"Anchor matching: mode={Config.ANCHOR_MATCH_MODE}, ratio_thresh={Config.ANCHOR_MATCH_RATIO_THRESH}, "
-            f"neighbor_cells={Config.ASSIGN_NEIGHBOR_CELLS}, simota_iou={Config.ANCHOR_MATCH_IOU_THRESH}, "
-            f"center_radius={Config.CENTER_PRIOR_RADIUS}, top_n={Config.SIMOTA_TOP_N}, max_assign={Config.SIMOTA_MAX_ASSIGN}",
-        )
-    log_to_file(Config, f"Hard negative mining: ratio={Config.HARD_NEG_RATIO}, min={Config.HARD_NEG_MIN}")
-    log_to_file(Config, f"Box decode range: {Config.BOX_DECODE_RANGE}")
+    log_to_file(Config, f"Strides: {Config.ANCHOR_FREE_STRIDES}")
+    log_to_file(
+        Config,
+        f"Anchor-free TAL/DFL: head_ch={Config.ANCHOR_FREE_HEAD_CH}, reg_max={Config.ANCHOR_FREE_REG_MAX}, "
+        f"topk={Config.TAL_TOPK}, alpha={Config.TAL_ALPHA}, beta={Config.TAL_BETA}",
+    )
+    log_to_file(
+        Config,
+        f"Light P2: fusion_ch={Config.ANCHOR_FREE_P2_FUSION_CH}, head_ch={Config.ANCHOR_FREE_P2_HEAD_CH}",
+    )
+    log_to_file(Config, "Anchor-free classification: BCE with TAL IoU soft targets")
     log_to_file(Config, f"LR teacher/detector: {Config.PHASE1_TEACHER_LR}/{Config.PHASE1_DETECTOR_LR} -> {Config.PHASE2_TEACHER_LR}/{Config.PHASE2_DETECTOR_LR}")
     if Config.get_teacher_init_mode() == "joint_checkpoint":
         log_to_file(

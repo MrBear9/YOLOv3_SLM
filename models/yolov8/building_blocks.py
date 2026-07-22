@@ -1,8 +1,8 @@
-"""YOLOv8 building blocks and detection branches.
+"""YOLOv8 building blocks.
 
-Shared NN modules used by the various detection head variants:
-ConvBNAct, ResBlock, ECABlock, Bottleneck, C2f, SPPF, C2fECA,
-EnhancedDetectBranch, YOLOv8AnchorDetectBranch.
+Shared NN modules: ConvBNAct, ResBlock, ECABlock, Bottleneck, C2f, SPPF, C2fECA.
+Legacy anchor detection branches (EnhancedDetectBranch, YOLOv8AnchorDetectBranch)
+were removed together with the anchor protocol.
 """
 
 import torch
@@ -117,62 +117,3 @@ class C2fECA(nn.Module):
         return self.eca(self.cv2(torch.cat(parts, dim=1)))
 
 
-class EnhancedDetectBranch(nn.Module):
-    """Enhanced decoupled detection branch with residual + ECA.
-
-    Compared to the original 2-layer branch:
-      - 3 ConvBNAct layers with channel expansion (in → 2×hidden → hidden → out)
-      - Residual shortcut from first layer to third layer
-      - ECA attention after residual addition
-
-    This design provides deeper feature extraction with better gradient flow,
-    which is essential for improving localization and classification accuracy.
-    """
-
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        hidden = max(in_channels, 64)
-        if out_channels % 3 != 0 or out_channels < 18:
-            raise ValueError(f"out_channels must be 3 * (5 + num_classes), got {out_channels}")
-        cls_channels = out_channels - 3 * 5
-
-        # Shared feature extractor: 3-layer with residual + ECA
-        self.shared = nn.Sequential(
-            ConvBNAct(in_channels, hidden * 2, 3),
-            ConvBNAct(hidden * 2, hidden, 3),
-        )
-        self.residual_proj = nn.Conv2d(in_channels, hidden, 1, bias=False)
-        self.eca = ECABlock(hidden)
-
-        # Decoupled heads: each is a single 1×1 conv on shared features
-        self.box_head = nn.Conv2d(hidden, 3 * 4, 1)
-        self.obj_head = nn.Conv2d(hidden, 3 * 1, 1)
-        self.cls_head = nn.Conv2d(hidden, cls_channels, 1)
-
-    def forward(self, x):
-        b, _, h, w = x.shape
-        feat = self.shared(x) + self.residual_proj(x)
-        feat = self.eca(feat)
-        box = self.box_head(feat).contiguous().view(b, 3, 4, h, w)
-        obj = self.obj_head(feat).contiguous().view(b, 3, 1, h, w)
-        cls = self.cls_head(feat).contiguous().view(b, 3, -1, h, w)
-        return torch.cat([box, obj, cls], dim=2).contiguous().view(b, -1, h, w)
-
-
-class YOLOv8AnchorDetectBranch(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        hidden = max(in_channels, 64)
-        if out_channels % 3 != 0 or out_channels < 18:
-            raise ValueError(f"out_channels must be 3 * (5 + num_classes), got {out_channels}")
-        cls_channels = out_channels - 3 * 5
-        self.box = nn.Sequential(ConvBNAct(in_channels, hidden, 3), ConvBNAct(hidden, hidden, 3), nn.Conv2d(hidden, 3 * 4, 1))
-        self.obj = nn.Sequential(ConvBNAct(in_channels, hidden, 3), ConvBNAct(hidden, hidden, 3), nn.Conv2d(hidden, 3 * 1, 1))
-        self.cls = nn.Sequential(ConvBNAct(in_channels, hidden, 3), ConvBNAct(hidden, hidden, 3), nn.Conv2d(hidden, cls_channels, 1))
-
-    def forward(self, x):
-        b, _, h, w = x.shape
-        box = self.box(x).contiguous().view(b, 3, 4, h, w)
-        obj = self.obj(x).contiguous().view(b, 3, 1, h, w)
-        cls = self.cls(x).contiguous().view(b, 3, -1, h, w)
-        return torch.cat([box, obj, cls], dim=2).contiguous().view(b, -1, h, w)

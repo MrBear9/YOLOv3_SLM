@@ -3,7 +3,7 @@ import torch
 from contextlib import nullcontext
 from tqdm import tqdm
 
-from models.geometry import bbox_iou_xywh, bbox_iou_matrix_xywh
+from models.geometry import bbox_iou_matrix_xywh
 from models.runtime import prepare_batch
 from .detection_protocol import decode_detections
 

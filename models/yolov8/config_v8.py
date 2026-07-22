@@ -29,29 +29,6 @@ def load_class_names(yaml_path):
     return {i: name for i, name in enumerate(names)}, len(names)
 
 
-def load_anchor_groups(anchor_yaml_path):
-    with open(anchor_yaml_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    anchors = cfg.get("anchors")
-    if anchors is None or not isinstance(anchors, list) or len(anchors) != 3:
-        raise ValueError(f"'anchors' must contain exactly 3 layers: {anchor_yaml_path}")
-    normalized = []
-    for layer_idx, layer_anchors in enumerate(anchors):
-        if not isinstance(layer_anchors, list) or len(layer_anchors) != 3:
-            raise ValueError(f"Layer {layer_idx} must contain exactly 3 anchors: {anchor_yaml_path}")
-        layer_values = []
-        for anchor_idx, anchor in enumerate(layer_anchors):
-            if not isinstance(anchor, (list, tuple)) or len(anchor) != 2:
-                raise ValueError(f"Anchor {anchor_idx} in layer {layer_idx} must be [w, h]: {anchor_yaml_path}")
-            w = int(anchor[0])
-            h = int(anchor[1])
-            if w <= 0 or h <= 0:
-                raise ValueError(f"Anchor {anchor_idx} in layer {layer_idx} must be positive: {anchor_yaml_path}")
-            layer_values.append([w, h])
-        normalized.append(layer_values)
-    return normalized
-
-
 class ConfigYOLOv8Anchor:
     # =========================================================================
     # Common — paths, device, I/O
@@ -73,8 +50,6 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     IMG_SIZE = 640
     BATCH_SIZE = 8
-    # Legacy anchor remains three-scale; anchor-free Light adds a stride-4 P2.
-    STRIDES = [8, 16, 32]
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
     STAGE1_LOCATE_EPOCHS = 40
@@ -113,20 +88,18 @@ class ConfigYOLOv8Anchor:
     # (uses its own hard-coded channels)
 
     # =========================================================================
-    # Teacher init / freeze
+    # Teacher init / freeze "scratch"(default) | "checkpoint" | "joint_checkpoint" 
     # =========================================================================
     TEACHER_INIT_MODE = "joint_checkpoint"
     TEACHER_INIT_CHECKPOINT = r"output/Tv1_light_p2_0.8355/teacher_detector_best.pth"
     FREEZE_TEACHER = False
 
     # =========================================================================
-    # DETECTOR_HEAD_TYPE = "light" | "yolov8_anchor"
+    # DETECTOR_HEAD_TYPE = "light" | "compact"
     # =========================================================================
     DETECTOR_HEAD_TYPE = "light"
-    # "anchor_free_tal" is the default; "anchor" retains ratio/SimOTA ablations.
-    DETECTION_PROTOCOL = "anchor_free_tal"
 
-    # -------- DETECTOR_HEAD_TYPE = "yolov8_anchor" --------
+    # -------- Shared backbone params (also used as fallback by teacher_guidance) --------
     YOLOV8_BASE_CHANNELS = 32
     YOLOV8_C2F_BLOCKS = 3
 
@@ -174,75 +147,6 @@ class ConfigYOLOv8Anchor:
     COMPACT_METRIC_MAX_DET = 100
     COMPACT_METRIC_PRE_NMS_TOPK = 300
     COMPACT_METRIC_IOU_THRESHOLD = 0.5
-
-    # =========================================================================
-    # Anchors
-    # =========================================================================
-    DEFAULT_ANCHORS = [
-        [[26, 23], [47, 49], [100, 67]],
-        [[103, 169], [203, 107], [351, 177]],
-        [[241, 354], [534, 299], [568, 528]],
-    ]
-    ANCHOR_CONFIG_PATH = r"output/anchor_clustering/yolo_anchors.yaml"
-    USE_EXTERNAL_ANCHORS = True
-    ANCHORS = None
-    ANCHOR_SOURCE = "default"
-
-    # =========================================================================
-    # Anchor assignment
-    # =========================================================================
-    # Choose explicitly between "ratio" and "yolo7_simota" before training.
-    ANCHOR_MATCH_MODE = "yolo7_simota"
-    ANCHOR_MATCH_RATIO_THRESH = 3.5   # ratio-based (max w/h ratio)
-    ASSIGN_NEIGHBOR_CELLS = True       # extra grid cells near boundaries
-    NOOBJ_IGNORE_IOU = 0.68
-    ANCHOR_MATCH_IOU_THRESH = 0.20
-    CENTER_PRIOR_RADIUS = 2.5
-    CENTER_PRIOR_WEIGHT = 0.50
-    SIMOTA_TOP_N = 20
-    SIMOTA_MAX_ASSIGN = 15
-    SIMOTA_OBJ_POS_THRESH = 0.05
-    SIMOTA_USE_SIZE_WEIGHT_OVERRIDE = True
-    SIMOTA_SMALL_OBJ_WEIGHT = 1.5
-    SIMOTA_MEDIUM_OBJ_WEIGHT = 1.0
-    SIMOTA_LARGE_OBJ_WEIGHT = 0.8
-
-    # =========================================================================
-    # Box decode
-    #   sigmoid * BOX_DECODE_RANGE - (RANGE-1)/2
-    #   1.0 → [0, 1]       (legacy, single-cell)
-    #   2.0 → [-0.5, 1.5]  (neighbor-cell compatible)
-    # =========================================================================
-    BOX_DECODE_RANGE = 2.0
-
-    # =========================================================================
-    # Detection loss weights
-    # =========================================================================
-    BOX_WEIGHT_BASE = 5.0
-    OBJ_WEIGHT_BASE = 2.0
-    NOOBJ_WEIGHT_BASE = 2.0
-    CLS_WEIGHT_BASE = 1.8
-    LOSS_UNCERTAINTY_WEIGHTING = False
-
-    # -------- Object size weighting --------
-    SMALL_OBJ_AREA = 32 * 32
-    LARGE_OBJ_AREA = 128 * 128
-    SMALL_OBJ_WEIGHT = 0.8
-    MEDIUM_OBJ_WEIGHT = 1.0
-    LARGE_OBJ_WEIGHT = 1.5
-
-    # =========================================================================
-    # Focal loss parameters
-    # =========================================================================
-    FOCAL_ALPHA = 0.35
-    FOCAL_GAMMA = 2.0
-    LABEL_SMOOTHING = 0.1
-
-    # =========================================================================
-    # Hard negative mining
-    # =========================================================================
-    HARD_NEG_RATIO = 30      # K = ratio × num_positives
-    HARD_NEG_MIN = 512       # minimum K per scale
 
     # =========================================================================
     # Feature distillation (teacher → detector)
@@ -387,16 +291,6 @@ class ConfigYOLOv8Anchor:
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
         cls.TEACHER_OUTPUT_DIR = resolve_project_path(cls.TEACHER_OUTPUT_DIR)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
-        cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
-        cls.ANCHOR_SOURCE = "default"
-        if cls.USE_EXTERNAL_ANCHORS:
-            try:
-                anchor_config_path = resolve_project_path(cls.ANCHOR_CONFIG_PATH)
-                cls.ANCHORS = load_anchor_groups(anchor_config_path)
-                cls.ANCHOR_SOURCE = anchor_config_path
-            except Exception as exc:
-                cls.ANCHORS = [[anchor.copy() for anchor in layer] for layer in cls.DEFAULT_ANCHORS]
-                cls.ANCHOR_SOURCE = f"default (external load failed: {exc})"
         os.makedirs(cls.TEACHER_OUTPUT_DIR, exist_ok=True)
         cls.LOG_ROOT_DIR = os.path.join(cls.TEACHER_OUTPUT_DIR, "logs")
         os.makedirs(cls.LOG_ROOT_DIR, exist_ok=True)
@@ -425,36 +319,19 @@ class ConfigYOLOv8Anchor:
         if epoch < cls.STAGE1_LOCATE_EPOCHS:
             return {
                 "phase": "locate_gt",
-                "box_weight": cls.BOX_WEIGHT_BASE * 1.35,
-                "obj_weight": cls.OBJ_WEIGHT_BASE * 1.15,
-                "noobj_weight": cls.NOOBJ_WEIGHT_BASE * 0.4,
-                "cls_weight": cls.CLS_WEIGHT_BASE * 1.43,
-                "size_weights": {
-                    "small": cls.SMALL_OBJ_WEIGHT,
-                    "medium": cls.MEDIUM_OBJ_WEIGHT,
-                    "large": cls.LARGE_OBJ_WEIGHT,
-                },
                 "teacher_lr": cls.PHASE1_TEACHER_LR,
                 "detector_lr": cls.PHASE1_DETECTOR_LR,
             }
         return {
             "phase": "balance_refine",
-            "box_weight": cls.BOX_WEIGHT_BASE,
-            "obj_weight": cls.OBJ_WEIGHT_BASE,
-            "noobj_weight": cls.NOOBJ_WEIGHT_BASE * 0.3,
-            "cls_weight": cls.CLS_WEIGHT_BASE * 1.12,
-            "size_weights": {
-                "small": 1.0,
-                "medium": 1.0,
-                "large": 1.0,
-            },
             "teacher_lr": cls.PHASE2_TEACHER_LR,
             "detector_lr": cls.PHASE2_DETECTOR_LR,
         }
 
     @classmethod
     def get_dynamic_weights(cls, epoch):
-        return cls.get_stage_settings(epoch)
+        """Return phase name only; kept for backward compatibility."""
+        return {"phase": cls.get_stage_settings(epoch)["phase"]}
 
     @classmethod
     def should_skip_file_log(cls, message):

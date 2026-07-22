@@ -510,7 +510,7 @@ def train():
     log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}, detector: compact (center-point)")
     log_to_file(Config, f"Compact: base_ch={Config.COMPACT_BASE_CH}, head_ch={Config.COMPACT_HEAD_CH}, dilations={Config.COMPACT_DILATIONS}")
     log_to_file(Config, f"Loss weights: heatmap={Config.HEATMAP_LOSS_WEIGHT}, wh={Config.WH_LOSS_WEIGHT}, offset={Config.OFFSET_LOSS_WEIGHT}, obj={getattr(Config, 'OBJ_LOSS_WEIGHT', 'N/A')}, cls={getattr(Config, 'CLS_LOSS_WEIGHT', 'N/A')}")
-    log_to_file(Config, f"Strides: {Config.STRIDES}")
+    log_to_file(Config, f"Strides: {Config.ANCHOR_FREE_STRIDES}")
     log_to_file(
         Config,
         f"LR stage1 teacher/detector: {Config.PHASE1_TEACHER_LR}/{Config.COMPACT_DETECTOR_LR}  "

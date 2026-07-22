@@ -3,6 +3,10 @@
 Re-exports build_detector_head() and TeacherWithDetector().
 Actual head implementations live in detection_heads.py,
 building blocks live in building_blocks.py.
+
+Note: YOLOv8AnchorHead / EnhancedYOLOv8AnchorHead were removed from the
+factory because they depend on the legacy anchor protocol (ratio/SimOTA)
+which has been deprecated. See docs/HeadIdea/deprecated-matching-strategies.md.
 """
 
 import torch.nn as nn
@@ -10,26 +14,23 @@ import torch.nn as nn
 from models.runtime import prepare_conv_tensor
 from models.teacher import build_teacher
 
-from .detection_heads import (
-    EnhancedYOLOv8AnchorHead,
-    YOLOLightHead,
-    YOLOv8AnchorHead,
-)
+from .detection_heads import YOLOLightHead
 
 
 def build_detector_head(config, in_channels=1, out_channels=None):
     """Factory: build the configured detector head type.
 
     Supported head_type values:
-      - "yolov8_anchor" (default): EnhancedYOLOv8AnchorHead with ECA + deeper branches
-      - "yolov8_anchor_legacy": original YOLOv8AnchorHead (kept for comparison)
-      - "light" / "yolo_light": YOLOLightHead
+      - "light" / "yolo_light": YOLOLightHead (anchor-free TAL)
+      - "compact" / "center_detect": CompactOpticalDetector
+
+    The *out_channels* parameter is accepted for backward compatibility
+    but is no longer used by any current head type.
     """
-    head_type = str(getattr(config, "DETECTOR_HEAD_TYPE", "yolov8_anchor")).strip().lower()
-    out_channels = config.get_detector_output_channels() if out_channels is None else out_channels
+    head_type = str(getattr(config, "DETECTOR_HEAD_TYPE", "light")).strip().lower()
     if head_type in {"light", "yolo_light"}:
         base_ch = int(getattr(config, "YOLO_LIGHT_BASE_CH", 8))
-        return YOLOLightHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch)
+        return YOLOLightHead(config, in_channels=in_channels, base_ch=base_ch)
     if head_type in {"compact", "center_detect"}:
         from models.compact_detect.model import CompactOpticalDetector           # V1 (anchor-free, 109 K)
         from models.compact_detect.model_v2 import CompactOpticalDetectorV2      # V2 (Level-4 decoupled, ~32 K)
@@ -37,24 +38,25 @@ def build_detector_head(config, in_channels=1, out_channels=None):
         if version in {"v2", "2"}:
             return CompactOpticalDetectorV2(config, in_channels=in_channels)
         return CompactOpticalDetector(config, in_channels=in_channels)
-    base_ch = int(getattr(config, "YOLOV8_BASE_CHANNELS", 32))
-    c2f_blocks = int(getattr(config, "YOLOV8_C2F_BLOCKS", 3))
-    if head_type in {"yolov8_anchor_legacy", "legacy"}:
-        return YOLOv8AnchorHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch, c2f_blocks=c2f_blocks)
-    if head_type in {"yolov8_anchor", "enhanced"}:
-        return EnhancedYOLOv8AnchorHead(config, in_channels=in_channels, out_channels=out_channels, base_ch=base_ch, c2f_blocks=c2f_blocks)
+    # Legacy anchor head types ("yolov8_anchor", "yolov8_anchor_legacy") are no
+    # longer supported — the anchor protocol (ratio/SimOTA) was removed.
+    # Use "light" for anchor-free TAL detection.
+    if head_type in {"yolov8_anchor", "yolov8_anchor_legacy", "enhanced", "legacy"}:
+        raise ValueError(
+            f"DETECTOR_HEAD_TYPE={head_type!r} requires the legacy anchor protocol "
+            f"which has been removed. Use 'light' or 'compact' instead."
+        )
     raise ValueError(
-        f"Unsupported DETECTOR_HEAD_TYPE={head_type!r}; choose 'light', "
-        "'compact', 'yolov8_anchor', or 'yolov8_anchor_legacy'."
+        f"Unsupported DETECTOR_HEAD_TYPE={head_type!r}; choose 'light' or 'compact'."
     )
 
 
 class TeacherWithDetector(nn.Module):
     """Teacher + Detector wrapper.
 
-    Supports both YOLOv8AnchorHead and YOLOLightHead via
-    ``build_detector_head(config)``.  The detector type is controlled by
-    ``DETECTOR_HEAD_TYPE`` in config.
+    Supports YOLOLightHead (anchor-free TAL) and CompactOpticalDetector
+    via ``build_detector_head(config)``.  The detector type is controlled
+    by ``DETECTOR_HEAD_TYPE`` in config.
     """
 
     def __init__(self, config, teacher=None, detector=None):
