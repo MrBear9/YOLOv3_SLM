@@ -255,7 +255,6 @@ def train():
 
     for epoch in range(Config.EPOCHS):
         last_epoch = epoch
-        train_dataset.set_epoch(epoch)
         if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
             train_sampler.set_epoch(epoch)
         model.train()
@@ -409,27 +408,6 @@ def train():
             no_improve_epochs = 0
         elif val_metrics is not None:
             no_improve_epochs += Config.VAL_INTERVAL
-
-        disable_last = max(int(getattr(Config, "SOLDIER_COPY_PASTE_DISABLE_LAST_EPOCHS", 0)), 0)
-        disable_patience = max(int(Config.TEACHER_EARLY_STOP_PATIENCE) - disable_last, 0)
-        should_disable_copy_paste = bool(
-            val_metrics is not None
-            and train_dataset.copy_paste_enabled
-            and not train_dataset.copy_paste_force_disabled
-            and Config.TEACHER_EARLY_STOP_PATIENCE > 0
-            and disable_last > 0
-            and no_improve_epochs >= disable_patience
-        ) if is_main else False
-        if use_ddp:
-            disable_tensor = torch.tensor(int(should_disable_copy_paste), device=device, dtype=torch.int32)
-            torch.distributed.broadcast(disable_tensor, src=0)
-            should_disable_copy_paste = bool(disable_tensor.item())
-        if should_disable_copy_paste and train_dataset.disable_copy_paste():
-            log_to_file(
-                Config,
-                f"Small-soldier Copy-Paste disabled permanently after {no_improve_epochs} epochs "
-                f"without mAP50 improvement; reserving up to {disable_last} real-data epochs before early stop.",
-            )
 
         if is_main and epoch % Config.VIS_INTERVAL == 0:
             save_detection_visualization_anchor_v8(Config, epoch, unwrap_module(model), vis_dataset, vis_dir, prefix=vis_prefix, device=device)

@@ -344,14 +344,14 @@ class ConfigYOLOv8Anchor:
     # Targeted training-only augmentation for the remaining small-soldier gap.
     SOLDIER_COPY_PASTE = True
     SOLDIER_CLASS_ID = 1
-    SOLDIER_COPY_PASTE_PROB = 0.12
-    SOLDIER_COPY_PASTE_MAX_OBJECTS = 1
-    SOLDIER_COPY_PASTE_MAX_EXISTING = 2
-    SOLDIER_COPY_PASTE_DISABLE_LAST_EPOCHS = 20
+    SOLDIER_COPY_PASTE_PROB = 0.20
+    SOLDIER_COPY_PASTE_MAX_OBJECTS = 2
+    # Keep augmentation active through early stopping. Linking it to
+    # no-improvement patience disabled it at epoch 101 in the latest run.
     SOLDIER_COPY_PASTE_AREA_MAX = 32 * 32
     SOLDIER_COPY_PASTE_SCALE_MIN = 0.90
-    SOLDIER_COPY_PASTE_SCALE_MAX = 1.10
-    SOLDIER_COPY_PASTE_IOA_MAX = 0.15
+    SOLDIER_COPY_PASTE_SCALE_MAX = 1.15
+    SOLDIER_COPY_PASTE_IOA_MAX = 0.20
     SOLDIER_COPY_PASTE_EDGE_FEATHER = 2
 
     # Windows 使用 spawn 创建多进程，开销远大于 Linux 的 fork，需要降低 worker 数量
@@ -381,102 +381,7 @@ class ConfigYOLOv8Anchor:
     SKIP_FILE_LOG_MESSAGES = ("best checkpoint updated", "saved best model", "best model saved")
 
     @classmethod
-    def apply_runtime_overrides(cls):
-        overrides = {
-            "OPTICAL_TEACHER_YAML_PATH": ("YAML_PATH", str),
-            "OPTICAL_TEACHER_OUTPUT_DIR": ("TEACHER_OUTPUT_DIR", str),
-            "OPTICAL_TEACHER_INIT_MODE": ("TEACHER_INIT_MODE", str),
-            "OPTICAL_TEACHER_INIT_CHECKPOINT": ("TEACHER_INIT_CHECKPOINT", str),
-            "OPTICAL_TEACHER_ARCH": ("TEACHER_ARCH", str),
-            "OPTICAL_TEACHER_DETECTOR_HEAD_TYPE": ("DETECTOR_HEAD_TYPE", str),
-            "OPTICAL_TEACHER_DETECTION_PROTOCOL": ("DETECTION_PROTOCOL", str),
-            "OPTICAL_TEACHER_ANCHOR_FREE_HEAD_CH": ("ANCHOR_FREE_HEAD_CH", int),
-            "OPTICAL_TEACHER_ANCHOR_FREE_REG_MAX": ("ANCHOR_FREE_REG_MAX", int),
-            "OPTICAL_TEACHER_ANCHOR_FREE_P2_FUSION_CH": ("ANCHOR_FREE_P2_FUSION_CH", int),
-            "OPTICAL_TEACHER_ANCHOR_FREE_P2_HEAD_CH": ("ANCHOR_FREE_P2_HEAD_CH", int),
-            "OPTICAL_TEACHER_V1_BASE_CHANNELS": ("TEACHER_V1_BASE_CHANNELS", int),
-            "OPTICAL_TEACHER_V1_C2F_BLOCKS": ("TEACHER_V1_C2F_BLOCKS", int),
-            "OPTICAL_TEACHER_V2_BASE_CHANNELS": ("TEACHER_V2_BASE_CHANNELS", int),
-            "OPTICAL_TEACHER_V2_C2F_BLOCKS": ("TEACHER_V2_C2F_BLOCKS", int),
-            "OPTICAL_TEACHER_V2_SYNTHETIC_WAVELENGTHS": ("TEACHER_V2_SYNTHETIC_WAVELENGTHS", int),
-            "OPTICAL_TEACHER_V2_COMPLEX_KERNEL_SIZE": ("TEACHER_V2_COMPLEX_KERNEL_SIZE", int),
-            "OPTICAL_TEACHER_V3_BASE_CHANNELS": ("TEACHER_V3_BASE_CHANNELS", int),
-            "OPTICAL_TEACHER_V3_C2F_BLOCKS": ("TEACHER_V3_C2F_BLOCKS", int),
-            "OPTICAL_TEACHER_V3_RESIDUAL_SCALE": ("TEACHER_V3_RESIDUAL_SCALE", float),
-            "OPTICAL_TEACHER_V3_GATE_SPARSITY_WEIGHT": ("TEACHER_V3_GATE_SPARSITY_WEIGHT", float),
-            "OPTICAL_TEACHER_V3_RESIDUAL_L1_WEIGHT": ("TEACHER_V3_RESIDUAL_L1_WEIGHT", float),
-            "OPTICAL_TEACHER_V3_OUTPUT_DEVIATION_WEIGHT": ("TEACHER_V3_OUTPUT_DEVIATION_WEIGHT", float),
-            "OPTICAL_DETECTOR_INVERT_FEATURE": ("DETECTOR_INVERT_FEATURE", bool),
-            "OPTICAL_TEACHER_ANCHOR_MATCH_MODE": ("ANCHOR_MATCH_MODE", str),
-            "OPTICAL_TEACHER_ANCHOR_MATCH_IOU_THRESH": ("ANCHOR_MATCH_IOU_THRESH", float),
-            "OPTICAL_TEACHER_CENTER_PRIOR_RADIUS": ("CENTER_PRIOR_RADIUS", float),
-            "OPTICAL_TEACHER_CENTER_PRIOR_WEIGHT": ("CENTER_PRIOR_WEIGHT", float),
-            "OPTICAL_TEACHER_SIMOTA_TOP_N": ("SIMOTA_TOP_N", int),
-            "OPTICAL_TEACHER_SIMOTA_MAX_ASSIGN": ("SIMOTA_MAX_ASSIGN", int),
-            "OPTICAL_TEACHER_SIMOTA_OBJ_POS_THRESH": ("SIMOTA_OBJ_POS_THRESH", float),
-            "OPTICAL_TEACHER_BATCH_SIZE": ("BATCH_SIZE", int),
-            "OPTICAL_TEACHER_SOLDIER_COPY_PASTE": ("SOLDIER_COPY_PASTE", bool),
-            "OPTICAL_TEACHER_SOLDIER_COPY_PASTE_PROB": ("SOLDIER_COPY_PASTE_PROB", float),
-            "OPTICAL_TEACHER_SOLDIER_COPY_PASTE_MAX_OBJECTS": ("SOLDIER_COPY_PASTE_MAX_OBJECTS", int),
-            "OPTICAL_TEACHER_SOLDIER_COPY_PASTE_DISABLE_LAST_EPOCHS": ("SOLDIER_COPY_PASTE_DISABLE_LAST_EPOCHS", int),
-            "OPTICAL_TEACHER_EPOCHS": ("EPOCHS", int),
-            "OPTICAL_TEACHER_EARLY_STOP_PATIENCE": ("TEACHER_EARLY_STOP_PATIENCE", int),
-            "OPTICAL_TEACHER_EARLY_STOP_MIN_DELTA": ("TEACHER_EARLY_STOP_MIN_DELTA", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_LOSS_WEIGHT": ("TEACHER_SLM_CIPHER_LOSS_WEIGHT", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_BLUR_KERNEL": ("TEACHER_SLM_CIPHER_BLUR_KERNEL", int),
-            "OPTICAL_TEACHER_SLM_CIPHER_TV_TARGET": ("TEACHER_SLM_CIPHER_TV_TARGET", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_HF_TARGET": ("TEACHER_SLM_CIPHER_HF_TARGET", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_RANGE_FLOOR": ("TEACHER_SLM_CIPHER_RANGE_FLOOR", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_MEAN_FLOOR": ("TEACHER_SLM_CIPHER_MEAN_FLOOR", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_PEAK_LIMIT": ("TEACHER_SLM_CIPHER_PEAK_LIMIT", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_EDGE_LIMIT": ("TEACHER_SLM_CIPHER_EDGE_LIMIT", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_TV_WEIGHT": ("TEACHER_SLM_CIPHER_TV_WEIGHT", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_HF_WEIGHT": ("TEACHER_SLM_CIPHER_HF_WEIGHT", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_RANGE_WEIGHT": ("TEACHER_SLM_CIPHER_RANGE_WEIGHT", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_MEAN_WEIGHT": ("TEACHER_SLM_CIPHER_MEAN_WEIGHT", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_PEAK_WEIGHT": ("TEACHER_SLM_CIPHER_PEAK_WEIGHT", float),
-            "OPTICAL_TEACHER_SLM_CIPHER_EDGE_WEIGHT": ("TEACHER_SLM_CIPHER_EDGE_WEIGHT", float),
-            "OPTICAL_TEACHER_NUM_WORKERS": ("NUM_WORKERS", int),
-            "OPTICAL_TEACHER_DATALOADER_TIMEOUT": ("DATALOADER_TIMEOUT", int),
-            "OPTICAL_TEACHER_AMP_DTYPE": ("AMP_DTYPE", str),
-            "OPTICAL_COMPACT_BASE_CH": ("COMPACT_BASE_CH", int),
-            "OPTICAL_COMPACT_HEAD_CH": ("COMPACT_HEAD_CH", int),
-            "OPTICAL_COMPACT_DETECTOR_LR": ("COMPACT_DETECTOR_LR", float),
-            "OPTICAL_COMPACT_WEIGHT_DECAY": ("COMPACT_WEIGHT_DECAY", float),
-            "OPTICAL_COMPACT_CONF_THRESH": ("COMPACT_CONF_THRESH", float),
-            "OPTICAL_COMPACT_NMS_THRESH": ("COMPACT_NMS_THRESH", float),
-            "OPTICAL_COMPACT_MAX_DET": ("COMPACT_MAX_DET", int),
-            "OPTICAL_COMPACT_METRIC_CONF_THRESH": ("COMPACT_METRIC_CONF_THRESH", float),
-            "OPTICAL_COMPACT_METRIC_NMS_THRESH": ("COMPACT_METRIC_NMS_THRESH", float),
-            "OPTICAL_COMPACT_METRIC_MAX_DET": ("COMPACT_METRIC_MAX_DET", int),
-            "OPTICAL_COMPACT_METRIC_PRE_NMS_TOPK": ("COMPACT_METRIC_PRE_NMS_TOPK", int),
-            "OPTICAL_COMPACT_METRIC_IOU_THRESHOLD": ("COMPACT_METRIC_IOU_THRESHOLD", float),
-            "OPTICAL_COMPACT_HEATMAP_LOSS_WEIGHT": ("HEATMAP_LOSS_WEIGHT", float),
-            "OPTICAL_COMPACT_WH_LOSS_WEIGHT": ("WH_LOSS_WEIGHT", float),
-            "OPTICAL_COMPACT_OFFSET_LOSS_WEIGHT": ("OFFSET_LOSS_WEIGHT", float),
-            "OPTICAL_COMPACT_OBJ_LOSS_WEIGHT": ("OBJ_LOSS_WEIGHT", float),
-            "OPTICAL_COMPACT_CLS_LOSS_WEIGHT": ("CLS_LOSS_WEIGHT", float),
-        }
-        for env_name, (attr, caster) in overrides.items():
-            value = os.environ.get(env_name)
-            if value:
-                setattr(cls, attr, caster(value))
-
-        freeze_teacher = os.environ.get("OPTICAL_TEACHER_FREEZE_TEACHER")
-        if freeze_teacher:
-            cls.FREEZE_TEACHER = freeze_teacher.strip().lower() in {"1", "true", "yes", "on"}
-
-        use_sampler = os.environ.get("OPTICAL_TEACHER_USE_CLASS_BALANCED_SAMPLER")
-        if use_sampler:
-            cls.USE_CLASS_BALANCED_SAMPLER = use_sampler.strip().lower() in {"1", "true", "yes", "on"}
-
-        enable_amp = os.environ.get("OPTICAL_TEACHER_ENABLE_AMP")
-        if enable_amp:
-            cls.ENABLE_AMP = enable_amp.strip().lower() in {"1", "true", "yes", "on"}
-
-    @classmethod
     def initialize(cls):
-        cls.apply_runtime_overrides()
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
         cls.TEACHER_OUTPUT_DIR = resolve_project_path(cls.TEACHER_OUTPUT_DIR)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)

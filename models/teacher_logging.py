@@ -78,8 +78,7 @@ def log_all_parameters():
         f"Small-soldier Copy-Paste: enabled={Config.SOLDIER_COPY_PASTE}, prob={Config.SOLDIER_COPY_PASTE_PROB}, "
         f"max_objects={Config.SOLDIER_COPY_PASTE_MAX_OBJECTS}, area_max={Config.SOLDIER_COPY_PASTE_AREA_MAX}, "
         f"scale={Config.SOLDIER_COPY_PASTE_SCALE_MIN}-{Config.SOLDIER_COPY_PASTE_SCALE_MAX}, "
-        f"ioa_max={Config.SOLDIER_COPY_PASTE_IOA_MAX}, max_existing={Config.SOLDIER_COPY_PASTE_MAX_EXISTING}, "
-        f"disable_last_epochs={Config.SOLDIER_COPY_PASTE_DISABLE_LAST_EPOCHS}",
+        f"ioa_max={Config.SOLDIER_COPY_PASTE_IOA_MAX}",
     )
     log_to_file(Config, f"Output: {Config.TEACHER_OUTPUT_DIR}")
     teacher = build_teacher(Config)
