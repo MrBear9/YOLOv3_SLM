@@ -15,14 +15,14 @@ class ConfigSLM(OpticalConfig):
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    OUTPUT_DIR = r"output/SLM_Tv1_light_p2"
+    OUTPUT_DIR = r"output/SLM_Tv1_light"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light_p2_0.8355/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light_0.8398/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -34,7 +34,7 @@ class ConfigSLM(OpticalConfig):
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
-    PHASE_FOCUS_EPOCHS = 245
+    PHASE_FOCUS_EPOCHS = 145
     DETECTOR_FOCUS_EPOCHS = 135
     JOINT_FIT_EPOCHS = 0
     NORM_JOINT_EPOCHS = 0
@@ -121,6 +121,9 @@ class ConfigSLM(OpticalConfig):
     TEACHER_V3_BASE_CHANNELS = 24
     TEACHER_V3_C2F_BLOCKS = 2
     TEACHER_V3_RESIDUAL_SCALE = 0.30
+    TEACHER_V3_GATE_SPARSITY_WEIGHT = 0.003
+    TEACHER_V3_RESIDUAL_L1_WEIGHT = 0.001
+    TEACHER_V3_OUTPUT_DEVIATION_WEIGHT = 0.02
 
     # =========================================================================
     # DETECTOR_HEAD_TYPE  (must match teacher-training checkpoint)
@@ -134,6 +137,8 @@ class ConfigSLM(OpticalConfig):
 
     # -------- DETECTOR_HEAD_TYPE = "light" --------
     YOLO_LIGHT_BASE_CH = 8  # A: halved from 16
+    DETECTOR_USE_COORDCONV = True
+    DETECTOR_INVERT_FEATURE = True   # invert teacher feature (dark→bright) before detector
     ANCHOR_FREE_HEAD_CH = 24
     ANCHOR_FREE_P2_FUSION_CH = 16
     ANCHOR_FREE_P2_HEAD_CH = 16
