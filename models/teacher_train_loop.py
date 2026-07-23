@@ -267,7 +267,9 @@ def train():
 
     start_epoch = int(resume_checkpoint.get("epoch", -1)) + 1 if resume_checkpoint is not None else 0
     if resume_checkpoint is not None and is_main:
-        torch.save(resume_checkpoint, joint_best_path)
+        checkpoint_path = os.path.abspath(Config.get_teacher_init_checkpoint())
+        if checkpoint_path != os.path.abspath(joint_best_path):
+            torch.save(resume_checkpoint, joint_best_path)
         log_to_file(Config, f"Protected baseline checkpoint at mAP50={best_map50:.4f}; resuming from epoch {start_epoch}.")
 
     for epoch in range(start_epoch, Config.EPOCHS):

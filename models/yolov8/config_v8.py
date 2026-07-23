@@ -91,7 +91,7 @@ class ConfigYOLOv8Anchor:
     # Teacher init / freeze "scratch"(default) | "checkpoint" | "joint_checkpoint" 
     # =========================================================================
     TEACHER_INIT_MODE = "joint_checkpoint"
-    TEACHER_INIT_CHECKPOINT = r"output/Tv1_light_p2_0.8355/teacher_detector_best.pth"
+    TEACHER_INIT_CHECKPOINT = r"output/Tv1_light_0.8398/teacher_detector_best.pth"
     FREEZE_TEACHER = False
 
     # =========================================================================
@@ -184,8 +184,9 @@ class ConfigYOLOv8Anchor:
     PHASE1_DETECTOR_LR = 3e-4
     PHASE2_TEACHER_LR = 1.5e-4
     PHASE2_DETECTOR_LR = 1e-4
-    JOINT_RESUME_TEACHER_LR = 7.5e-5
-    JOINT_RESUME_DETECTOR_LR = 5e-5
+    # Short low-LR refinement from the protected 0.8398 joint checkpoint.
+    JOINT_RESUME_TEACHER_LR = 3e-5
+    JOINT_RESUME_DETECTOR_LR = 2e-5
     LEARNING_RATE = 3e-4
     WEIGHT_DECAY = 1e-3
     OPTIMIZER = "AdamW"
@@ -204,7 +205,7 @@ class ConfigYOLOv8Anchor:
     # Validation
     # =========================================================================
     VAL_INTERVAL = 2
-    TEACHER_EARLY_STOP_PATIENCE = 30
+    TEACHER_EARLY_STOP_PATIENCE = 20
     TEACHER_EARLY_STOP_MIN_DELTA = 0.002
     METRIC_IOU_THRESHOLD = 0.5
     METRIC_CONF_THRESH = 0.001

@@ -73,7 +73,7 @@ Optical_yolo_detect/*
 
 # dataset
 dataset/*
-!dataset/*.py
+# !dataset/*.py
 
 # models
 models/__pycache__
