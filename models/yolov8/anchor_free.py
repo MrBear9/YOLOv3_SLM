@@ -122,8 +122,12 @@ class AnchorFreeTALLoss(nn.Module):
         if targets is None or targets.numel() == 0:
             return torch.empty((0, 4), device=device, dtype=dtype), torch.empty(0, device=device, dtype=torch.long)
         targets = targets.to(device=device, dtype=dtype)
-        cx, cy = targets[:, 1] * image_size, targets[:, 2] * image_size
-        w, h = targets[:, 3] * image_size, targets[:, 4] * image_size
+        if isinstance(image_size, (tuple, list)):
+            image_h, image_w = image_size
+        else:
+            image_h = image_w = image_size
+        cx, cy = targets[:, 1] * image_w, targets[:, 2] * image_h
+        w, h = targets[:, 3] * image_w, targets[:, 4] * image_h
         return torch.stack((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), dim=-1), targets[:, 0].long()
 
     def dfl_loss(self, logits, target):
@@ -147,7 +151,9 @@ class AnchorFreeTALLoss(nn.Module):
         target_scores, target_boxes = torch.zeros_like(cls_logits), torch.zeros_like(decoded)
         foreground = torch.zeros(cls_logits.shape[:2], device=cls_logits.device, dtype=torch.bool)
         for b in range(cls_logits.shape[0]):
-            gt_boxes, gt_classes = self.targets_to_xyxy(targets[b], self.config.IMG_SIZE, cls_logits.device, cls_logits.dtype)
+            gt_boxes, gt_classes = self.targets_to_xyxy(
+                targets[b], self.config.RESOLUTION, cls_logits.device, cls_logits.dtype
+            )
             target_scores[b], target_boxes[b], foreground[b] = self.assigner(
                 cls_logits[b].sigmoid(), decoded[b].detach(), points, gt_boxes, gt_classes
             )

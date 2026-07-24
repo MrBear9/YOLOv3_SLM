@@ -28,8 +28,9 @@ def draw_box(draw, box_xywh, color, label):
     cx, cy, bw, bh = [float(v) for v in box_xywh]
     x1 = max(0.0, cx - bw / 2.0)
     y1 = max(0.0, cy - bh / 2.0)
-    x2 = min(float(Config.IMG_SIZE - 1), cx + bw / 2.0)
-    y2 = min(float(Config.IMG_SIZE - 1), cy + bh / 2.0)
+    image_h, image_w = Config.RESOLUTION
+    x2 = min(float(image_w - 1), cx + bw / 2.0)
+    y2 = min(float(image_h - 1), cy + bh / 2.0)
     draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
     if label:
         draw.text((x1 + 2, max(0.0, y1 - 12)), label, fill=color)
@@ -138,11 +139,12 @@ def add_tensorboard_visualization(writer, step, dataset, student, detector, devi
             if gt.numel() < 5:
                 continue
             cls_id = int(gt[0].item())
+            image_h, image_w = Config.RESOLUTION
             box = [
-                gt[1].item() * Config.IMG_SIZE,
-                gt[2].item() * Config.IMG_SIZE,
-                gt[3].item() * Config.IMG_SIZE,
-                gt[4].item() * Config.IMG_SIZE,
+                gt[1].item() * image_w,
+                gt[2].item() * image_h,
+                gt[3].item() * image_w,
+                gt[4].item() * image_h,
             ]
             draw_box(draw, box, (60, 220, 80), f"GT {Config.CLASS_NAMES.get(cls_id, cls_id)}")
         for det in detections[idx]:
@@ -262,13 +264,14 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, te
                 if target.numel() < 5:
                     continue
                 cls_id, cx, cy, w, h = target.tolist()
-                x1 = (cx - w / 2) * Config.IMG_SIZE
-                y1 = (cy - h / 2) * Config.IMG_SIZE
+                image_h, image_w = Config.RESOLUTION
+                x1 = (cx - w / 2) * image_w
+                y1 = (cy - h / 2) * image_h
                 axes[row, col].add_patch(
                     plt.Rectangle(
                         (x1, y1),
-                        w * Config.IMG_SIZE,
-                        h * Config.IMG_SIZE,
+                        w * image_w,
+                        h * image_h,
                         fill=False,
                         edgecolor="lime",
                         linewidth=1.8,

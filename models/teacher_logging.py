@@ -31,7 +31,7 @@ def log_all_parameters():
     log_to_file(Config, "=" * 80)
     log_to_file(Config, f"Dataset: {Config.YAML_PATH}")
     log_to_file(Config, f"Classes: {Config.CLASS_NAMES}")
-    log_to_file(Config, f"Image size / batch / epochs: {Config.IMG_SIZE} / {Config.BATCH_SIZE} / {Config.EPOCHS}")
+    log_to_file(Config, f"Resolution (H, W) / batch / epochs: {Config.RESOLUTION} / {Config.BATCH_SIZE} / {Config.EPOCHS}")
     log_to_file(
         Config,
         f"Head factory: type={Config.DETECTOR_HEAD_TYPE}, light_base_ch={Config.YOLO_LIGHT_BASE_CH}, "

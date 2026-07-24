@@ -21,7 +21,7 @@ from models.SLM.utils_slm import load_matching_state
 from models.geometry import bbox_iou_xywh
 from models.teacher_guidance import enhance_feature_for_display
 from models.yolov8.detection_protocol import decode_detections
-from models.yolov8.head_v8 import YOLOv8AnchorHead
+from models.yolov8.head_v8 import build_detector_head
 from models.yolov8.metrics_anchor_v8 import compute_average_precision
 
 
@@ -109,11 +109,17 @@ def load_detector(detector, checkpoint_path, device):
     }
 
 
-def update_metrics(state, detections, targets, img_size, iou_thresh):
+def update_metrics(state, detections, targets, resolution, iou_thresh):
+    image_h, image_w = resolution
     gt_by_class = {}
     for gt in targets:
         cls_id = int(gt[0].item())
-        box = [float(gt[1] * img_size), float(gt[2] * img_size), float(gt[3] * img_size), float(gt[4] * img_size)]
+        box = [
+            float(gt[1] * image_w),
+            float(gt[2] * image_h),
+            float(gt[3] * image_w),
+            float(gt[4] * image_h),
+        ]
         gt_by_class.setdefault(cls_id, []).append(box)
         state["gt_counts"][cls_id] += 1
         state["gt"] += 1
@@ -151,12 +157,13 @@ def save_vis(path, gray, optical_feature, targets, detections):
     axes[2].set_title("Ground Truth")
     axes[3].imshow(img_np, cmap="gray")
     axes[3].set_title("Predictions")
+    image_h, image_w = Config.RESOLUTION
     for target in targets:
         cls_id, cx, cy, w, h = target.tolist()
-        x1 = (cx - w / 2) * Config.IMG_SIZE
-        y1 = (cy - h / 2) * Config.IMG_SIZE
+        x1 = (cx - w / 2) * image_w
+        y1 = (cy - h / 2) * image_h
         axes[2].add_patch(
-            plt.Rectangle((x1, y1), w * Config.IMG_SIZE, h * Config.IMG_SIZE, fill=False, edgecolor="lime", linewidth=1.8, linestyle="--")
+            plt.Rectangle((x1, y1), w * image_w, h * image_h, fill=False, edgecolor="lime", linewidth=1.8, linestyle="--")
         )
         axes[2].text(
             x1,
@@ -190,7 +197,7 @@ def save_vis(path, gray, optical_feature, targets, detections):
 def run(args):
     Config.YAML_PATH = str(args.yaml)
     Config.OUTPUT_DIR = str(args.output_dir)
-    Config.IMG_SIZE = args.img_size
+    Config.RESOLUTION = (args.height, args.width)
     Config.BATCH_SIZE = args.batch_size
     Config.CONF_THRESH = args.conf_thresh
     Config.NMS_THRESH = args.nms_thresh
@@ -198,7 +205,7 @@ def run(args):
     Config.initialize()
     device = torch.device(args.device)
     student = OpticalStudent(Config).to(device)
-    detector = YOLOv8AnchorHead(Config, in_channels=1, out_channels=Config.get_detector_output_channels()).to(device)
+    detector = build_detector_head(Config, in_channels=1).to(device)
     detector_info = load_detector(detector, args.detector_checkpoint, device)
     detector_checkpoint = detector_info.pop("checkpoint")
     paired_student_available = isinstance(detector_checkpoint, dict) and "student_state_dict" in detector_checkpoint
@@ -245,7 +252,7 @@ def run(args):
             for idx in range(gray.shape[0]):
                 seen += 1
                 targets = batch["targets"][idx]
-                update_metrics(state, detections[idx], targets, Config.IMG_SIZE, args.metric_iou_thresh)
+                update_metrics(state, detections[idx], targets, Config.RESOLUTION, args.metric_iou_thresh)
                 if args.max_vis_images < 0 or saved < args.max_vis_images:
                     stem = Path(batch["image_paths"][idx]).stem
                     save_vis(
@@ -303,7 +310,8 @@ def parse_args():
     parser.add_argument("--yaml", type=Path, default=ROOT / "data" / "military" / "data.yaml")
     parser.add_argument("--split", choices=("train", "val", "test"), default="test")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--img-size", type=int, default=640)
+    parser.add_argument("--height", type=int, default=640)
+    parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--conf-thresh", type=float, default=0.5)

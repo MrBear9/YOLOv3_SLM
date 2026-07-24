@@ -20,28 +20,39 @@ def identity_collate(batch):
     return batch
 
 
+def _resolve_hw(output_size):
+    if isinstance(output_size, (tuple, list)):
+        if len(output_size) != 2:
+            raise ValueError("output_size must be an int or (height, width).")
+        return int(output_size[0]), int(output_size[1])
+    side = int(output_size)
+    return side, side
+
+
 def letterbox_content_bounds(image_size, output_size):
     src_w, src_h = image_size
-    scale = min(output_size / src_w, output_size / src_h)
+    output_h, output_w = _resolve_hw(output_size)
+    scale = min(output_w / src_w, output_h / src_h)
     new_w, new_h = max(1, round(src_w * scale)), max(1, round(src_h * scale))
-    left, top = (output_size - new_w) // 2, (output_size - new_h) // 2
+    left, top = (output_w - new_w) // 2, (output_h - new_h) // 2
     return left, top, left + new_w, top + new_h
 
 
 def letterbox_image_targets(img, targets, image_size, fill=114):
     src_w, src_h = img.size
-    scale = min(image_size / src_w, image_size / src_h)
+    output_h, output_w = _resolve_hw(image_size)
+    scale = min(output_w / src_w, output_h / src_h)
     new_w, new_h = max(1, round(src_w * scale)), max(1, round(src_h * scale))
     resized = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
     left, top, _, _ = letterbox_content_bounds((src_w, src_h), image_size)
-    canvas = Image.new("RGB", (image_size, image_size), color=(fill, fill, fill))
+    canvas = Image.new("RGB", (output_w, output_h), color=(fill, fill, fill))
     canvas.paste(resized, (left, top))
     if targets.numel():
         targets = targets.clone()
-        targets[:, 1] = (targets[:, 1] * src_w * scale + left) / image_size
-        targets[:, 2] = (targets[:, 2] * src_h * scale + top) / image_size
-        targets[:, 3] = targets[:, 3] * src_w * scale / image_size
-        targets[:, 4] = targets[:, 4] * src_h * scale / image_size
+        targets[:, 1] = (targets[:, 1] * src_w * scale + left) / output_w
+        targets[:, 2] = (targets[:, 2] * src_h * scale + top) / output_h
+        targets[:, 3] = targets[:, 3] * src_w * scale / output_w
+        targets[:, 4] = targets[:, 4] * src_h * scale / output_h
     return canvas, targets
 
 
@@ -63,7 +74,8 @@ class YOLODataset(Dataset):
             for f in os.listdir(img_dir)
             if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
         )
-        self.img_size = config.IMG_SIZE
+        self.resolution = tuple(int(value) for value in config.RESOLUTION)
+        self.image_h, self.image_w = self.resolution
         self.num_classes = config.NUM_CLASSES
         self._sampling_metadata = None
         self.augment = split == "train" and bool(getattr(config, "TRAIN_AUGMENT", False))
@@ -109,7 +121,7 @@ class YOLODataset(Dataset):
                                 and len(parts) >= 5
                             ):
                                 box = tuple(float(value) for value in parts[1:5])
-                                if box[2] * box[3] * self.img_size ** 2 <= donor_max_area:
+                                if box[2] * box[3] * self.image_w * self.image_h <= donor_max_area:
                                     copy_paste_donors.append((img_path, box))
             if len(image_class_counter) == 0:
                 empty_image_count += 1
@@ -137,7 +149,7 @@ class YOLODataset(Dataset):
                     if len(parts) >= 5:
                         targets.append([int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])])
         targets = torch.tensor(targets, dtype=torch.float32) if targets else torch.zeros((0, 5), dtype=torch.float32)
-        content_bounds = letterbox_content_bounds(img.size, self.img_size)
+        content_bounds = letterbox_content_bounds(img.size, self.resolution)
         img, targets = self._letterbox(img, targets)
         if self.augment:
             img, targets = self._copy_paste_small_soldiers(img, targets, content_bounds)
@@ -149,7 +161,7 @@ class YOLODataset(Dataset):
         return img_tensor, targets
 
     def _letterbox(self, img, targets):
-        return letterbox_image_targets(img, targets, self.img_size)
+        return letterbox_image_targets(img, targets, self.resolution)
 
     def get_copy_paste_stats(self, reset=False):
         values = {
@@ -188,7 +200,7 @@ class YOLODataset(Dataset):
         scale_min = float(getattr(self.config, "SOLDIER_COPY_PASTE_SCALE_MIN", 0.9))
         scale_max = float(getattr(self.config, "SOLDIER_COPY_PASTE_SCALE_MAX", 1.10))
         attempts = max_objects * 8
-        content_left, content_top, content_right, content_bottom = content_bounds or (0, 0, self.img_size, self.img_size)
+        content_left, content_top, content_right, content_bottom = content_bounds or (0, 0, self.image_w, self.image_h)
         for _ in range(attempts):
             if len(pasted) >= max_objects:
                 break
@@ -205,8 +217,8 @@ class YOLODataset(Dataset):
             if crop.width < 2 or crop.height < 2:
                 continue
             scale = random.uniform(scale_min, scale_max)
-            paste_w = max(2, round(donor_box[2] * self.img_size * scale))
-            paste_h = max(2, round(donor_box[3] * self.img_size * scale))
+            paste_w = max(2, round(donor_box[2] * self.image_w * scale))
+            paste_h = max(2, round(donor_box[3] * self.image_h * scale))
             if paste_w >= content_right - content_left or paste_h >= content_bottom - content_top:
                 continue
             x1 = random.randint(content_left, content_right - paste_w)
@@ -227,8 +239,8 @@ class YOLODataset(Dataset):
             existing = torch.cat((existing, candidate.unsqueeze(0)), dim=0)
             pasted.append([
                 self.copy_paste_class,
-                (x1 + paste_w / 2) / self.img_size, (y1 + paste_h / 2) / self.img_size,
-                paste_w / self.img_size, paste_h / self.img_size,
+                (x1 + paste_w / 2) / self.image_w, (y1 + paste_h / 2) / self.image_h,
+                paste_w / self.image_w, paste_h / self.image_h,
             ])
 
         if pasted:
@@ -248,8 +260,8 @@ class YOLODataset(Dataset):
         angle = random.uniform(-float(getattr(self.config, "AUG_ROTATE_DEG", 5.0)), float(getattr(self.config, "AUG_ROTATE_DEG", 5.0)))
         scale = random.uniform(float(getattr(self.config, "AUG_SCALE_MIN", 0.8)), float(getattr(self.config, "AUG_SCALE_MAX", 1.25)))
         translate_frac = float(getattr(self.config, "AUG_TRANSLATE", 0.08))
-        tx = random.uniform(-translate_frac, translate_frac) * self.img_size
-        ty = random.uniform(-translate_frac, translate_frac) * self.img_size
+        tx = random.uniform(-translate_frac, translate_frac) * self.image_w
+        ty = random.uniform(-translate_frac, translate_frac) * self.image_h
         boxes = self._targets_to_xyxy(targets)
         shear = [0.0, 0.0]
         img = v2.functional.affine(img, angle, [round(tx), round(ty)], scale, shear, fill=114)
@@ -269,19 +281,23 @@ class YOLODataset(Dataset):
 
     def _targets_to_xyxy(self, targets):
         boxes = targets[:, 1:5].clone()
+        scale = boxes.new_tensor([self.image_w, self.image_h, self.image_w, self.image_h])
         xyxy = torch.stack((boxes[:, 0] - boxes[:, 2] / 2, boxes[:, 1] - boxes[:, 3] / 2,
-                            boxes[:, 0] + boxes[:, 2] / 2, boxes[:, 1] + boxes[:, 3] / 2), 1) * self.img_size
-        return tv_tensors.BoundingBoxes(xyxy, format="XYXY", canvas_size=(self.img_size, self.img_size))
+                             boxes[:, 0] + boxes[:, 2] / 2, boxes[:, 1] + boxes[:, 3] / 2), 1) * scale
+        return tv_tensors.BoundingBoxes(xyxy, format="XYXY", canvas_size=self.resolution)
 
     def _xyxy_to_targets(self, targets, boxes):
-        boxes = torch.as_tensor(boxes).clamp(0, self.img_size)
+        boxes = torch.as_tensor(boxes)
+        boxes[:, 0::2] = boxes[:, 0::2].clamp(0, self.image_w)
+        boxes[:, 1::2] = boxes[:, 1::2].clamp(0, self.image_h)
         wh = boxes[:, 2:4] - boxes[:, 0:2]
         keep = (wh[:, 0] >= 2.0) & (wh[:, 1] >= 2.0)
         targets = targets[keep].clone()
         if targets.numel():
             boxes, wh = boxes[keep], wh[keep]
-            targets[:, 1:3] = ((boxes[:, 0:2] + boxes[:, 2:4]) / 2.0) / self.img_size
-            targets[:, 3:5] = wh / self.img_size
+            scale = boxes.new_tensor([self.image_w, self.image_h])
+            targets[:, 1:3] = ((boxes[:, 0:2] + boxes[:, 2:4]) / 2.0) / scale
+            targets[:, 3:5] = wh / scale
         return targets
 
 

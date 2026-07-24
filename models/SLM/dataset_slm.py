@@ -98,7 +98,7 @@ class SLMFeatureDataset(Dataset):
                     if len(parts) >= 5:
                         targets.append([int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])])
         targets = torch.tensor(targets, dtype=torch.float32) if targets else torch.zeros((0, 5), dtype=torch.float32)
-        img, targets = letterbox_image_targets(img, targets, self.config.IMG_SIZE)
+        img, targets = letterbox_image_targets(img, targets, self.config.RESOLUTION)
         gray_tensor = TF.to_tensor(TF.to_grayscale(img, num_output_channels=1))
         rgb_tensor = gray_tensor
         return {

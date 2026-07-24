@@ -280,7 +280,7 @@ def train():
     os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
     tensorboard_writer = create_tensorboard_writer(Config, Config.OUTPUT_DIR, log_to_file) if is_main else None
     if is_main:
-        write_tensorboard_model_summary(tensorboard_writer, student_raw, detector_raw, (1, 1, Config.IMG_SIZE, Config.IMG_SIZE))
+        write_tensorboard_model_summary(tensorboard_writer, student_raw, detector_raw, (1, 1, *Config.RESOLUTION))
         snapshot_parameters(student_raw)  # 初始化参数快照用于变化追踪
         snapshot_parameters(detector_raw)
         initial_visualization_dataset = warmup_visualization_dataset if warmup_epochs > 0 else val_dataset
@@ -461,7 +461,7 @@ def train():
                     iou_threshold=getattr(Config, "METRIC_IOU_THRESHOLD", 0.5),
                     conf_threshold=getattr(Config, "CONF_THRESH", 0.30),
                     prefix="ConfusionMatrix",
-                    image_size=Config.IMG_SIZE,
+                    image_size=Config.RESOLUTION,
                 )
             log_epoch_table_row(
                 Config,

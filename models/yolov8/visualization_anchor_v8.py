@@ -50,10 +50,11 @@ def save_detection_visualization_anchor_v8(config, epoch, model, dataset, save_d
 
             for target_idx in range(len(targets)):
                 cls_id, cx, cy, w, h = targets[target_idx].tolist()
-                cx_px = cx * config.IMG_SIZE
-                cy_px = cy * config.IMG_SIZE
-                w_px = w * config.IMG_SIZE
-                h_px = h * config.IMG_SIZE
+                image_h, image_w = config.RESOLUTION
+                cx_px = cx * image_w
+                cy_px = cy * image_h
+                w_px = w * image_w
+                h_px = h * image_h
                 x1 = cx_px - w_px / 2
                 y1 = cy_px - h_px / 2
                 axes[row, 2].add_patch(plt.Rectangle((x1, y1), w_px, h_px, fill=False, edgecolor="lime", linewidth=1.8))

@@ -137,11 +137,12 @@ def evaluate_center_detector(config, student, detector, dataloader, criterion, d
                 if gt.shape[0] < 5 or gt[3] <= 0 or gt[4] <= 0:
                     continue
                 cls_id = int(gt[0].item())
+                image_h, image_w = config.RESOLUTION
                 gt_box = [
-                    float(gt[1].item() * config.IMG_SIZE),
-                    float(gt[2].item() * config.IMG_SIZE),
-                    float(gt[3].item() * config.IMG_SIZE),
-                    float(gt[4].item() * config.IMG_SIZE),
+                    float(gt[1].item() * image_w),
+                    float(gt[2].item() * image_h),
+                    float(gt[3].item() * image_w),
+                    float(gt[4].item() * image_h),
                 ]
                 gt_by_class.setdefault(cls_id, []).append(gt_box)
                 gt_counts[cls_id] += 1

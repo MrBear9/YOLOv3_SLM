@@ -95,7 +95,7 @@ def main():
         Config.NUM_CLASSES,
         iou_threshold=iou_threshold,
         conf_threshold=conf_threshold,
-        image_size=Config.IMG_SIZE,
+        image_size=Config.RESOLUTION,
     )
     output_path = args.output.resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)

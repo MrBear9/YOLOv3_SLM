@@ -28,14 +28,14 @@ def _get_phase_cfg(config, key, layer_index, default):
     """
     accessor_name = f"phase_{key.lower()}"
     if hasattr(config, accessor_name):
-        return int(getattr(config, accessor_name)(layer_index))
+        return getattr(config, accessor_name)(layer_index)
     old_per_layer = f"SLM{layer_index}_PHASE_{key}"
     if hasattr(config, old_per_layer):
-        return int(getattr(config, old_per_layer))
+        return getattr(config, old_per_layer)
     old_shared = f"SLM_PHASE_{key}"
     if hasattr(config, old_shared):
-        return int(getattr(config, old_shared))
-    return int(default)
+        return getattr(config, old_shared)
+    return default
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -143,7 +143,7 @@ class MultiScalePhaseField(nn.Module):
         self.use_blockwise = bool(getattr(config, "SLM_PHASE_USE_BLOCKWISE",
                                           getattr(config, "PHASE_USE_BLOCKWISE", True)))
         block_grid = _get_phase_cfg(config, "BLOCK_GRID", layer_index, 4)
-        block_overlap = _get_phase_cfg(config, "BLOCK_OVERLAP", layer_index, 16)
+        block_overlap = int(_get_phase_cfg(config, "BLOCK_OVERLAP", layer_index, 16))
         h, w = resolution
 
         # --- Plan A: global multi-scale parameters (coarse → medium-fine) ---
@@ -172,17 +172,19 @@ class MultiScalePhaseField(nn.Module):
 
         # --- Plan B: overlapping block-wise parameters (finest scale) ---
         if self.use_blockwise:
-            self.block_grid = (block_grid, block_grid)
-            self.block_overlap = block_overlap
+            if isinstance(block_grid, (tuple, list)):
+                if len(block_grid) != 2:
+                    raise ValueError("PHASE_BLOCK_GRID must be an int or (rows, cols).")
+                grid_h, grid_w = (int(block_grid[0]), int(block_grid[1]))
+            else:
+                grid_h = grid_w = int(block_grid)
+            if grid_h < 1 or grid_w < 1:
+                raise ValueError("PHASE_BLOCK_GRID dimensions must be positive.")
+            self.block_grid = (grid_h, grid_w)
+            self.block_overlap = max(block_overlap, 0)
+            self._feather_slices = self._build_block_slices()
 
-            stride_h = (h - block_overlap) / block_grid
-            stride_w = (w - block_overlap) / block_grid
-            self._block_stride = (stride_h, stride_w)
-            block_h = int(stride_h) + block_overlap
-            block_w = int(stride_w) + block_overlap
-            self._block_size = (block_h, block_w)
-
-            n_blocks = block_grid * block_grid
+            n_blocks = grid_h * grid_w
             self._n_blocks = n_blocks
 
             # --- Plan B+: mini-pyramid inside each block ---
@@ -191,47 +193,44 @@ class MultiScalePhaseField(nn.Module):
             # block_inner_scales=1  →  single scale (legacy, same as before)
             # block_inner_scales=2  →  coarse (//4) + fine (//1)   lightweight
             block_inner_scales = _get_phase_cfg(config, "BLOCK_INNER_SCALES", layer_index, 2)
-            self._block_inner_scales = max(block_inner_scales, 1)
+            self._block_inner_scales = max(int(block_inner_scales), 1)
 
             factors = [2 ** (self._block_inner_scales - k) for k in range(self._block_inner_scales - 1)] + [1]
-            self._block_inner_resolutions = [
-                (max(block_h // f, 2), max(block_w // f, 2)) for f in factors
-            ]
+            self._block_inner_resolutions = []
 
             self.blocks = nn.ParameterList()
-            for _ in range(n_blocks):
-                for sh, sw in self._block_inner_resolutions:
+            self._block_offsets = []
+            for _, _, _, _, block_h, block_w in self._feather_slices:
+                inner_resolutions = [
+                    (max(block_h // f, 2), max(block_w // f, 2)) for f in factors
+                ]
+                self._block_offsets.append(len(self.blocks))
+                self._block_inner_resolutions.append(inner_resolutions)
+                for sh, sw in inner_resolutions:
                     self.blocks.append(nn.Parameter(torch.zeros(1, 1, sh, sw)))
         else:
             self.blocks = None
             self._n_blocks = 0
             self._block_inner_scales = 1
+            self._block_offsets = []
 
-        # Cache feather weights and slice coordinates (deterministic, never changes)
-        if self.use_blockwise and self.blocks is not None:
-            self._cache_feather_weights()
-
-    def _cache_feather_weights(self):
-        """Pre-compute deterministic feather weights and slice coordinates for all blocks."""
+    def _build_block_slices(self):
+        """Partition arbitrary rectangular resolutions without stride truncation."""
         H, W = self.resolution
         n_h, n_w = self.block_grid
-        stride_h, stride_w = self._block_stride
-        block_h, block_w = self._block_size
-        device = self.scale_params[0].device
-
-        feather_weights = []
         slices = []
-        for idx in range(self._n_blocks):
-            i, j = divmod(idx, n_w)
-            y_start = int(i * stride_h)
-            x_start = int(j * stride_w)
-            y_end = min(y_start + block_h, H)
-            x_end = min(x_start + block_w, W)
-            bh, bw = y_end - y_start, x_end - x_start
-            slices.append((y_start, y_end, x_start, x_end, bh, bw))
-            feather_weights.append(self._build_feather_weights(bh, bw, i, j, device))
-        self._feather_weights = feather_weights
-        self._feather_slices = slices
+        y_edges = [round(i * H / n_h) for i in range(n_h + 1)]
+        x_edges = [round(i * W / n_w) for i in range(n_w + 1)]
+        before = self.block_overlap // 2
+        after = self.block_overlap - before
+        for i in range(n_h):
+            for j in range(n_w):
+                y_start = max(0, y_edges[i] - (before if i > 0 else 0))
+                y_end = min(H, y_edges[i + 1] + (after if i < n_h - 1 else 0))
+                x_start = max(0, x_edges[j] - (before if j > 0 else 0))
+                x_end = min(W, x_edges[j + 1] + (after if j < n_w - 1 else 0))
+                slices.append((y_start, y_end, x_start, x_end, y_end - y_start, x_end - x_start))
+        return slices
 
     def _build_feather_weights(self, y_len, x_len, i, j, device=None):
         """Linear ramp weights that fade to zero at overlapping edges."""
@@ -239,17 +238,20 @@ class MultiScalePhaseField(nn.Module):
             device = self.scale_params[0].device
         wy = torch.ones(y_len, device=device)
         wx = torch.ones(x_len, device=device)
-        ov = self.block_overlap
+        ov_y = min(self.block_overlap, y_len)
+        ov_x = min(self.block_overlap, x_len)
         n_h, n_w = self.block_grid
 
+        if ov_y == 0 and ov_x == 0:
+            return wy[:, None] * wx[None, :]
         if i > 0:
-            wy[:ov] = torch.linspace(0, 1, ov, device=device)
+            wy[:ov_y] = torch.linspace(0, 1, ov_y, device=device)
         if i < n_h - 1:
-            wy[-ov:] = torch.linspace(1, 0, ov, device=device)
+            wy[-ov_y:] = torch.linspace(1, 0, ov_y, device=device)
         if j > 0:
-            wx[:ov] = torch.linspace(0, 1, ov, device=device)
+            wx[:ov_x] = torch.linspace(0, 1, ov_x, device=device)
         if j < n_w - 1:
-            wx[-ov:] = torch.linspace(1, 0, ov, device=device)
+            wx[-ov_x:] = torch.linspace(1, 0, ov_x, device=device)
         return wy[:, None] * wx[None, :]
 
     def _stitch_blocks(self):
@@ -271,7 +273,7 @@ class MultiScalePhaseField(nn.Module):
             # Sum inner pyramid scales for this block
             block_phase = None
             for k in range(n_inner):
-                param = self.blocks[block_idx * n_inner + k]
+                param = self.blocks[self._block_offsets[block_idx] + k]
                 upsampled = F.interpolate(param, size=(bh, bw),
                                           mode="bilinear", align_corners=False)
                 if block_phase is None:
@@ -279,10 +281,10 @@ class MultiScalePhaseField(nn.Module):
                 else:
                     block_phase = block_phase + upsampled
 
-            w = self._feather_weights[block_idx]
-            if w.device != device:
-                w = w.to(device)
-                self._feather_weights[block_idx] = w
+            i, j = divmod(block_idx, self.block_grid[1])
+            w = self._build_feather_weights(
+                bh, bw, i, j, device=device
+            ).to(dtype=block_phase.dtype)
 
             phase[:, :, y_start:y_end, x_start:x_end] += block_phase * w[None, None, :, :]
             weight[:, :, y_start:y_end, x_start:x_end] += w[None, None, :, :]
@@ -300,26 +302,19 @@ class MultiScalePhaseField(nn.Module):
         target_h, target_w = self.resolution
         with torch.no_grad():
             if self.use_blockwise and self.blocks is not None:
-                n_h, n_w = self.block_grid
-                stride_h, stride_w = self._block_stride
-                block_h, block_w = self._block_size
                 n_inner = self._block_inner_scales
                 base = F.interpolate(phase, size=(target_h, target_w),
-                                     mode="bilinear", align_corners=False)
-                inner_res = self._block_inner_resolutions
+                                      mode="bilinear", align_corners=False)
                 for block_idx in range(self._n_blocks):
-                    i, j = divmod(block_idx, n_w)
-                    y_start = int(i * stride_h)
-                    x_start = int(j * stride_w)
-                    y_end = min(y_start + block_h, target_h)
-                    x_end = min(x_start + block_w, target_w)
+                    y_start, y_end, x_start, x_end, _, _ = self._feather_slices[block_idx]
                     crop = base[:, :, y_start:y_end, x_start:x_end]
+                    inner_resolutions = self._block_inner_resolutions[block_idx]
                     # Keep the seed in one scale; the other scales remain free residuals.
                     for k in range(n_inner):
-                        param = self.blocks[block_idx * n_inner + k]
+                        param = self.blocks[self._block_offsets[block_idx] + k]
                         if k == n_inner - 1:
                             param.copy_(
-                                F.interpolate(crop, size=inner_res[k],
+                                F.interpolate(crop, size=inner_resolutions[k],
                                               mode="bilinear", align_corners=False)
                             )
                         else:
@@ -499,71 +494,91 @@ class SLMLayer(nn.Module):
 
 
 class ASMPropagation(nn.Module):
-    """Angular Spectrum Method (ASM) propagation with band-limited filtering.
+    """Band-limited ASM using neural-holography's centered-field convention.
 
-    Implements the transfer-function approach:
-        U_out = IFFT{ FFT{U_in} · H }
-        H(fx,fy) = exp(j·2π·z·√(1/λ² − fx² − fy²))
-
-    Improvements over the naive version:
-      1. Matsushima (2009) band-limited filter — correctly suppresses
-         evanescent waves instead of clamping k² to zero.
-      2. Zero-padding to 2× size — converts circular convolution into a
-         linear convolution, eliminating wrap-around artefacts at edges.
-      3. norm='ortho' — energy-preserving FFT convention.
+    The input field is centered in image coordinates. For linear convolution,
+    it is center-padded before ``ifftshift -> FFT -> H -> IFFT -> fftshift``
+    and center-cropped afterwards. This preserves the optical axis for square
+    and rectangular SLM panels alike.
     """
 
     def __init__(self, config, distance, wavelength=None, pixel_size=None,
                  resolution=None, linear_conv=True):
         super().__init__()
-        self._linear_conv = linear_conv
+        self._linear_conv = bool(linear_conv)
 
         wavelength = config.WAVELENGTH if wavelength is None else wavelength
         pixel_size = config.PIXEL_SIZE if pixel_size is None else pixel_size
         resolution = config.RESOLUTION if resolution is None else resolution
-
-        H, W = resolution
-        dy = dx = pixel_size
-
-        # --- padded resolution for linear convolution ---
-        if linear_conv:
-            H_pad, W_pad = H * 2, W * 2
+        height, width = int(resolution[0]), int(resolution[1])
+        if isinstance(pixel_size, (tuple, list)):
+            dy, dx = float(pixel_size[0]), float(pixel_size[1])
         else:
-            H_pad, W_pad = H, W
+            dy = dx = float(pixel_size)
+        wavelength, distance = float(wavelength), float(distance)
+        if height < 1 or width < 1 or dy <= 0 or dx <= 0 or wavelength <= 0:
+            raise ValueError("ASM resolution, pixel size, and wavelength must be positive.")
 
-        # physical field size AFTER padding (matsushima filter uses padded extent)
-        y_len = H_pad * dy
-        x_len = W_pad * dx
+        padded_height, padded_width = (
+            (height * 2, width * 2) if self._linear_conv else (height, width)
+        )
+        y_len, x_len = padded_height * dy, padded_width * dx
 
-        # --- spatial-frequency grids  (FFT order, cycles / m) ---
-        fx = torch.fft.fftfreq(H_pad, dx)
-        fy = torch.fft.fftfreq(W_pad, dy)
-        fx_grid, fy_grid = torch.meshgrid(fx, fy, indexing="ij")
-
-        # --- transfer-function exponent (distance-independent) ---
-        k2 = 1.0 / wavelength ** 2 - fx_grid ** 2 - fy_grid ** 2
-
-        # Matsushima 2009 band-limited ASM filter:
-        # maximum spatial frequency that can propagate without aliasing
-        fx_max = 1.0 / math.sqrt((2.0 * distance / x_len) ** 2 + 1.0) / wavelength
+        # Match the validated neural-holography ordering: centered H, then ifftshift.
+        fy = np.linspace(
+            -1 / (2 * dy) + 0.5 / (2 * y_len),
+            1 / (2 * dy) - 0.5 / (2 * y_len),
+            padded_height,
+        )
+        fx = np.linspace(
+            -1 / (2 * dx) + 0.5 / (2 * x_len),
+            1 / (2 * dx) - 0.5 / (2 * x_len),
+            padded_width,
+        )
+        FX, FY = np.meshgrid(fx, fy)
+        propagating = 1.0 / wavelength ** 2 - (FX ** 2 + FY ** 2)
+        phase = 2.0 * math.pi * distance * np.sqrt(np.clip(propagating, 0.0, None))
         fy_max = 1.0 / math.sqrt((2.0 * distance / y_len) ** 2 + 1.0) / wavelength
-        H_filter = ((fx_grid.abs() < fx_max) & (fy_grid.abs() < fy_max)).to(k2.dtype)
-
-        # build transfer function: propagate waves inside the band, zero outside
-        k2_pos = torch.clamp(k2, min=0.0)
-        H_prop = torch.exp(1j * 2.0 * np.pi * distance * torch.sqrt(k2_pos))
-        H_prop = H_prop * H_filter          # ← band-limit (not clamp!)
-
-        self.register_buffer("H", H_prop)
+        fx_max = 1.0 / math.sqrt((2.0 * distance / x_len) ** 2 + 1.0) / wavelength
+        band = (propagating >= 0.0) & (np.abs(FX) < fx_max) & (np.abs(FY) < fy_max)
+        transfer_centered = band.astype(np.complex64) * np.exp(1j * phase).astype(np.complex64)
+        self.register_buffer(
+            "H", torch.from_numpy(np.fft.ifftshift(transfer_centered)).unsqueeze(0).unsqueeze(0)
+        )
+        self.input_resolution = (height, width)
 
     def forward(self, field):
+        if tuple(field.shape[-2:]) != self.input_resolution:
+            raise ValueError(
+                f"ASM expected field spatial shape {self.input_resolution}, got {tuple(field.shape[-2:])}."
+            )
         if self._linear_conv:
-            H, W = field.shape[-2], field.shape[-1]
-            field = F.pad(field, [0, W, 0, H])          # zero-pad to 2×
-            out = torch.fft.ifft2(torch.fft.fft2(field, norm="ortho") * self.H, norm="ortho")
-            return out[..., :H, :W]                      # crop back
-        return torch.fft.ifft2(torch.fft.fft2(field, norm="ortho") * self.H, norm="ortho")
+            field = self._center_pad(field, self.H.shape[-2:])
+        spectrum = torch.fft.fft2(torch.fft.ifftshift(field, dim=(-2, -1)), norm="ortho")
+        out = torch.fft.fftshift(torch.fft.ifft2(spectrum * self.H, norm="ortho"), dim=(-2, -1))
+        if self._linear_conv:
+            out = self._center_crop(out, self.input_resolution)
+        return out
 
+    @staticmethod
+    def _center_pad(field, target_shape):
+        height, width = field.shape[-2:]
+        target_height, target_width = target_shape
+        diff_h, diff_w = target_height - height, target_width - width
+        top = (diff_h + height % 2) // 2
+        bottom = (diff_h + 1 - height % 2) // 2
+        left = (diff_w + width % 2) // 2
+        right = (diff_w + 1 - width % 2) // 2
+        return F.pad(field, (left, right, top, bottom))
+
+    @staticmethod
+    def _center_crop(field, target_shape):
+        target_height, target_width = target_shape
+        height, width = field.shape[-2:]
+        diff_h, diff_w = height - target_height, width - target_width
+        top = (diff_h + 1 - target_height % 2) // 2
+        left = (diff_w + 1 - target_width % 2) // 2
+        return field[..., top:top + target_height, left:left + target_width]
 
 class OpticalStudent(nn.Module):
     """N-layer optical student: SLM1→Prop1→SLM2→Prop2→...→SLM_N→Prop_N.
@@ -667,14 +682,12 @@ if __name__ == "__main__":
     output_dir.mkdir(parents=True, exist_ok=True)
     original_values = {
         "RESOLUTION": Config.RESOLUTION,
-        "IMG_SIZE": Config.IMG_SIZE,
         "SLM_INIT_MODE": Config.SLM_INIT_MODE,
         "SLM_INIT_NOISE_STD": Config.SLM_INIT_NOISE_STD,
         "SLM_DH_PSF_PERIODS": Config.SLM_DH_PSF_PERIODS,
     }
 
     Config.RESOLUTION = (512, 512)
-    Config.IMG_SIZE = 512
     Config.SLM_INIT_MODE = "dh_psf"
     Config.SLM_INIT_NOISE_STD = 0.0
 

@@ -84,7 +84,7 @@ def _write_teacher_tensorboard_model_summary(writer, model):
         "",
         f"Teacher architecture: {Config.TEACHER_ARCH}",
         f"Detector head type: {Config.DETECTOR_HEAD_TYPE}",
-        f"Input tensor: (B, 3, {Config.IMG_SIZE}, {Config.IMG_SIZE})",
+        f"Input tensor: (B, 1, {Config.RESOLUTION[0]}, {Config.RESOLUTION[1]})",
         f"Detection strides: {Config.ANCHOR_FREE_STRIDES}",
         f"AMP enabled: {Config.ENABLE_AMP}",
         f"Feature distillation enabled: {getattr(Config, 'ENABLE_FEATURE_DISTILL', False)}",
@@ -402,7 +402,7 @@ def train():
                     iou_threshold=Config.METRIC_IOU_THRESHOLD,
                     conf_threshold=getattr(Config, "CONF_THRESH", 0.35),
                     prefix="ConfusionMatrix",
-                    image_size=Config.IMG_SIZE,
+                    image_size=Config.RESOLUTION,
                 )
 
         is_best = False

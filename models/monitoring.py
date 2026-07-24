@@ -274,7 +274,11 @@ def compute_detection_confusion_matrix(
                 continue
             box = np.asarray(gt[1:5], dtype=np.float32)
             if image_size is not None:
-                box = box * float(image_size)
+                if isinstance(image_size, (tuple, list)):
+                    image_h, image_w = image_size
+                    box *= np.asarray([image_w, image_h, image_w, image_h], dtype=np.float32)
+                else:
+                    box *= float(image_size)
             gt_boxes.append(box)
             gt_classes.append(int(gt[0]))
 

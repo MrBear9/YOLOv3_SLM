@@ -260,7 +260,12 @@ def prediction_response_tensor(config, preds):
         obj_conf = torch.sigmoid(pred[..., 4])
         cls_conf = torch.sigmoid(pred[..., 5:]).max(dim=-1).values
         response = (obj_conf * cls_conf).max(dim=-1).values.unsqueeze(1)
-        response = _interpolate_preserve_layout(response, size=(config.IMG_SIZE, config.IMG_SIZE), mode="bilinear", align_corners=False)
+        response = _interpolate_preserve_layout(
+            response,
+            size=config.RESOLUTION,
+            mode="bilinear",
+            align_corners=False,
+        )
         response_maps.append(response)
     return torch.stack(response_maps, dim=0).max(dim=0).values
 

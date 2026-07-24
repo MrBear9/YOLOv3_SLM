@@ -86,7 +86,7 @@ def _write_compact_tensorboard_model_summary(writer, teacher, detector):
         "",
         f"Teacher architecture: {Config.TEACHER_ARCH}",
         f"Detector head type: compact (center-point, anchor-free)",
-        f"Input tensor: (B, 3, {Config.IMG_SIZE}, {Config.IMG_SIZE})",
+        f"Input tensor: (B, 1, {Config.RESOLUTION[0]}, {Config.RESOLUTION[1]})",
         f"Output stride: 4",
         f"AMP enabled: {Config.ENABLE_AMP}",
     ])
@@ -187,7 +187,8 @@ def _write_compact_tensorboard_predictions(writer, step, teacher, detector, data
                     img_arr = (img_arr * 255).clip(0, 255).astype(np.uint8)
                     canvas = Image.fromarray(img_arr, mode="L").convert("RGB")
                 else:
-                    canvas = Image.new("RGB", (Config.IMG_SIZE, Config.IMG_SIZE), (128, 128, 128))
+                    image_h, image_w = Config.RESOLUTION
+                    canvas = Image.new("RGB", (image_w, image_h), (128, 128, 128))
             draw = ImageDraw.Draw(canvas)
 
             # Inference
@@ -301,11 +302,12 @@ def _evaluate_teacher_compact(teacher, detector, val_loader, criterion, device):
                     if gt.shape[0] < 5 or gt[3] <= 0 or gt[4] <= 0:
                         continue
                     cls_id = int(gt[0].item())
+                    image_h, image_w = Config.RESOLUTION
                     gt_box = [
-                        float(gt[1].item() * Config.IMG_SIZE),
-                        float(gt[2].item() * Config.IMG_SIZE),
-                        float(gt[3].item() * Config.IMG_SIZE),
-                        float(gt[4].item() * Config.IMG_SIZE),
+                        float(gt[1].item() * image_w),
+                        float(gt[2].item() * image_h),
+                        float(gt[3].item() * image_w),
+                        float(gt[4].item() * image_h),
                     ]
                     gt_by_class.setdefault(cls_id, []).append(gt_box)
                     gt_counts[cls_id] += 1
@@ -506,7 +508,7 @@ def train():
     log_to_file(Config, "Teacher + CompactOpticalDetector configuration")
     log_to_file(Config, "=" * 80)
     log_to_file(Config, f"Dataset: {Config.YAML_PATH}")
-    log_to_file(Config, f"Image size / batch / epochs: {Config.IMG_SIZE} / {Config.BATCH_SIZE} / {Config.EPOCHS}")
+    log_to_file(Config, f"Resolution (H, W) / batch / epochs: {Config.RESOLUTION} / {Config.BATCH_SIZE} / {Config.EPOCHS}")
     log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}, detector: compact (center-point)")
     log_to_file(Config, f"Compact: base_ch={Config.COMPACT_BASE_CH}, head_ch={Config.COMPACT_HEAD_CH}, dilations={Config.COMPACT_DILATIONS}")
     log_to_file(Config, f"Loss weights: heatmap={Config.HEATMAP_LOSS_WEIGHT}, wh={Config.WH_LOSS_WEIGHT}, offset={Config.OFFSET_LOSS_WEIGHT}, obj={getattr(Config, 'OBJ_LOSS_WEIGHT', 'N/A')}, cls={getattr(Config, 'CLS_LOSS_WEIGHT', 'N/A')}")
@@ -738,7 +740,7 @@ def train():
                     iou_threshold=getattr(Config, "COMPACT_METRIC_IOU_THRESHOLD", 0.5),
                     conf_threshold=getattr(Config, "COMPACT_CONF_THRESH", 0.30),
                     prefix="ConfusionMatrix",
-                    image_size=Config.IMG_SIZE,
+                    image_size=Config.RESOLUTION,
                 )
 
             # ── 预测可视化 ──

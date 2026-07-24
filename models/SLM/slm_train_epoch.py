@@ -287,7 +287,7 @@ def run_epoch(
                 iou_threshold=Config.METRIC_IOU_THRESHOLD,
                 conf_threshold=getattr(Config, "CONF_THRESH", 0.35),
                 prefix="ConfusionMatrix",
-                image_size=Config.IMG_SIZE,
+                image_size=Config.RESOLUTION,
             )
 
     if is_main:

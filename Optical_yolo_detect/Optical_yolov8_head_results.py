@@ -125,17 +125,18 @@ def init_metric_state(num_classes):
     }
 
 
-def update_metric_state(metric_state, sample_detections, sample_targets, img_size, iou_thresh):
+def update_metric_state(metric_state, sample_detections, sample_targets, resolution, iou_thresh):
+    image_h, image_w = resolution
     gt_by_class = {}
     for gt in sample_targets:
         if gt.shape[0] < 5 or gt[3] <= 0 or gt[4] <= 0:
             continue
         cls_id = int(gt[0].item())
         gt_box = [
-            float(gt[1].item() * img_size),
-            float(gt[2].item() * img_size),
-            float(gt[3].item() * img_size),
-            float(gt[4].item() * img_size),
+            float(gt[1].item() * image_w),
+            float(gt[2].item() * image_h),
+            float(gt[3].item() * image_w),
+            float(gt[4].item() * image_h),
         ]
         gt_by_class.setdefault(cls_id, []).append(gt_box)
         metric_state["gt_counts"][cls_id] += 1
@@ -208,7 +209,7 @@ def save_metrics_csv(path, metrics):
             writer.writerow(row)
 
 
-def save_visualization(path, image_tensor, teacher_feature, targets, detections, class_names, img_size, title):
+def save_visualization(path, image_tensor, teacher_feature, targets, detections, class_names, resolution, title):
     ensure_dir(path.parent)
     fig, axes = plt.subplots(1, 4, figsize=(24, 6))
     img_np = image_tensor.squeeze(0).detach().cpu().numpy()
@@ -224,9 +225,10 @@ def save_visualization(path, image_tensor, teacher_feature, targets, detections,
 
     for target in targets:
         cls_id, cx, cy, w, h = target.tolist()
-        x1 = (cx - w / 2) * img_size
-        y1 = (cy - h / 2) * img_size
-        axes[2].add_patch(plt.Rectangle((x1, y1), w * img_size, h * img_size, fill=False, edgecolor="lime", linewidth=1.8))
+        image_h, image_w = resolution
+        x1 = (cx - w / 2) * image_w
+        y1 = (cy - h / 2) * image_h
+        axes[2].add_patch(plt.Rectangle((x1, y1), w * image_w, h * image_h, fill=False, edgecolor="lime", linewidth=1.8))
         axes[2].text(x1, y1 - 4, class_names.get(int(cls_id), str(int(cls_id))), color="lime", fontsize=8)
 
     for det in detections:
@@ -255,7 +257,7 @@ def save_visualization(path, image_tensor, teacher_feature, targets, detections,
 def evaluate(args):
     Config.YAML_PATH = str(args.yaml)
     Config.TEACHER_OUTPUT_DIR = str(args.output_dir)
-    Config.IMG_SIZE = args.img_size
+    Config.RESOLUTION = (args.height, args.width)
     Config.BATCH_SIZE = args.batch_size
     Config.CONF_THRESH = args.conf_thresh
     Config.NMS_THRESH = args.nms_thresh
@@ -295,13 +297,12 @@ def evaluate(args):
                 conf_thresh=args.conf_thresh,
                 nms_thresh=args.nms_thresh,
                 max_det=args.max_det,
-                img_size=args.img_size,
             )
             for idx in range(images.shape[0]):
                 evaluated_images += 1
                 targets = targets_list[idx]
                 sample_detections = detections[idx]
-                update_metric_state(metric_state, sample_detections, targets, args.img_size, args.metric_iou_thresh)
+                update_metric_state(metric_state, sample_detections, targets, Config.RESOLUTION, args.metric_iou_thresh)
                 if args.max_vis_images < 0 or len(saved_visualizations) < args.max_vis_images:
                     source_path = Path(dataset.files[evaluated_images - 1])
                     save_path = vis_dir / f"{evaluated_images:04d}_{source_path.stem}.png"
@@ -312,7 +313,7 @@ def evaluate(args):
                         targets,
                         sample_detections,
                         Config.CLASS_NAMES,
-                        args.img_size,
+                        Config.RESOLUTION,
                         source_path.name,
                     )
                     saved_visualizations.append(save_path)
@@ -339,7 +340,7 @@ def build_summary(args, metrics, checkpoint_info, evaluated_images, saved_visual
         f"Dataset yaml: {args.yaml}",
         f"Split: {args.split}",
         f"Output directory: {args.output_dir}",
-        f"Image size: {args.img_size}",
+        f"Resolution (H, W): ({args.height}, {args.width})",
         f"Confidence threshold: {args.conf_thresh}",
         f"NMS threshold: {args.nms_thresh}",
         f"Max detections: {args.max_det}",
@@ -381,7 +382,8 @@ def parse_args():
     parser.add_argument("--split", choices=("train", "val", "test"), default="test")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--anchor-yaml", type=Path, default=ROOT / "output" / "anchor_clustering" / "yolo_anchors.yaml")
-    parser.add_argument("--img-size", type=int, default=640)
+    parser.add_argument("--height", type=int, default=640)
+    parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--conf-thresh", type=float, default=0.5)

@@ -30,7 +30,6 @@ class ConfigSLM(OpticalConfig):
     # =========================================================================
     # Training scale
     # =========================================================================
-    IMG_SIZE = 640
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
@@ -44,10 +43,11 @@ class ConfigSLM(OpticalConfig):
     # SLM optical parameters
     # =========================================================================
     WAVELENGTH = 532e-9
-    PIXEL_SIZE = 6.4e-6
+    PIXEL_SIZE = 8e-6
     # PROP_DISTANCE per-layer: see OpticalConfig.prop_distance(layer_idx)
     # Options: "phase", "amp_phase".
     SLM_MODE = "phase"
+    # Optical/teacher canvas as (height, width). Example: (1080, 1920).
     RESOLUTION = (640, 640)
     OPTICAL_FIELD_EPS = 1e-8
     OPTICAL_NORM_EPS = 1e-6
@@ -294,6 +294,11 @@ class ConfigSLM(OpticalConfig):
 
     @classmethod
     def initialize(cls):
+        if not isinstance(cls.RESOLUTION, (tuple, list)) or len(cls.RESOLUTION) != 2:
+            raise ValueError("RESOLUTION must be a (height, width) pair.")
+        cls.RESOLUTION = tuple(int(value) for value in cls.RESOLUTION)
+        if min(cls.RESOLUTION) < 1:
+            raise ValueError("RESOLUTION height and width must be positive.")
         cls.EPOCHS = cls.PHASE_FOCUS_EPOCHS + cls.DETECTOR_FOCUS_EPOCHS + cls.JOINT_FIT_EPOCHS + cls.NORM_JOINT_EPOCHS
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
         cls.OUTPUT_DIR = resolve_project_path(cls.OUTPUT_DIR)

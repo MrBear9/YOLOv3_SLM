@@ -54,8 +54,9 @@ class CenterTargetBuilder:
                     continue
                 cx = float(item[1].item()) * out_w
                 cy = float(item[2].item()) * out_h
-                bw = float(item[3].item()) * float(self.config.IMG_SIZE)
-                bh = float(item[4].item()) * float(self.config.IMG_SIZE)
+                image_h, image_w = self.config.RESOLUTION
+                bw = float(item[3].item()) * float(image_w)
+                bh = float(item[4].item()) * float(image_h)
                 if bw <= 0 or bh <= 0:
                     continue
                 grid_x = min(max(int(cx), 0), out_w - 1)
@@ -153,8 +154,9 @@ class DecoupledTargetBuilder:
                     continue
                 cx = float(item[1].item()) * out_w
                 cy = float(item[2].item()) * out_h
-                bw = float(item[3].item()) * float(self.config.IMG_SIZE)
-                bh = float(item[4].item()) * float(self.config.IMG_SIZE)
+                image_h, image_w = self.config.RESOLUTION
+                bw = float(item[3].item()) * float(image_w)
+                bh = float(item[4].item()) * float(image_h)
                 if bw <= 0 or bh <= 0:
                     continue
 

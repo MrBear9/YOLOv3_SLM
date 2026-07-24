@@ -48,7 +48,8 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Training scale
     # =========================================================================
-    IMG_SIZE = 640
+    # Shared image/feature canvas as (height, width). Example: (1080, 1920).
+    RESOLUTION = (640, 640)
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
@@ -289,6 +290,11 @@ class ConfigYOLOv8Anchor:
 
     @classmethod
     def initialize(cls):
+        if not isinstance(cls.RESOLUTION, (tuple, list)) or len(cls.RESOLUTION) != 2:
+            raise ValueError("RESOLUTION must be a (height, width) pair.")
+        cls.RESOLUTION = tuple(int(value) for value in cls.RESOLUTION)
+        if min(cls.RESOLUTION) < 1:
+            raise ValueError("RESOLUTION height and width must be positive.")
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
         cls.TEACHER_OUTPUT_DIR = resolve_project_path(cls.TEACHER_OUTPUT_DIR)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
@@ -367,7 +373,7 @@ class ConfigYOLOv8Anchor:
         print("光学教师YOLOv8训练配置")
         print("=" * 80)
         print(f"Device: {cls.DEVICE}")
-        print(f"Image Size: {cls.IMG_SIZE}")
+        print(f"Resolution (H, W): {cls.RESOLUTION}")
         print(f"Batch Size: {cls.BATCH_SIZE}")
         print(f"Epochs: {cls.EPOCHS}")
         print(f"Num Classes: {cls.NUM_CLASSES}")

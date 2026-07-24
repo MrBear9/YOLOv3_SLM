@@ -34,6 +34,7 @@ class OpticalConfig:
     TRAIN_LAYER  = {1: True, 2: True, 3: True, 4: True}
 
     # Phase field block parameters
+    # Accept an int for square panels or (rows, cols) for rectangular panels.
     PHASE_BLOCK_GRID         = {1: 6, 2: 4, 3: 5, 4: 7}
     PHASE_BLOCK_OVERLAP      = {1: 8, 2: 8, 3: 8, 4: 8}
     PHASE_BLOCK_INNER_SCALES = {1: 3, 2: 2, 3: 2, 4: 2}

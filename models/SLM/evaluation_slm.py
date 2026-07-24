@@ -24,6 +24,11 @@ def _move_batch_to_device(config, batch, device):
     return gray, teacher_input, batch["targets"]
 
 
+def _canvas_hw(config):
+    canvas = config.RESOLUTION
+    return int(canvas[0]), int(canvas[1])
+
+
 def evaluate_slm_detector(config, teacher, student, detector, dataloader, detection_criterion, feature_criterion, device, stage_name, response_detector=None):
     teacher_core = unwrap_module(teacher)
     student_core = unwrap_module(student)
@@ -107,11 +112,12 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
                     if gt.shape[0] < 5 or gt[3] <= 0 or gt[4] <= 0:
                         continue
                     cls_id = int(gt[0].item())
+                    canvas_h, canvas_w = _canvas_hw(config)
                     gt_box = [
-                        float(gt[1].item() * config.IMG_SIZE),
-                        float(gt[2].item() * config.IMG_SIZE),
-                        float(gt[3].item() * config.IMG_SIZE),
-                        float(gt[4].item() * config.IMG_SIZE),
+                        float(gt[1].item() * canvas_w),
+                        float(gt[2].item() * canvas_h),
+                        float(gt[3].item() * canvas_w),
+                        float(gt[4].item() * canvas_h),
                     ]
                     gt_by_class.setdefault(cls_id, []).append(gt_box)
                     gt_counts[cls_id] += 1
@@ -272,10 +278,11 @@ def save_slm_detection_visualization(config, epoch, teacher, student, detector, 
 
             for target_idx in range(len(targets)):
                 cls_id, cx, cy, w, h = targets[target_idx].tolist()
-                cx_px = cx * config.IMG_SIZE
-                cy_px = cy * config.IMG_SIZE
-                w_px = w * config.IMG_SIZE
-                h_px = h * config.IMG_SIZE
+                canvas_h, canvas_w = _canvas_hw(config)
+                cx_px = cx * canvas_w
+                cy_px = cy * canvas_h
+                w_px = w * canvas_w
+                h_px = h * canvas_h
                 x1 = cx_px - w_px / 2
                 y1 = cy_px - h_px / 2
                 axes[row, 3].add_patch(

@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 import matplotlib
 matplotlib.use('Agg')   # 无 GUI 的后端
 import matplotlib.pyplot as plt
@@ -117,6 +118,7 @@ def _valid_history_points(values):
 
 
 def create_tensorboard_writer(config, output_dir, log_fn=None):
+    """Create one isolated TensorBoard run for each training launch."""
     try:
         from torch.utils.tensorboard import SummaryWriter
     except Exception as exc:
@@ -124,7 +126,8 @@ def create_tensorboard_writer(config, output_dir, log_fn=None):
             log_fn(config, f"TensorBoard logging disabled: {exc}")
         return None
 
-    log_dir = os.path.join(output_dir, "tensorboard")
+    timestamp = getattr(config, "TIMESTAMP", None) or datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = os.path.join(output_dir, "tensorboard", f"run_{timestamp}")
     writer = SummaryWriter(log_dir)
     if log_fn is not None:
         log_fn(config, f"TensorBoard log directory: {log_dir}")

@@ -35,7 +35,6 @@ class ConfigCompactDetect(ConfigSLM):
 
     EPOCHS = 220
     BATCH_SIZE = 12
-    IMG_SIZE = 640
     OUTPUT_STRIDE = 4
 
     COMPACT_BASE_CH = 16
