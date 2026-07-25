@@ -3,9 +3,6 @@
 使用方式: ``ConfigSLM(OpticalConfig)`` 继承，然后通过访问器方法取值。
 """
 
-import numpy as np
-
-
 class OpticalConfig:
     """光学传播的共享默认值 + per-layer 可覆盖配置。
 
@@ -50,8 +47,6 @@ class OpticalConfig:
     VORTEX_RADIAL_SCALE = {1: 0.35, 2: 0.25, 3: 0.35, 4: 0.45}
 
     # DH-PSF 初始化
-    DH_PSF_ROTATION    = {1: 0.0, 2: np.pi / 2, 3: 0.0, 4: np.pi / 2}
-    DH_PSF_HANDEDNESS  = {1: 1.0, 2: -1.0,     3: 1.0, 4: -1.0}
 
     # ═══════════════════════════════════════════════════════════════════════
     # 便捷访问器（带 fallback）
@@ -106,9 +101,3 @@ class OpticalConfig:
         charge = cls._layer_val(cls.VORTEX_CHARGE, layer_idx, 1.0)
         radial_scale = cls._layer_val(cls.VORTEX_RADIAL_SCALE, layer_idx, 0.35)
         return charge, radial_scale
-
-    @classmethod
-    def dh_psf_init(cls, layer_idx):
-        rotation = cls._layer_val(cls.DH_PSF_ROTATION, layer_idx, 0.0)
-        handedness = cls._layer_val(cls.DH_PSF_HANDEDNESS, layer_idx, 1.0)
-        return rotation, handedness

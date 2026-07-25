@@ -190,8 +190,8 @@ def train():
 
     # ── Student checkpoint loading (priority chain) ─────────────────────
     #  1. COMPACT_PRETRAINED_STUDENT (compact-specific, highest priority)
-    #  2. SLM_INIT_CHECKPOINT (shared, when SLM_INIT_MODE contains "checkpoint")
-    #  3. Default: keep the initial phase from SLM_INIT_MODE (vortex / dh_psf / zero)
+    #  2. SLM_INIT_CHECKPOINT (when SLM_INIT_MODE is "checkpoint")
+    #  3. Default: keep the initial phase from SLM_INIT_MODE.
     pretrained_student = Config.COMPACT_PRETRAINED_STUDENT
     student_checkpoint_used = None
     if pretrained_student:
@@ -200,12 +200,16 @@ def train():
         student_checkpoint_used = pretrained_student
     else:
         slm_init_mode = str(getattr(Config, "SLM_INIT_MODE", "")).strip().lower()
-        if "checkpoint" in slm_init_mode:
+        if slm_init_mode == "checkpoint":
             slm_ckpt = Config.SLM_INIT_CHECKPOINT
-            if slm_ckpt:
-                info = load_student_checkpoint(student_raw, slm_ckpt, device)
-                log_to_file(Config, f"Student loaded from SLM_INIT_CHECKPOINT ({slm_init_mode}): {info}")
-                student_checkpoint_used = slm_ckpt
+            info = load_student_checkpoint(student_raw, slm_ckpt, device)
+            if info["loaded"] == 0:
+                raise RuntimeError(
+                    "SLM_INIT_MODE='checkpoint' requires a compatible SLM_INIT_CHECKPOINT; "
+                    f"loaded no tensors from {slm_ckpt!r}."
+                )
+            log_to_file(Config, f"Student loaded from SLM_INIT_CHECKPOINT: {info}")
+            student_checkpoint_used = slm_ckpt
     if not student_checkpoint_used:
         slm_init_mode = str(getattr(Config, "SLM_INIT_MODE", "vortex")).strip().lower()
         log_to_file(Config, f"Student initialised from SLM_INIT_MODE={slm_init_mode} (no checkpoint loaded)")

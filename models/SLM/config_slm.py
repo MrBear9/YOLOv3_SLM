@@ -78,27 +78,13 @@ class ConfigSLM(OpticalConfig):
     STUDENT_OUTPUT_BLUR_KERNEL = 1
 
     # -------- SLM phase init --------
-    # Options: zero, random, vortex, dh_psf/double_helix_psf, checkpoint,
-    # vortex_checkpoint, dh_psf_checkpoint/double_helix_checkpoint.
-    # "zero": flat phase (tiny noise), no range bias 鈥?lets the phase learn
-    #   freely in early stages before diversity constraints ramp up.
+    # Options: zero, random, vortex, checkpoint.
+    # "zero" is a flat wavefront with optional zero-mean phase noise.
     SLM_INIT_MODE = "vortex"
     SLM_INIT_NOISE_STD = 0.02
     SLM_INIT_CHECKPOINT = r"output/OpticalSLM_YOLOv8Head_student/optical_student_best.pth"
-    # Per-layer vortex/DH-PSF init: see OpticalConfig.vortex_init(layer_idx), dh_psf_init(layer_idx)
-    # Number of tiled vortex phase cells: 1.0 -> single cell, 2.0 -> 2 x 2 array, 3.0 -> 3 x 3 array.
-    SLM_VORTEX_PERIODS = 1.0
-    # When True and periods > 1, alternate charge sign in a checkerboard across cells.
-    SLM_VORTEX_ALTERNATE_CHARGE = True
-    # Number of tiled DH-PSF phase cells: 1.0 -> single cell, 2.0 -> 2 x 2 array, 3.0 -> 3 x 3 array.
-    SLM_DH_PSF_PERIODS = 1.0
-    # Spiral topological charge inside each DH-PSF cell; this is not the array count.
-    SLM_DH_PSF_CHARGE = 1.0
-    SLM_DH_PSF_RADIAL_SCALE = 6.0
-    SLM_DH_PSF_SADDLE_SCALE = 0.08
-    SLM_DH_PSF_SPIRAL_OFFSET = 0.0
-    SLM_DH_PSF_APERTURE_RADIUS = 2.0
-    # Per-layer rotation/handedness: see OpticalConfig.dh_psf_init(layer_idx)
+    # Per-layer vortex charge and radial curvature: see OpticalConfig.vortex_init.
+    # Vortex is always one global phase singularity; it is never tiled.
 
     # =========================================================================
     # TEACHER_ARCH  (must match teacher-training checkpoint)

@@ -393,85 +393,35 @@ class SLMLayer(nn.Module):
 
     def _initial_phase(self, resolution):
         init_mode = str(getattr(self.config, "SLM_INIT_MODE", "zero")).lower()
-
-        # --- zero: flat phase, no range/diversity pressure at start ---
         if init_mode == "zero":
             height, width = resolution
             noise_std = float(getattr(self.config, "SLM_INIT_NOISE_STD", 0.02))
+            if noise_std < 0:
+                raise ValueError("SLM_INIT_NOISE_STD must be non-negative.")
             phase = torch.zeros(1, 1, height, width)
             if noise_std > 0:
                 phase = phase + torch.randn_like(phase) * noise_std
             return torch.remainder(phase, 2 * np.pi)
-
-        if init_mode in {"vortex", "vortex_checkpoint"}:
+        if init_mode == "random":
+            return torch.rand(1, 1, *resolution) * (2 * np.pi)
+        if init_mode == "vortex":
             height, width, yy, xx = self._phase_grid(resolution)
-            periods = max(float(getattr(self.config, "SLM_VORTEX_PERIODS", 1.0)), 1.0)
             if hasattr(self.config, "vortex_init"):
                 charge, radial_scale = self.config.vortex_init(self.layer_index)
             else:
                 charge = float(getattr(self.config, f"SLM_VORTEX_CHARGE_{self.layer_index}", 1.0))
                 radial_scale = float(getattr(self.config, f"SLM_VORTEX_RADIAL_SCALE_{self.layer_index}", 0.35))
-
-            if periods > 1.0:
-                # Map global coords to cell-local coords in [-1, 1]
-                cell_x = torch.remainder((xx + 1.0) * periods / 2.0, 1.0) * 2.0 - 1.0
-                cell_y = torch.remainder((yy + 1.0) * periods / 2.0, 1.0) * 2.0 - 1.0
-                # Compute cell indices for checkerboard alternation
-                cell_i = torch.floor((xx + 1.0) * periods / 2.0).long()
-                cell_j = torch.floor((yy + 1.0) * periods / 2.0).long()
-                theta = torch.atan2(cell_y, cell_x)
-                radius2 = cell_x.square() + cell_y.square()
-                # Checkerboard charge sign alternation
-                if bool(getattr(self.config, "SLM_VORTEX_ALTERNATE_CHARGE", True)):
-                    sign = torch.where((cell_i + cell_j) % 2 == 0, 1.0, -1.0)
-                    charge = charge * sign.float()
-                phase = charge * theta + radial_scale * np.pi * radius2
-            else:
-                theta = torch.atan2(yy, xx)
-                radius2 = xx.square() + yy.square()
-                phase = charge * theta + radial_scale * np.pi * radius2
+            theta = torch.atan2(yy, xx)
+            radius2 = xx.square() + yy.square()
+            phase = charge * theta + radial_scale * np.pi * radius2
             return self._wrap_with_noise(phase, height, width)
-        if init_mode in {"double_helix", "double_helix_psf", "dh_psf", "double_helix_checkpoint", "dh_psf_checkpoint"}:
-            height, width, yy, xx = self._phase_grid(resolution)
-            periods = max(float(getattr(self.config, "SLM_DH_PSF_PERIODS", 2.0)), 1.0)
-            charge = float(getattr(self.config, "SLM_DH_PSF_CHARGE", 1.0))
-            radial_scale = float(getattr(self.config, "SLM_DH_PSF_RADIAL_SCALE", 0.20))
-            saddle_scale = float(getattr(self.config, "SLM_DH_PSF_SADDLE_SCALE", 0.08))
-            spiral_offset = float(getattr(self.config, "SLM_DH_PSF_SPIRAL_OFFSET", 0.0))
-            aperture_radius = float(getattr(self.config, "SLM_DH_PSF_APERTURE_RADIUS", 2.0))
-            if hasattr(self.config, "dh_psf_init"):
-                rotation, handedness = self.config.dh_psf_init(self.layer_index)
-            else:
-                rotation = float(getattr(self.config, f"SLM_DH_PSF_ROTATION_{self.layer_index}", 0.0))
-                handedness = float(getattr(self.config, f"SLM_DH_PSF_HANDEDNESS_{self.layer_index}", 1.0))
-
-            cell_x = torch.remainder((xx + 1.0) * periods / 2.0, 1.0) * 2.0 - 1.0
-            cell_y = torch.remainder((yy + 1.0) * periods / 2.0, 1.0) * 2.0 - 1.0
-            cos_r = np.cos(rotation)
-            sin_r = np.sin(rotation)
-            xr = cell_x * cos_r - cell_y * sin_r
-            yr = cell_x * sin_r + cell_y * cos_r
-
-            shifted_x = xr - spiral_offset
-            shifted_y = yr
-            theta = torch.atan2(shifted_y, shifted_x)
-            radius2 = shifted_x.square() + shifted_y.square()
-            radius = torch.sqrt(radius2 + 1e-8)
-
-            # DH-PSF-like seed: a single spiral phase term plus dense quadratic
-            # radial rings. This produces the visible spiral-ring phase cell used
-            # as an initialization prior; periods > 1 tiles that cell into an array.
-            phase = (
-                handedness * charge * theta
-                + radial_scale * np.pi * radius2
-                + saddle_scale * np.pi * (xr.square() - yr.square())
-            )
-            aperture = radius <= aperture_radius
-            if aperture.any():
-                outside_fill = phase[aperture].mean()
-                phase = torch.where(aperture, phase, outside_fill + 0.15 * np.pi * (xr.square() + yr.square()))
-            return self._wrap_with_noise(phase, height, width)
-        return torch.rand(1, 1, *resolution) * 2 * np.pi
+        if init_mode == "checkpoint":
+            # The train setup replaces this neutral phase with the checkpoint.
+            return torch.zeros(1, 1, *resolution)
+        raise ValueError(
+            "SLM_INIT_MODE must be one of: zero, random, vortex, checkpoint; "
+            f"got {init_mode!r}."
+        )
 
     def _raw_phase(self):
         """Return the un-wrapped phase tensor regardless of parameterisation."""
@@ -516,8 +466,8 @@ class ASMPropagation(nn.Module):
         else:
             dy = dx = float(pixel_size)
         wavelength, distance = float(wavelength), float(distance)
-        if height < 1 or width < 1 or dy <= 0 or dx <= 0 or wavelength <= 0:
-            raise ValueError("ASM resolution, pixel size, and wavelength must be positive.")
+        if height < 1 or width < 1 or dy <= 0 or dx <= 0 or wavelength <= 0 or distance == 0:
+            raise ValueError("ASM resolution, pixel size, wavelength, and non-zero distance must be valid.")
 
         padded_height, padded_width = (
             (height * 2, width * 2) if self._linear_conv else (height, width)
@@ -537,13 +487,19 @@ class ASMPropagation(nn.Module):
         )
         FX, FY = np.meshgrid(fx, fy)
         propagating = 1.0 / wavelength ** 2 - (FX ** 2 + FY ** 2)
-        phase = 2.0 * math.pi * distance * np.sqrt(np.clip(propagating, 0.0, None))
+        # Match the validated neural-holography implementation: quantize the
+        # phase-per-metre grid to float32 before applying the propagation distance.
+        phase_per_metre = torch.from_numpy(
+            2.0 * math.pi * np.sqrt(np.clip(propagating, 0.0, None))
+        ).to(dtype=torch.float32)
+        phase = phase_per_metre * distance
         fy_max = 1.0 / math.sqrt((2.0 * distance / y_len) ** 2 + 1.0) / wavelength
         fx_max = 1.0 / math.sqrt((2.0 * distance / x_len) ** 2 + 1.0) / wavelength
         band = (propagating >= 0.0) & (np.abs(FX) < fx_max) & (np.abs(FY) < fy_max)
-        transfer_centered = band.astype(np.complex64) * np.exp(1j * phase).astype(np.complex64)
+        band = torch.from_numpy(band.astype(np.float32))
+        transfer_centered = torch.complex(band * torch.cos(phase), band * torch.sin(phase))
         self.register_buffer(
-            "H", torch.from_numpy(np.fft.ifftshift(transfer_centered)).unsqueeze(0).unsqueeze(0)
+            "H", torch.fft.ifftshift(transfer_centered, dim=(-2, -1)).unsqueeze(0).unsqueeze(0)
         )
         self.input_resolution = (height, width)
 
@@ -662,50 +618,3 @@ class OpticalStudentWithDetector(nn.Module):
         if return_feature:
             return feature, preds
         return preds
-
-
-if __name__ == "__main__":
-    from pathlib import Path
-    import sys
-
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    project_root = Path(__file__).resolve().parents[2]
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-
-    from models.SLM.config_slm import ConfigSLM as Config
-
-    output_dir = Path("output/figures")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    original_values = {
-        "RESOLUTION": Config.RESOLUTION,
-        "SLM_INIT_MODE": Config.SLM_INIT_MODE,
-        "SLM_INIT_NOISE_STD": Config.SLM_INIT_NOISE_STD,
-        "SLM_DH_PSF_PERIODS": Config.SLM_DH_PSF_PERIODS,
-    }
-
-    Config.RESOLUTION = (512, 512)
-    Config.SLM_INIT_MODE = "dh_psf"
-    Config.SLM_INIT_NOISE_STD = 0.0
-
-    fig, axes = plt.subplots(2, 2, figsize=(8.2, 8.0))
-    for row, periods in enumerate((1.0, 2.0)):
-        Config.SLM_DH_PSF_PERIODS = periods
-        student = OpticalStudent(Config)
-        layer_names = [name for name, _ in student.all_slm_layers()][:2]  # slm1, slm2
-        for col, layer_name in enumerate(layer_names):
-            phase = getattr(student, layer_name).wrapped_phase().detach().squeeze().cpu().numpy()
-            ax = axes[row, col]
-            im = ax.imshow(phase, cmap="turbo", vmin=0.0, vmax=2 * np.pi)
-            ax.set_title(f"{layer_name} dh_psf periods={periods:g}")
-            ax.axis("off")
-    fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.046, pad=0.04, label="phase [0, 2pi]")
-    fig.savefig(output_dir / "slm_dh_psf_initial_phase_test_2.png", dpi=180, bbox_inches="tight")
-    plt.close(fig)
-
-    for key, value in original_values.items():
-        setattr(Config, key, value)
-    print(f"Saved DH-PSF initialization preview to: {output_dir / 'slm_dh_psf_initial_phase_test_2.png'}")

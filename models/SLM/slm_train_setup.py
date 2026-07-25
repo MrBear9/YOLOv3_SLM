@@ -60,11 +60,14 @@ def setup_training(is_main, use_ddp):
     else:
         student = OpticalStudent(Config).to(device)
     init_mode = str(Config.SLM_INIT_MODE).strip().lower()
-    if init_mode in {"checkpoint", "vortex_checkpoint", "double_helix_checkpoint", "dh_psf_checkpoint"}:
+    if init_mode == "checkpoint":
         student_info = load_student_checkpoint(student, Config.SLM_INIT_CHECKPOINT, device)
         log_to_file(Config, f"Initialized SLM student from checkpoint: {student_info}")
         if student_info["loaded"] == 0:
-            log_to_file(Config, "SLM checkpoint initialization loaded 0 tensors; using current initialized phases.")
+            raise RuntimeError(
+                "SLM_INIT_MODE='checkpoint' requires a compatible SLM_INIT_CHECKPOINT; "
+                f"loaded no tensors from {Config.SLM_INIT_CHECKPOINT!r}."
+            )
     else:
         log_to_file(Config, f"Initialized SLM student with mode={init_mode}")
     detector = build_detector_head(Config, in_channels=1).to(device)
