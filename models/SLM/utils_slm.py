@@ -302,12 +302,16 @@ def save_detector_best(detector, path, epoch, loss_value, extra=None,
 
 
 def _save_wrapped_phases(payload, student):
-    """Save wrapped phases for all layers using all_slm_layers()."""
+    """Save continuous phase plus the calibrated, finite-level SLM drive."""
     if hasattr(student, "all_slm_layers"):
         for layer_name, slm in student.all_slm_layers():
             payload[f"{layer_name}_wrapped_phase"] = slm.wrapped_phase().detach().cpu()
+            payload[f"{layer_name}_effective_phase"] = slm.effective_phase().detach().cpu()
+            payload[f"{layer_name}_gray_drive"] = slm.phase_to_gray_uint8().cpu()
     else:
         for layer_name in _layer_names_from_student(student):
             slm = getattr(student, layer_name, None)
             if slm is not None:
                 payload[f"{layer_name}_wrapped_phase"] = slm.wrapped_phase().detach().cpu()
+                payload[f"{layer_name}_effective_phase"] = slm.effective_phase().detach().cpu()
+                payload[f"{layer_name}_gray_drive"] = slm.phase_to_gray_uint8().cpu()

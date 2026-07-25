@@ -110,6 +110,7 @@ class ConfigCompactDetect(ConfigSLM):
         cls.OUTPUT_DIR = resolve_project_path(cls.OUTPUT_DIR)
         cls.TEACHER_DETECTOR_CHECKPOINT = resolve_project_path(cls.TEACHER_DETECTOR_CHECKPOINT)
         cls.SLM_INIT_CHECKPOINT = resolve_project_path(cls.SLM_INIT_CHECKPOINT)
+        cls.SLM_GRAY_TO_PHASE_LUT = resolve_project_path(cls.SLM_GRAY_TO_PHASE_LUT)
         cls.COMPACT_PRETRAINED_STUDENT = resolve_project_path(cls.COMPACT_PRETRAINED_STUDENT)
         cls.COMPACT_PRETRAINED_DETECTOR = resolve_project_path(cls.COMPACT_PRETRAINED_DETECTOR)
         cls.SINGLE_IMAGE_PATH = resolve_project_path(cls.SINGLE_IMAGE_PATH)

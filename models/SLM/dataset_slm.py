@@ -4,10 +4,9 @@ from pathlib import Path
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
-from torchvision.transforms import functional as TF
 import yaml
 
-from models.dataset import letterbox_image_targets
+from models.dataset import image_to_intensity_tensor, letterbox_image_targets
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -99,7 +98,10 @@ class SLMFeatureDataset(Dataset):
                         targets.append([int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])])
         targets = torch.tensor(targets, dtype=torch.float32) if targets else torch.zeros((0, 5), dtype=torch.float32)
         img, targets = letterbox_image_targets(img, targets, self.config.RESOLUTION)
-        gray_tensor = TF.to_tensor(TF.to_grayscale(img, num_output_channels=1))
+        gray_tensor = image_to_intensity_tensor(
+            img,
+            mode=getattr(self.config, "INPUT_INTENSITY_MODE", "srgb_linear"),
+        )
         rgb_tensor = gray_tensor
         return {
             "gray_tensor": gray_tensor,

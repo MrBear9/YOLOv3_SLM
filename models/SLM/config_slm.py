@@ -51,6 +51,8 @@ class ConfigSLM(OpticalConfig):
     RESOLUTION = (640, 640)
     OPTICAL_FIELD_EPS = 1e-8
     OPTICAL_NORM_EPS = 1e-6
+    # Must match teacher training: the optical field amplitude is sqrt(linear intensity).
+    INPUT_INTENSITY_MODE = "srgb_linear"
 
     # -------- Phase parameterisation --------
     # "direct": single flat phase_raw parameter (legacy / compatible)
@@ -85,6 +87,15 @@ class ConfigSLM(OpticalConfig):
     SLM_INIT_CHECKPOINT = r"output/OpticalSLM_YOLOv8Head_student/optical_student_best.pth"
     # Per-layer vortex charge and radial curvature: see OpticalConfig.vortex_init.
     # Vortex is always one global phase singularity; it is never tiled.
+
+    # -------- SLM drive calibration --------
+    SLM_PHASE_LEVELS = 256
+    SIMULATE_PHASE_QUANTIZATION = True
+    SLM_GRAY_INVERTED = False
+    # Optional .npy/.csv/.txt measured gray-to-phase curve in radians.
+    # A one-column file is sampled uniformly over gray codes; two columns are
+    # interpreted as (gray_code, measured_phase_radians).
+    SLM_GRAY_TO_PHASE_LUT = r""
 
     # =========================================================================
     # TEACHER_ARCH  (must match teacher-training checkpoint)
@@ -290,6 +301,7 @@ class ConfigSLM(OpticalConfig):
         cls.OUTPUT_DIR = resolve_project_path(cls.OUTPUT_DIR)
         cls.TEACHER_DETECTOR_CHECKPOINT = resolve_project_path(cls.TEACHER_DETECTOR_CHECKPOINT)
         cls.SLM_INIT_CHECKPOINT = resolve_project_path(cls.SLM_INIT_CHECKPOINT)
+        cls.SLM_GRAY_TO_PHASE_LUT = resolve_project_path(cls.SLM_GRAY_TO_PHASE_LUT)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
         os.makedirs(cls.OUTPUT_DIR, exist_ok=True)
         cls.LOG_ROOT_DIR = os.path.join(cls.OUTPUT_DIR, "logs")

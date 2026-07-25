@@ -29,6 +29,29 @@ def _resolve_hw(output_size):
     return side, side
 
 
+def srgb_to_linear_intensity(srgb):
+    """Decode normalized sRGB values into linear optical intensity."""
+    srgb = srgb.clamp(0.0, 1.0)
+    return torch.where(
+        srgb <= 0.04045,
+        srgb / 12.92,
+        ((srgb + 0.055) / 1.055).pow(2.4),
+    )
+
+
+def image_to_intensity_tensor(image, mode="srgb_linear"):
+    """Convert a PIL RGB image into the detector/SLM one-channel intensity tensor."""
+    rgb_srgb = TF.to_tensor(image.convert("RGB"))
+    mode = str(mode).strip().lower()
+    if mode in {"srgb", "legacy"}:
+        return TF.rgb_to_grayscale(rgb_srgb, num_output_channels=1)
+    if mode not in {"srgb_linear", "linear", "linear_srgb"}:
+        raise ValueError(f"Unknown INPUT_INTENSITY_MODE: {mode!r}")
+    rgb_linear = srgb_to_linear_intensity(rgb_srgb)
+    # Rec. 709 luminance weights are defined in linear RGB and preserve power.
+    return 0.2126 * rgb_linear[0:1] + 0.7152 * rgb_linear[1:2] + 0.0722 * rgb_linear[2:3]
+
+
 def letterbox_content_bounds(image_size, output_size):
     src_w, src_h = image_size
     output_h, output_w = _resolve_hw(output_size)
@@ -154,7 +177,10 @@ class YOLODataset(Dataset):
         if self.augment:
             img, targets = self._copy_paste_small_soldiers(img, targets, content_bounds)
             img, targets = self._augment(img, targets)
-        img_tensor = TF.to_tensor(TF.to_grayscale(img, num_output_channels=1))
+        img_tensor = image_to_intensity_tensor(
+            img,
+            mode=getattr(self.config, "INPUT_INTENSITY_MODE", "srgb_linear"),
+        )
         if self.augment and random.random() < float(getattr(self.config, "AUG_NOISE_PROB", 0.10)):
             std = float(getattr(self.config, "AUG_NOISE_STD", 0.01))
             img_tensor = (img_tensor + torch.randn_like(img_tensor) * std).clamp_(0.0, 1.0)

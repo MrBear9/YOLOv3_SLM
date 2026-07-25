@@ -341,6 +341,12 @@ def log_config():
     log_to_file(Config, f"Optical: {num_layers}-layer, multi_head={multi}, phase_mode={Config.SLM_PHASE_PARAM_MODE}, init={Config.SLM_INIT_MODE}")
     log_to_file(
         Config,
+        f"Physics: input={Config.INPUT_INTENSITY_MODE}, phase_levels={Config.SLM_PHASE_LEVELS}, "
+        f"quantization={Config.SIMULATE_PHASE_QUANTIZATION}, inverted_gray={Config.SLM_GRAY_INVERTED}, "
+        f"lut={Config.SLM_GRAY_TO_PHASE_LUT or 'ideal_linear'}",
+    )
+    log_to_file(
+        Config,
         f"Stages: phase_focus={Config.PHASE_FOCUS_EPOCHS}  detector_focus={Config.DETECTOR_FOCUS_EPOCHS}  "
         f"joint={Config.JOINT_FIT_EPOCHS}  norm_joint={Config.NORM_JOINT_EPOCHS}",
     )

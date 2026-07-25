@@ -164,13 +164,18 @@ def add_tensorboard_visualization(writer, step, dataset, student, detector, devi
         slm = getattr(student_module, layer_name, None)
         if slm is None:
             continue
-        phase = slm.wrapped_phase()
-        writer.add_scalar(f"OpticalPhase/{layer_name}_min_rad", float(phase.min().detach().cpu()), step)
-        writer.add_scalar(f"OpticalPhase/{layer_name}_max_rad", float(phase.max().detach().cpu()), step)
+        phase = slm.effective_phase()
+        writer.add_scalar(f"OpticalPhase/{layer_name}_effective_min_rad", float(phase.min().detach().cpu()), step)
+        writer.add_scalar(f"OpticalPhase/{layer_name}_effective_max_rad", float(phase.max().detach().cpu()), step)
+        writer.add_image(
+            f"Visualization/{layer_name}_gray_drive",
+            slm.phase_to_gray_uint8().float().squeeze(0) / (slm.phase_levels - 1),
+            step,
+        )
         phase_images.append(phase_to_tensorboard_image(phase).squeeze(0))
     if phase_images:
         phase_grid = torch.cat(phase_images, dim=2)
-        writer.add_image("Visualization/slm_wrapped_phase", phase_grid, step)
+        writer.add_image("Visualization/slm_effective_phase", phase_grid, step)
     writer.flush()
 
 

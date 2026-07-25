@@ -52,6 +52,9 @@ class ConfigYOLOv8Anchor:
     RESOLUTION = (640, 640)
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
+    # Decode image sRGB values before the teacher sees intensity. Set "srgb"
+    # only to reproduce a legacy checkpoint trained in the display-encoded domain.
+    INPUT_INTENSITY_MODE = "srgb_linear"
 
     STAGE1_LOCATE_EPOCHS = 40
     STAGE2_BALANCE_EPOCHS = 200

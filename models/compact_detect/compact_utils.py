@@ -80,6 +80,8 @@ def save_checkpoint(path, student, detector, epoch, loss_value, metrics=None):
     for layer_name in _slm_layer_names(student):
         slm = getattr(student, layer_name)
         payload[f"{layer_name}_wrapped_phase"] = slm.wrapped_phase().detach().cpu()
+        payload[f"{layer_name}_effective_phase"] = slm.effective_phase().detach().cpu()
+        payload[f"{layer_name}_gray_drive"] = slm.phase_to_gray_uint8().cpu()
     torch.save(payload, path)
 
 
