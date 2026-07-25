@@ -20,6 +20,7 @@ from models.SLM.slm_utils import (
 )
 from models.SLM.slm_train_epoch import run_epoch
 from models.SLM.slm_train_setup import setup_training
+from models.SLM.evaluation_slm import save_slm_detection_visualization
 from models.SLM.utils_slm import collect_slm_statistics, save_detector_best, save_student_best
 from models.monitoring import snapshot_parameters
 from models.runtime import (
@@ -51,6 +52,26 @@ def train():
         snapshot_parameters(ctx["detector"])
     deployment_norm_mode = Config.STUDENT_NORM_MODE
     init_epoch_log_table(Config)
+
+    # Epoch 0 is the untouched SLM initialization, before any optimizer step.
+    # Use the first active stage's normalization mode so this preview matches
+    # the output domain that training will see in its first epoch.
+    initial_stage = next((name for name, epochs in stage_schedule() if epochs > 0), None)
+    if is_main and initial_stage is not None:
+        initial_norm_mode = configure_student_norm_for_stage(initial_stage, deployment_norm_mode)
+        ctx["student_raw"].enable_norm = bool(Config.ENABLE_STUDENT_NORM and initial_norm_mode != "none")
+        save_slm_detection_visualization(
+            Config,
+            0,
+            ctx["teacher"],
+            ctx["student_raw"],
+            ctx["detector_raw"],
+            ctx["vis_dataset"],
+            Config.VISUALIZATION_DIR,
+            prefix=ctx["vis_prefix"],
+            device=ctx["device"],
+        )
+        log_to_file(Config, "Saved epoch 0 visualization from the initialized SLM state before training.")
 
     for stage_name, stage_epochs in stage_schedule():
         if stage_epochs <= 0:

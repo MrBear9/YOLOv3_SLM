@@ -40,17 +40,20 @@ class ConfigCompactDetect(ConfigSLM):
     COMPACT_BASE_CH = 16
     COMPACT_DILATIONS = (1, 2, 4)
     COMPACT_HEAD_CH = 32
+    # Override ConfigSLM's default "light" head: compact decoders require
+    # the heatmap/box dictionary emitted by a compact detector.
+    DETECTOR_HEAD_TYPE = "compact"
     COMPACT_MODEL_VERSION = "v1"           # "v1" (109K) or "v2" (~32K, Level-4 decoupled 3-network)
     COMPACT_PRETRAINED_STUDENT = r""       # pretrained OpticalStudent SLM phase
     COMPACT_PRETRAINED_DETECTOR = r""      # pretrained CompactOpticalDetector weights
     COMPACT_TRAIN_STUDENT = True            # trainable during teacher warmup (feature matching)
     COMPACT_JOINT_TRAIN_STUDENT = False     # also trainable during detection phase (grad through detector→student)
-    COMPACT_TEACHER_WARMUP_EPOCHS = 10
+    COMPACT_TEACHER_WARMUP_EPOCHS = 50
     COMPACT_TEACHER_WARMUP_WEIGHT = 5.0
     COMPACT_TEACHER_FEATURE_WEIGHT = 0.1
     COMPACT_TEACHER_WARMUP_RAW_STUDENT = True
-    COMPACT_TEACHER_WARMUP_SUBSET_SIZE = 1000
-    COMPACT_TEACHER_WARMUP_SUBSET_REPEAT = 1
+    COMPACT_TEACHER_WARMUP_SUBSET_SIZE = 1
+    COMPACT_TEACHER_WARMUP_SUBSET_REPEAT = 1000
     COMPACT_PHASE_LR = 1e-3
     COMPACT_DETECTOR_LR = 3e-4
     COMPACT_WEIGHT_DECAY = 3e-5
@@ -102,61 +105,7 @@ class ConfigCompactDetect(ConfigSLM):
     SKIP_FILE_LOG_MESSAGES = ("best checkpoint updated",)
 
     @classmethod
-    def apply_runtime_overrides(cls):
-        super().apply_runtime_overrides()
-        overrides = {
-            "OPTICAL_COMPACT_OUTPUT_DIR": ("OUTPUT_DIR", str),
-            "OPTICAL_COMPACT_EPOCHS": ("EPOCHS", int),
-            "OPTICAL_COMPACT_BATCH_SIZE": ("BATCH_SIZE", int),
-            "OPTICAL_COMPACT_BASE_CH": ("COMPACT_BASE_CH", int),
-            "OPTICAL_COMPACT_HEAD_CH": ("COMPACT_HEAD_CH", int),
-            "OPTICAL_COMPACT_TEACHER_WARMUP_EPOCHS": ("COMPACT_TEACHER_WARMUP_EPOCHS", int),
-            "OPTICAL_COMPACT_TEACHER_WARMUP_WEIGHT": ("COMPACT_TEACHER_WARMUP_WEIGHT", float),
-            "OPTICAL_COMPACT_TEACHER_FEATURE_WEIGHT": ("COMPACT_TEACHER_FEATURE_WEIGHT", float),
-            "OPTICAL_COMPACT_TEACHER_WARMUP_SUBSET_SIZE": ("COMPACT_TEACHER_WARMUP_SUBSET_SIZE", int),
-            "OPTICAL_COMPACT_TEACHER_WARMUP_SUBSET_REPEAT": ("COMPACT_TEACHER_WARMUP_SUBSET_REPEAT", int),
-            "OPTICAL_COMPACT_PHASE_LR": ("COMPACT_PHASE_LR", float),
-            "OPTICAL_COMPACT_DETECTOR_LR": ("COMPACT_DETECTOR_LR", float),
-            "OPTICAL_COMPACT_PRETRAINED_STUDENT": ("COMPACT_PRETRAINED_STUDENT", str),
-            "OPTICAL_COMPACT_PRETRAINED_DETECTOR": ("COMPACT_PRETRAINED_DETECTOR", str),
-            "OPTICAL_COMPACT_MODEL_VERSION": ("COMPACT_MODEL_VERSION", str),
-            "OPTICAL_COMPACT_CONF_THRESH": ("CONF_THRESH", float),
-            "OPTICAL_COMPACT_NMS_THRESH": ("NMS_THRESH", float),
-            "OPTICAL_COMPACT_MAX_DET": ("MAX_DET", int),
-            "OPTICAL_COMPACT_METRIC_CONF_THRESH": ("METRIC_CONF_THRESH", float),
-            "OPTICAL_COMPACT_METRIC_MAX_DET": ("METRIC_MAX_DET", int),
-            "OPTICAL_COMPACT_METRIC_PRE_NMS_TOPK": ("METRIC_PRE_NMS_TOPK", int),
-            "OPTICAL_COMPACT_VIS_SEED": ("VIS_SEED", int),
-            "OPTICAL_COMPACT_VIS_INTERVAL": ("VIS_INTERVAL", int),
-            "OPTICAL_COMPACT_VIS_MAX_IMAGES": ("VIS_MAX_IMAGES", int),
-            "OPTICAL_COMPACT_VIS_FILE_INTERVAL": ("VIS_FILE_INTERVAL", int),
-            "OPTICAL_COMPACT_VIS_FILE_MAX_IMAGES": ("VIS_FILE_MAX_IMAGES", int),
-            "OPTICAL_COMPACT_SINGLE_IMAGE_PATH": ("SINGLE_IMAGE_PATH", str),
-            "OPTICAL_COMPACT_SINGLE_IMAGE_LABEL_PATH": ("SINGLE_IMAGE_LABEL_PATH", str),
-            "OPTICAL_COMPACT_SINGLE_IMAGE_REPEAT": ("SINGLE_IMAGE_REPEAT", int),
-            "OPTICAL_COMPACT_OBJ_LOSS_WEIGHT": ("OBJ_LOSS_WEIGHT", float),
-            "OPTICAL_COMPACT_CLS_LOSS_WEIGHT": ("CLS_LOSS_WEIGHT", float),
-        }
-        for env_name, (attr, caster) in overrides.items():
-            value = os.environ.get(env_name)
-            if value:
-                setattr(cls, attr, caster(value))
-        train_student = os.environ.get("OPTICAL_COMPACT_TRAIN_STUDENT")
-        if train_student:
-            cls.COMPACT_TRAIN_STUDENT = train_student.strip().lower() in {"1", "true", "yes", "on"}
-        joint_train = os.environ.get("OPTICAL_COMPACT_JOINT_TRAIN_STUDENT")
-        if joint_train:
-            cls.COMPACT_JOINT_TRAIN_STUDENT = joint_train.strip().lower() in {"1", "true", "yes", "on"}
-        warmup_raw = os.environ.get("OPTICAL_COMPACT_TEACHER_WARMUP_RAW_STUDENT")
-        if warmup_raw:
-            cls.COMPACT_TEACHER_WARMUP_RAW_STUDENT = warmup_raw.strip().lower() in {"1", "true", "yes", "on"}
-        single_image = os.environ.get("OPTICAL_COMPACT_SINGLE_IMAGE_TRAINING")
-        if single_image:
-            cls.SINGLE_IMAGE_TRAINING = single_image.strip().lower() in {"1", "true", "yes", "on"}
-
-    @classmethod
     def initialize(cls):
-        cls.apply_runtime_overrides()
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
         cls.OUTPUT_DIR = resolve_project_path(cls.OUTPUT_DIR)
         cls.TEACHER_DETECTOR_CHECKPOINT = resolve_project_path(cls.TEACHER_DETECTOR_CHECKPOINT)

@@ -394,10 +394,10 @@ def run_epoch(
         best_student_map50 = max(best_student_map50, best_map50)
 
     # Visualization
-    if is_main and global_epoch % Config.VIS_INTERVAL == 0:
+    if is_main and Config.VIS_INTERVAL > 0 and display_epoch % Config.VIS_INTERVAL == 0:
         save_slm_detection_visualization(
             Config,
-            global_epoch,
+            display_epoch,
             teacher,
             student_raw,
             ctx["detector_raw"],
