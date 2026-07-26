@@ -16,7 +16,7 @@ class ConfigSLM(OpticalConfig):
     CLASS_NAMES = None
     NUM_CLASSES = None
     # Keep this run separate from the frozen-SLM baseline (mAP50=0.4647).
-    OUTPUT_DIR = r"output/SLM_Tv1_light_joint_srgb"
+    OUTPUT_DIR = r"output/SLM_Tv1_light_joint_srgb_v2"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
@@ -139,6 +139,9 @@ class ConfigSLM(OpticalConfig):
     YOLO_LIGHT_BASE_CH = 8  # A: halved from 16
     DETECTOR_USE_COORDCONV = True
     DETECTOR_INVERT_FEATURE = True   # invert teacher feature (dark→bright) before detector
+    # The SLM detector baseline was validated on the raw optical intensity.
+    # Keep it independent from teacher-side feature inversion.
+    SLM_DETECTOR_INVERT_FEATURE = False
     ANCHOR_FREE_HEAD_CH = 24
     ANCHOR_FREE_P2_FUSION_CH = 16
     ANCHOR_FREE_P2_HEAD_CH = 16
@@ -174,7 +177,7 @@ class ConfigSLM(OpticalConfig):
     FEATURE_LOSS_PREFILTER_KERNEL = 1
     ENABLE_FEATURE_DOMAIN_ALIGNMENT = True
     # Options: "mean_std", "minmax"/"min_max", "none".
-    FEATURE_DOMAIN_ALIGN_MODE = "mean_std"
+    FEATURE_DOMAIN_ALIGN_MODE = "minmax"
 
     # -------- Privacy / optical obfuscation loss --------
     PRIVACY_CORR_TARGET = 0.15
@@ -206,12 +209,12 @@ class ConfigSLM(OpticalConfig):
 
     FEATURE_LOSS_WEIGHT_JOINT = 0.15
     DETECTION_LOSS_WEIGHT_JOINT = 1.00
-    RESPONSE_LOSS_WEIGHT_JOINT = 0.05
+    RESPONSE_LOSS_WEIGHT_JOINT = 0.00
     PRIVACY_LOSS_WEIGHT_JOINT = 0.00
 
     FEATURE_LOSS_WEIGHT_NORM_JOINT = 0.10
     DETECTION_LOSS_WEIGHT_NORM_JOINT = 1.00
-    RESPONSE_LOSS_WEIGHT_NORM_JOINT = 0.05
+    RESPONSE_LOSS_WEIGHT_NORM_JOINT = 0.00
     PRIVACY_LOSS_WEIGHT_NORM_JOINT = 0.00
 
     # =========================================================================

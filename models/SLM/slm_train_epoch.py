@@ -36,7 +36,7 @@ from models.monitoring import (
     write_parameter_monitoring,
 )
 from models.runtime import gather_detection_results, log_epoch_table_row, log_to_file, unwrap_module
-from models.yolov8.feature_adapter import prepare_detector_feature
+from models.yolov8.feature_adapter import prepare_slm_detector_feature
 
 
 def _collect_slm_val_detections(config, student, detector, val_loader, device):
@@ -59,7 +59,7 @@ def _collect_slm_val_detections(config, student, detector, val_loader, device):
                 gray = gray.contiguous(memory_format=torch.channels_last)
             with amp_ctx:
                 student_feature = student(gray) if hasattr(student, '__call__') else student
-                predictions = detector(prepare_detector_feature(config, student_feature))
+                predictions = detector(prepare_slm_detector_feature(config, student_feature))
             detections = decode_detections(
                 config, predictions,
                 conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
@@ -147,7 +147,7 @@ def run_epoch(
         else:
             privacy_loss = zero
         if stage_weights["detection"] > 0:
-            predictions = detector(prepare_detector_feature(Config, student_feature))
+            predictions = detector(prepare_slm_detector_feature(Config, student_feature))
             detection_loss, _ = detection_criterion(predictions, targets)
         else:
             detection_loss = zero

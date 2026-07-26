@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.yolov8.feature_adapter import prepare_detector_feature
+from models.yolov8.feature_adapter import prepare_slm_detector_feature
 
 
 def _interpolate_preserve_layout(x, *args, **kwargs):
@@ -255,13 +255,25 @@ class CompositeOpticalFeatureLoss(nn.Module):
 
 
 def prediction_response_tensor(config, preds):
+    if isinstance(preds, dict):
+        preds = (preds,)
     response_maps = []
     for pred in preds:
-        grid_h, grid_w = pred.shape[2], pred.shape[3]
-        pred = pred.contiguous().permute(0, 2, 3, 1).contiguous().reshape(pred.shape[0], grid_h, grid_w, 3, -1)
-        obj_conf = torch.sigmoid(pred[..., 4])
-        cls_conf = torch.sigmoid(pred[..., 5:]).max(dim=-1).values
-        response = (obj_conf * cls_conf).max(dim=-1).values.unsqueeze(1)
+        if isinstance(pred, dict):
+            if "heatmap" in pred:
+                response = torch.sigmoid(pred["heatmap"]).amax(dim=1, keepdim=True)
+            elif "cls" in pred:
+                response = torch.sigmoid(pred["cls"]).amax(dim=1, keepdim=True)
+                if "obj" in pred:
+                    response = response * torch.sigmoid(pred["obj"])
+            else:
+                raise ValueError(f"Unsupported detector prediction keys: {sorted(pred)}")
+        else:
+            grid_h, grid_w = pred.shape[2], pred.shape[3]
+            pred = pred.contiguous().permute(0, 2, 3, 1).contiguous().reshape(pred.shape[0], grid_h, grid_w, 3, -1)
+            obj_conf = torch.sigmoid(pred[..., 4])
+            cls_conf = torch.sigmoid(pred[..., 5:]).max(dim=-1).values
+            response = (obj_conf * cls_conf).max(dim=-1).values.unsqueeze(1)
         response = _interpolate_preserve_layout(
             response,
             size=config.RESOLUTION,
@@ -277,11 +289,11 @@ def detection_response_loss(config, detector, student_feature, teacher_feature):
         zero = torch.zeros((), device=student_feature.device, dtype=student_feature.dtype)
         return zero, {"response": 0.0}
     student_response = prediction_response_tensor(
-        config, detector(prepare_detector_feature(config, student_feature))
+        config, detector(prepare_slm_detector_feature(config, student_feature))
     )
     with torch.no_grad():
         teacher_response = prediction_response_tensor(
-            config, detector(prepare_detector_feature(config, teacher_feature.detach()))
+            config, detector(prepare_slm_detector_feature(config, teacher_feature.detach()))
         )
     student_response = student_response / (student_response.amax(dim=(2, 3), keepdim=True) + config.OPTICAL_NORM_EPS)
     teacher_response = teacher_response / (teacher_response.amax(dim=(2, 3), keepdim=True) + config.OPTICAL_NORM_EPS)

@@ -11,7 +11,7 @@ from models.geometry import bbox_iou_xywh
 from models.SLM.losses_slm import detection_response_loss, input_privacy_loss
 from models.runtime import unwrap_module
 from models.teacher_guidance import enhance_feature_for_display
-from models.yolov8.feature_adapter import prepare_detector_feature
+from models.yolov8.feature_adapter import prepare_slm_detector_feature
 from models.yolov8.detection_protocol import decode_detections
 from models.yolov8.metrics_anchor_v8 import compute_average_precision
 
@@ -75,7 +75,7 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
 
             evaluate_detector = stage_weights["detection"] > 0
             if evaluate_detector:
-                predictions = detector_core(prepare_detector_feature(config, student_feature))
+                predictions = detector_core(prepare_slm_detector_feature(config, student_feature))
                 detection_loss, loss_stats = detection_criterion(predictions, targets)
             else:
                 predictions = None
@@ -256,7 +256,7 @@ def save_slm_detection_visualization(config, epoch, teacher, student, detector, 
                 teacher_batch = teacher_batch.contiguous(memory_format=torch.channels_last)
             teacher_feature = teacher_core(teacher_batch)
             student_feature = student_core(gray_batch)
-            predictions = detector_core(prepare_detector_feature(config, student_feature))
+            predictions = detector_core(prepare_slm_detector_feature(config, student_feature))
             detections = decode_detections(
                 config,
                 predictions,
