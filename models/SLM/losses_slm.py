@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from models.yolov8.feature_adapter import prepare_detector_feature
+
 
 def _interpolate_preserve_layout(x, *args, **kwargs):
     channels_last = x.dim() == 4 and x.is_contiguous(memory_format=torch.channels_last)
@@ -274,9 +276,13 @@ def detection_response_loss(config, detector, student_feature, teacher_feature):
     if detector is None:
         zero = torch.zeros((), device=student_feature.device, dtype=student_feature.dtype)
         return zero, {"response": 0.0}
-    student_response = prediction_response_tensor(config, detector(student_feature))
+    student_response = prediction_response_tensor(
+        config, detector(prepare_detector_feature(config, student_feature))
+    )
     with torch.no_grad():
-        teacher_response = prediction_response_tensor(config, detector(teacher_feature.detach()))
+        teacher_response = prediction_response_tensor(
+            config, detector(prepare_detector_feature(config, teacher_feature.detach()))
+        )
     student_response = student_response / (student_response.amax(dim=(2, 3), keepdim=True) + config.OPTICAL_NORM_EPS)
     teacher_response = teacher_response / (teacher_response.amax(dim=(2, 3), keepdim=True) + config.OPTICAL_NORM_EPS)
     raw = F.mse_loss(student_response, teacher_response)

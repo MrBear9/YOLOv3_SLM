@@ -15,6 +15,7 @@ from models.runtime import prepare_conv_tensor
 from models.teacher import build_teacher
 
 from .detection_heads import YOLOLightHead
+from .feature_adapter import prepare_detector_feature
 
 
 def build_detector_head(config, in_channels=1, out_channels=None):
@@ -77,12 +78,7 @@ class TeacherWithDetector(nn.Module):
         # -1 — no gradient concentration at extreme pixels.  The original value range
         # is preserved (no normalisation to [0,1]) so the detector's BatchNorm
         # distributions stay in a reasonable regime.
-        if getattr(self.config, "DETECTOR_INVERT_FEATURE", True):
-            t_min = teacher_feature.amin(dim=(2, 3), keepdim=True)
-            t_max = teacher_feature.amax(dim=(2, 3), keepdim=True)
-            det_input = t_max.detach() + t_min.detach() - teacher_feature
-        else:
-            det_input = teacher_feature
+        det_input = prepare_detector_feature(self.config, teacher_feature)
 
         det_out = self.detector(prepare_conv_tensor(self.config, det_input), return_features=return_det_features)
         if return_det_features:

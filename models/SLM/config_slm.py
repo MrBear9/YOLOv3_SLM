@@ -15,7 +15,8 @@ class ConfigSLM(OpticalConfig):
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    OUTPUT_DIR = r"output/SLM_Tv1_light"
+    # Keep this run separate from the frozen-SLM baseline (mAP50=0.4647).
+    OUTPUT_DIR = r"output/SLM_Tv1_light_joint_srgb"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
@@ -33,10 +34,11 @@ class ConfigSLM(OpticalConfig):
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
-    PHASE_FOCUS_EPOCHS = 145
-    DETECTOR_FOCUS_EPOCHS = 135
-    JOINT_FIT_EPOCHS = 0
-    NORM_JOINT_EPOCHS = 0
+    # Short optical pretraining, then optimize the SLM directly for detection.
+    PHASE_FOCUS_EPOCHS = 50
+    DETECTOR_FOCUS_EPOCHS = 35
+    JOINT_FIT_EPOCHS = 100
+    NORM_JOINT_EPOCHS = 30
     EPOCHS = PHASE_FOCUS_EPOCHS + DETECTOR_FOCUS_EPOCHS + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
 
     # =========================================================================
@@ -51,13 +53,14 @@ class ConfigSLM(OpticalConfig):
     RESOLUTION = (640, 640)
     OPTICAL_FIELD_EPS = 1e-8
     OPTICAL_NORM_EPS = 1e-6
-    # Must match teacher training: the optical field amplitude is sqrt(linear intensity).
-    INPUT_INTENSITY_MODE = "srgb_linear"
+    # Preserve the old server experiment's input domain for an attributable
+    # joint-training comparison. Linear intensity is a separate teacher ablation.
+    INPUT_INTENSITY_MODE = "srgb"
 
     # -------- Phase parameterisation --------
     # "direct": single flat phase_raw parameter (legacy / compatible)
     # "multiscale_mlp": Plan A+C multi-scale pyramid + neural-field MLP
-    SLM_PHASE_PARAM_MODE = "multiscale_mlp"
+    SLM_PHASE_PARAM_MODE = "direct"
 
     # Per-layer block/freq overrides: see OpticalConfig accessors
     #   phase_block_grid(layer_idx), phase_mlp_num_freqs(layer_idx), …
@@ -72,7 +75,7 @@ class ConfigSLM(OpticalConfig):
     # -------- Student normalization --------
     ENABLE_STUDENT_NORM = True
     # Options: "joint_and_norm", "norm_joint_only", "always", "none".
-    STUDENT_NORM_SCHEDULE = "joint_and_norm"
+    STUDENT_NORM_SCHEDULE = "norm_joint_only"
     # Options: "max", "percentile", "mean", "none".
     STUDENT_NORM_MODE = "percentile"
     STUDENT_NORM_PERCENTILE = 0.990
@@ -82,7 +85,7 @@ class ConfigSLM(OpticalConfig):
     # -------- SLM phase init --------
     # Options: zero, random, vortex, checkpoint.
     # "zero" is a flat wavefront with optional zero-mean phase noise.
-    SLM_INIT_MODE = "vortex"
+    SLM_INIT_MODE = "zero"
     SLM_INIT_NOISE_STD = 0.02
     SLM_INIT_CHECKPOINT = r"output/OpticalSLM_YOLOv8Head_student/optical_student_best.pth"
     # Per-layer vortex charge and radial curvature: see OpticalConfig.vortex_init.
@@ -151,27 +154,27 @@ class ConfigSLM(OpticalConfig):
     # =========================================================================
     # SLM feature loss (student teacher feature matching)
     # =========================================================================
-    LOSS_FULL_WEIGHT = 0.03
-    LOSS_LOW1_WEIGHT = 0.25
-    LOSS_LOW2_WEIGHT = 0.15
-    LOSS_SSIM_WEIGHT = 0.35
-    LOSS_GRAD_WEIGHT = 0.10
-    LOSS_FREQ_WEIGHT = 0.08
-    LOSS_PEARSON_WEIGHT = 0.45
+    LOSS_FULL_WEIGHT = 0.10
+    LOSS_LOW1_WEIGHT = 0.35
+    LOSS_LOW2_WEIGHT = 0.20
+    LOSS_SSIM_WEIGHT = 0.25
+    LOSS_GRAD_WEIGHT = 0.00
+    LOSS_FREQ_WEIGHT = 0.00
+    LOSS_PEARSON_WEIGHT = 0.20
     LOSS_PHASE_SMOOTH_WEIGHT = 0.000
     LOSS_PHASE_DIVERSITY_WEIGHT = 0.015
-    PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.001
-    PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS = 0.03
+    PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.0
+    PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS = 0.0
     PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS = 0.0
     PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS = 0.0
-    PHASE_SMOOTH_WEIGHT_JOINT = 0.02
-    PHASE_DIVERSITY_WEIGHT_JOINT = 0.03
-    PHASE_SMOOTH_WEIGHT_NORM_JOINT = 0.02
-    PHASE_DIVERSITY_WEIGHT_NORM_JOINT = 0.08
+    PHASE_SMOOTH_WEIGHT_JOINT = 0.0
+    PHASE_DIVERSITY_WEIGHT_JOINT = 0.0
+    PHASE_SMOOTH_WEIGHT_NORM_JOINT = 0.0
+    PHASE_DIVERSITY_WEIGHT_NORM_JOINT = 0.0
     FEATURE_LOSS_PREFILTER_KERNEL = 1
     ENABLE_FEATURE_DOMAIN_ALIGNMENT = True
     # Options: "mean_std", "minmax"/"min_max", "none".
-    FEATURE_DOMAIN_ALIGN_MODE = "minmax"
+    FEATURE_DOMAIN_ALIGN_MODE = "mean_std"
 
     # -------- Privacy / optical obfuscation loss --------
     PRIVACY_CORR_TARGET = 0.15
@@ -201,14 +204,14 @@ class ConfigSLM(OpticalConfig):
     RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
     PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
 
-    FEATURE_LOSS_WEIGHT_JOINT = 0.08
+    FEATURE_LOSS_WEIGHT_JOINT = 0.15
     DETECTION_LOSS_WEIGHT_JOINT = 1.00
-    RESPONSE_LOSS_WEIGHT_JOINT = 0.03
+    RESPONSE_LOSS_WEIGHT_JOINT = 0.05
     PRIVACY_LOSS_WEIGHT_JOINT = 0.00
 
-    FEATURE_LOSS_WEIGHT_NORM_JOINT = 0.05
+    FEATURE_LOSS_WEIGHT_NORM_JOINT = 0.10
     DETECTION_LOSS_WEIGHT_NORM_JOINT = 1.00
-    RESPONSE_LOSS_WEIGHT_NORM_JOINT = 0.02
+    RESPONSE_LOSS_WEIGHT_NORM_JOINT = 0.05
     PRIVACY_LOSS_WEIGHT_NORM_JOINT = 0.00
 
     # =========================================================================
@@ -227,8 +230,8 @@ class ConfigSLM(OpticalConfig):
     LR_SCHEDULER = "CosineAnnealingLR"
     ETA_MIN = 1e-6
 
-    ENABLE_DETECTOR_FOCUS_EARLY_STOP = True
-    DETECTOR_FOCUS_EARLY_STOP_PATIENCE = 18
+    ENABLE_DETECTOR_FOCUS_EARLY_STOP = False
+    DETECTOR_FOCUS_EARLY_STOP_PATIENCE = 0
     DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA = 0.002
 
     # =========================================================================
