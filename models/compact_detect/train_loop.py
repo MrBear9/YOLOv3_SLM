@@ -332,7 +332,7 @@ def train():
         set_trainable(detector, not in_teacher_warmup)
         epoch_loss_t = torch.zeros((), device=device)
         stat_keys = (
-            ("feature_total", "full", "low1", "low2", "ssim", "grad", "freq", "pearson", "slm_smooth", "slm_diversity")
+            ("feature_total", "full", "low1", "low2", "ssim", "grad", "freq", "pearson")
             if in_teacher_warmup
             else get_compact_loss_keys(Config)
         )

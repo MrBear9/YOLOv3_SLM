@@ -179,7 +179,7 @@ def write_slm_tensorboard_scalars(
     if slm_stats is not None:
         for key, value in slm_stats.items():
             if any(key.endswith(suffix) for suffix in (
-                "_wrapped_std", "_wrapped_span", "_circular_std", "_near_boundary_ratio",
+                "_raw_mean", "_raw_std", "_simulation_min", "_simulation_max",
             )):
                 add_tensorboard_scalar(writer, f"SLM/{stage_name}/{key}", value, step)
     add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_grad_norm", phase_grad_norm, step)

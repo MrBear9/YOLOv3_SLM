@@ -1,7 +1,9 @@
-"""Export trained SLM phases through the same calibrated drive chain used in training."""
+"""Export trained SLM phases with explicit simulation and hardware conventions."""
 
+import json
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 import torch
 
@@ -9,7 +11,7 @@ from models.SLM.utils_slm import load_student_checkpoint
 
 
 def export_student_phase_images(config, checkpoint_path, output_dir, device="cpu"):
-    """Load a student checkpoint and save one finite-level grayscale PNG per SLM layer."""
+    """Export raw, simulation, hardware phase arrays and native SLM PNGs per layer."""
     from models.SLM.multi_head_slm import MultiHeadOpticalStudent
     from models.SLM.optical_layers import OpticalStudent
 
@@ -22,8 +24,33 @@ def export_student_phase_images(config, checkpoint_path, output_dir, device="cpu
         raise RuntimeError(f"No compatible SLM tensors found in {checkpoint_path!r}.")
     saved = []
     for layer_name, slm in student.all_slm_layers():
+        raw = slm._raw_phase().detach().squeeze(0).squeeze(0).cpu().numpy()
+        direct = slm.direct_phase()
+        pyramid = slm.pyramid_phase()
+        simulation = slm.simulation_phase().detach().squeeze(0).squeeze(0).cpu().numpy()
+        hardware = slm.hardware_export_phase().detach().squeeze(0).squeeze(0).cpu().numpy()
         gray = slm.phase_to_gray_uint8().squeeze(0).squeeze(0).cpu().numpy()
-        path = output_dir / f"{layer_name}_gray.png"
+        np.save(output_dir / f"{layer_name}_raw_phase.npy", raw)
+        if direct is not None:
+            np.save(output_dir / f"{layer_name}_direct_phase.npy", direct.detach().squeeze().cpu().numpy())
+        if pyramid is not None:
+            np.save(output_dir / f"{layer_name}_pyramid_phase.npy", pyramid.detach().squeeze().cpu().numpy())
+        np.save(output_dir / f"{layer_name}_simulation_phase.npy", simulation)
+        np.save(output_dir / f"{layer_name}_hardware_export_phase.npy", hardware)
+        path = output_dir / f"{layer_name}.png"
         Image.fromarray(gray, mode="L").save(path)
         saved.append(path)
+    metadata = {
+        "phase_parameterization": str(getattr(config, "SLM_PHASE_PARAM_MODE", "direct_sgd")),
+        "simulation_convention": "direct_sgd: exp(1j * raw_phase)",
+        "hardware_export_convention": "hardware_phase=(raw_phase+offset) mod 2pi",
+        "hardware_export_offset_rad": float(getattr(config, "SLM_EXPORT_PHASE_OFFSET_RAD", np.pi)),
+        "gray_inverted": bool(getattr(config, "SLM_GRAY_INVERTED", False)),
+        "phase_levels": int(getattr(config, "SLM_PHASE_LEVELS", 256)),
+        "direct_sgd_pyramid_scale": float(getattr(config, "SLM_DIRECT_SGD_PYRAMID_SCALE", 0.0)),
+        "resolution_hw": [int(config.RESOLUTION[0]), int(config.RESOLUTION[1])],
+        "gray_to_phase_lut": str(getattr(config, "SLM_GRAY_TO_PHASE_LUT", "") or ""),
+    }
+    with (output_dir / "phase_export_metadata.json").open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2)
     return saved, info

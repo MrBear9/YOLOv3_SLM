@@ -36,7 +36,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/Tv1_light"
+    TEACHER_OUTPUT_DIR = r"output/Tv1_light_srgb_linear_invertFalse"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -94,7 +94,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Teacher init / freeze "scratch"(default) | "checkpoint" | "joint_checkpoint" 
     # =========================================================================
-    TEACHER_INIT_MODE = "joint_checkpoint"
+    TEACHER_INIT_MODE = "scratch"
     TEACHER_INIT_CHECKPOINT = r"output/Tv1_light_0.8398/teacher_detector_best.pth"
     FREEZE_TEACHER = False
 
@@ -121,7 +121,7 @@ class ConfigYOLOv8Anchor:
     TAL_TOPK = 10
     TAL_ALPHA = 0.5
     TAL_BETA = 6.0
-    DETECTOR_INVERT_FEATURE = True   # invert teacher feature (dark→bright) before detector
+    DETECTOR_INVERT_FEATURE = False   # invert teacher feature (dark→bright) before detector
 
     # -------- DETECTOR_HEAD_TYPE = "compact" | "center_detect" --------
     # Anchor-free center-point detector (CompactOpticalDetector).

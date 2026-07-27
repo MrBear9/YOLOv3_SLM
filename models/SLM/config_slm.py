@@ -16,14 +16,14 @@ class ConfigSLM(OpticalConfig):
     CLASS_NAMES = None
     NUM_CLASSES = None
     # Keep this run separate from the frozen-SLM baseline (mAP50=0.4647).
-    OUTPUT_DIR = r"output/SLM_Tv1_light_joint_srgb_v2"
+    OUTPUT_DIR = r"output/SLM_Tv1_light_direct_sgd"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light_0.8398/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light_srgb_linear_invertFalse/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -45,7 +45,7 @@ class ConfigSLM(OpticalConfig):
     # SLM optical parameters
     # =========================================================================
     WAVELENGTH = 532e-9
-    PIXEL_SIZE = 8e-6
+    PIXEL_SIZE = 6.4e-6
     # PROP_DISTANCE per-layer: see OpticalConfig.prop_distance(layer_idx)
     # Options: "phase", "amp_phase".
     SLM_MODE = "phase"
@@ -55,12 +55,18 @@ class ConfigSLM(OpticalConfig):
     OPTICAL_NORM_EPS = 1e-6
     # Preserve the old server experiment's input domain for an attributable
     # joint-training comparison. Linear intensity is a separate teacher ablation.
-    INPUT_INTENSITY_MODE = "srgb"
+    INPUT_INTENSITY_MODE = "srgb_linear"
 
     # -------- Phase parameterisation --------
-    # "direct": single flat phase_raw parameter (legacy / compatible)
-    # "multiscale_mlp": Plan A+C multi-scale pyramid + neural-field MLP
-    SLM_PHASE_PARAM_MODE = "direct"
+    # "direct_sgd" is the validated continuous phase optimization used by
+    # HolographSLM. "direct_sgb" remains a spelling-compatible alias.
+    # "direct_sgd_pyramid" adds a zero-initialized multi-scale residual while
+    # retaining the direct continuous phase path. "multiscale_mlp" remains a
+    # pure pyramid ablation.
+    SLM_PHASE_PARAM_MODE = "direct_sgd"
+    # Multiplier applied to the pyramid residual before direct phase addition.
+    # Starting below one keeps the direct-SGD path dominant at early epochs.
+    SLM_DIRECT_SGD_PYRAMID_SCALE = 0.25
 
     # Per-layer block/freq overrides: see OpticalConfig accessors
     #   phase_block_grid(layer_idx), phase_mlp_num_freqs(layer_idx), …
@@ -84,8 +90,9 @@ class ConfigSLM(OpticalConfig):
 
     # -------- SLM phase init --------
     # Options: zero, random, vortex, checkpoint.
-    # "zero" is a flat wavefront with optional zero-mean phase noise.
-    SLM_INIT_MODE = "zero"
+    # Direct-SGD starts from HolographSLM's small continuous random phase map.
+    SLM_INIT_MODE = "random"
+    SLM_DIRECT_SGD_INIT_RANGE_RAD = 0.5
     SLM_INIT_NOISE_STD = 0.02
     SLM_INIT_CHECKPOINT = r"output/OpticalSLM_YOLOv8Head_student/optical_student_best.pth"
     # Per-layer vortex charge and radial curvature: see OpticalConfig.vortex_init.
@@ -93,8 +100,11 @@ class ConfigSLM(OpticalConfig):
 
     # -------- SLM drive calibration --------
     SLM_PHASE_LEVELS = 256
-    SIMULATE_PHASE_QUANTIZATION = True
-    SLM_GRAY_INVERTED = False
+    # Hardware calibration is applied only when exporting a displayed phase map.
+    # Direct-SGD optimizes exp(1j * raw_phase) continuously in simulation.
+    SIMULATE_PHASE_QUANTIZATION = False
+    SLM_GRAY_INVERTED = True
+    SLM_EXPORT_PHASE_OFFSET_RAD = float(np.pi)
     # Optional .npy/.csv/.txt measured gray-to-phase curve in radians.
     # A one-column file is sampled uniformly over gray codes; two columns are
     # interpreted as (gray_code, measured_phase_radians).
@@ -138,7 +148,7 @@ class ConfigSLM(OpticalConfig):
     # -------- DETECTOR_HEAD_TYPE = "light" --------
     YOLO_LIGHT_BASE_CH = 8  # A: halved from 16
     DETECTOR_USE_COORDCONV = True
-    DETECTOR_INVERT_FEATURE = True   # invert teacher feature (dark→bright) before detector
+    DETECTOR_INVERT_FEATURE = False   # invert teacher feature (dark→bright) before detector
     # The SLM detector baseline was validated on the raw optical intensity.
     # Keep it independent from teacher-side feature inversion.
     SLM_DETECTOR_INVERT_FEATURE = False
@@ -164,16 +174,6 @@ class ConfigSLM(OpticalConfig):
     LOSS_GRAD_WEIGHT = 0.00
     LOSS_FREQ_WEIGHT = 0.00
     LOSS_PEARSON_WEIGHT = 0.20
-    LOSS_PHASE_SMOOTH_WEIGHT = 0.000
-    LOSS_PHASE_DIVERSITY_WEIGHT = 0.015
-    PHASE_SMOOTH_WEIGHT_PHASE_FOCUS = 0.0
-    PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS = 0.0
-    PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS = 0.0
-    PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS = 0.0
-    PHASE_SMOOTH_WEIGHT_JOINT = 0.0
-    PHASE_DIVERSITY_WEIGHT_JOINT = 0.0
-    PHASE_SMOOTH_WEIGHT_NORM_JOINT = 0.0
-    PHASE_DIVERSITY_WEIGHT_NORM_JOINT = 0.0
     FEATURE_LOSS_PREFILTER_KERNEL = 1
     ENABLE_FEATURE_DOMAIN_ALIGNMENT = True
     # Options: "mean_std", "minmax"/"min_max", "none".
@@ -182,17 +182,6 @@ class ConfigSLM(OpticalConfig):
     # -------- Privacy / optical obfuscation loss --------
     PRIVACY_CORR_TARGET = 0.15
     PRIVACY_SSIM_TARGET = 0.20
-
-    # -------- Phase quality constraints --------
-    PHASE_STD_TARGET = 0.40 # 0.60 -> 0.40
-    PHASE_SPAN_TARGET = 2.50 # 3.50 -> 2.50
-    PHASE_CIRCULAR_STD_TARGET = 0.35 # 0.50 -> 0.35
-    PHASE_NEAR_BOUNDARY_LIMIT = 0.85
-    PHASE_NEAR_BOUNDARY_EPS = 0.05
-    PHASE_BEST_MIN_STD = 0.01 # 0.10 -> 0.01
-    PHASE_BEST_MIN_CIRCULAR_STD = 0.01 # 0.15 -> 0.01
-    PHASE_BEST_MAX_NEAR_BOUNDARY_RATIO = 0.90
-    PHASE_BEST_MIN_SPAN = 0.01 # 0.01 -> 0.01
 
     # =========================================================================
     # Stage loss weights
@@ -349,28 +338,6 @@ class ConfigSLM(OpticalConfig):
             "detection": cls.DETECTION_LOSS_WEIGHT_JOINT,
             "response": cls.RESPONSE_LOSS_WEIGHT_JOINT,
             "privacy": cls.PRIVACY_LOSS_WEIGHT_JOINT,
-        }
-
-    @classmethod
-    def get_phase_regularization_weights(cls, stage_name):
-        if stage_name == "phase_focus":
-            return {
-                "smooth": cls.PHASE_SMOOTH_WEIGHT_PHASE_FOCUS,
-                "diversity": cls.PHASE_DIVERSITY_WEIGHT_PHASE_FOCUS,
-            }
-        if stage_name == "detector_focus":
-            return {
-                "smooth": cls.PHASE_SMOOTH_WEIGHT_DETECTOR_FOCUS,
-                "diversity": cls.PHASE_DIVERSITY_WEIGHT_DETECTOR_FOCUS,
-            }
-        if stage_name == "norm_joint":
-            return {
-                "smooth": cls.PHASE_SMOOTH_WEIGHT_NORM_JOINT,
-                "diversity": cls.PHASE_DIVERSITY_WEIGHT_NORM_JOINT,
-            }
-        return {
-            "smooth": cls.PHASE_SMOOTH_WEIGHT_JOINT,
-            "diversity": cls.PHASE_DIVERSITY_WEIGHT_JOINT,
         }
 
     @classmethod

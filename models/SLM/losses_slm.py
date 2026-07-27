@@ -140,56 +140,6 @@ class CompositeOpticalFeatureLoss(nn.Module):
             yield 0, student.slm1
             yield 1, student.slm2
 
-    def phase_smoothness_loss(self, student, cached_wrapped_phases=None):
-        terms = []
-        for idx, slm_layer in self._iter_slm_layers(student):
-            if cached_wrapped_phases is not None and idx in cached_wrapped_phases:
-                wrapped = cached_wrapped_phases[idx]
-            else:
-                wrapped = slm_layer.wrapped_phase()
-            cos_phase = torch.cos(wrapped)
-            sin_phase = torch.sin(wrapped)
-            terms.append(torch.abs(cos_phase[:, :, :, 1:] - cos_phase[:, :, :, :-1]).mean())
-            terms.append(torch.abs(cos_phase[:, :, 1:, :] - cos_phase[:, :, :-1, :]).mean())
-            terms.append(torch.abs(sin_phase[:, :, :, 1:] - sin_phase[:, :, :, :-1]).mean())
-            terms.append(torch.abs(sin_phase[:, :, 1:, :] - sin_phase[:, :, :-1, :]).mean())
-        return sum(terms) / max(len(terms), 1)
-
-    def phase_diversity_loss(self, student, cached_wrapped_phases=None):
-        penalties = []
-        stds = []
-        spans = []
-        circular_stds = []
-        near_ratios = []
-        for idx, slm_layer in self._iter_slm_layers(student):
-            if cached_wrapped_phases is not None and idx in cached_wrapped_phases:
-                wrapped = cached_wrapped_phases[idx]
-            else:
-                wrapped = slm_layer.wrapped_phase()
-            centered = torch.atan2(torch.sin(wrapped), torch.cos(wrapped))
-            flat = centered.flatten(1)
-            std = flat.std(dim=1, unbiased=False).mean()
-            span = (flat.amax(dim=1) - flat.amin(dim=1)).mean()
-            wrapped_flat = wrapped.flatten(1)
-            resultant = torch.sqrt(torch.mean(torch.cos(wrapped_flat), dim=1) ** 2 + torch.mean(torch.sin(wrapped_flat), dim=1) ** 2)
-            circular_std = torch.sqrt(torch.clamp(-2.0 * torch.log(torch.clamp(resultant, min=1e-8)), min=0.0)).mean()
-            near_boundary = ((wrapped_flat < self.config.PHASE_NEAR_BOUNDARY_EPS) | (wrapped_flat > 2 * torch.pi - self.config.PHASE_NEAR_BOUNDARY_EPS)).float().mean(dim=1).mean()
-            penalties.append(F.relu(self.config.PHASE_STD_TARGET - std))
-            penalties.append(F.relu(self.config.PHASE_SPAN_TARGET - span))
-            penalties.append(F.relu(self.config.PHASE_CIRCULAR_STD_TARGET - circular_std))
-            penalties.append(F.relu(near_boundary - self.config.PHASE_NEAR_BOUNDARY_LIMIT))
-            stds.append(std.detach())
-            spans.append(span.detach())
-            circular_stds.append(circular_std.detach())
-            near_ratios.append(near_boundary.detach())
-        return (
-            sum(penalties) / max(len(penalties), 1),
-            sum(stds) / len(stds),
-            sum(spans) / len(spans),
-            sum(circular_stds) / len(circular_stds),
-            sum(near_ratios) / len(near_ratios),
-        )
-
     def prefilter_feature(self, x):
         kernel_size = int(getattr(self.config, "FEATURE_LOSS_PREFILTER_KERNEL", 1))
         if kernel_size <= 1:
@@ -209,21 +159,6 @@ class CompositeOpticalFeatureLoss(nn.Module):
         loss_grad = self.gradient_loss(aligned_student, aligned_teacher)
         loss_freq = self.frequency_loss(aligned_student, aligned_teacher)
         loss_pearson = self.pearson_loss(filtered_student, filtered_teacher)
-        # Pre-compute wrapped_phase once and share between smoothness and diversity losses.
-        # Uses _iter_slm_layers so that all heads are regularised in multi-head mode.
-        cached_wrapped = {
-            idx: slm.wrapped_phase()
-            for idx, slm in self._iter_slm_layers(student)
-        }
-        loss_smooth = self.phase_smoothness_loss(student, cached_wrapped_phases=cached_wrapped)
-        loss_div, std, span, circular_std, near_boundary = self.phase_diversity_loss(student, cached_wrapped_phases=cached_wrapped)
-        if hasattr(self.config, "get_phase_regularization_weights"):
-            phase_weights = self.config.get_phase_regularization_weights(stage_name)
-            smooth_weight = phase_weights["smooth"]
-            diversity_weight = phase_weights["diversity"]
-        else:
-            smooth_weight = self.config.LOSS_PHASE_SMOOTH_WEIGHT
-            diversity_weight = self.config.LOSS_PHASE_DIVERSITY_WEIGHT
         total = (
             loss_full * self.config.LOSS_FULL_WEIGHT
             + loss_low1 * self.config.LOSS_LOW1_WEIGHT
@@ -232,8 +167,6 @@ class CompositeOpticalFeatureLoss(nn.Module):
             + loss_grad * self.config.LOSS_GRAD_WEIGHT
             + loss_freq * self.config.LOSS_FREQ_WEIGHT
             + loss_pearson * self.config.LOSS_PEARSON_WEIGHT
-            + loss_smooth * smooth_weight
-            + loss_div * diversity_weight
         )
         stats = {
             "feature_total": float(total.detach().item()),
@@ -244,12 +177,6 @@ class CompositeOpticalFeatureLoss(nn.Module):
             "grad": float(loss_grad.detach().item()),
             "freq": float(loss_freq.detach().item()),
             "pearson": float(loss_pearson.detach().item()),
-            "slm_smooth": float(loss_smooth.detach().item()),
-            "slm_diversity": float(loss_div.detach().item()),
-            "slm_std": float(std.item()),
-            "slm_span": float(span.item()),
-            "slm_circular_std": float(circular_std.item()),
-            "slm_near_boundary": float(near_boundary.item()),
         }
         return total, stats
 

@@ -117,7 +117,7 @@ def run_epoch(
     epoch_privacy_t = torch.zeros((), device=device)
     phase_snapshot = collect_phase_snapshot(student_raw)
     epoch_phase_grad_norm = 0.0
-    # Use list to accumulate across batches → dict built at epoch end
+    # Use list to accumulate across batches 閳?dict built at epoch end
     _phase_grad_norms_accum = []
 
     for batch in tqdm(train_loader, desc=f"Epoch {global_epoch + 1}/{Config.EPOCHS} [{stage_name}]", leave=True, disable=not is_main):
@@ -210,7 +210,9 @@ def run_epoch(
     history["train_privacy"].append(avg_privacy)
     display_epoch = global_epoch + 1
     slm_stats = collect_slm_statistics(student_raw)
-    slm_ok = _check_slm_quality(slm_stats, Config)
+    # Direct-SGD has no preferred phase histogram; diagnostics cannot veto a
+    # checkpoint selected by validation detection performance.
+    slm_ok = True
 
     # Validation
     val_losses = None
@@ -275,12 +277,12 @@ def run_epoch(
             phase_layer_stats=phase_layer_stats,
             lr=current_lr,
         )
-        # ── 梯度 & 参数监测 ──
+        # 閳光偓閳光偓 濮婎垰瀹?& 閸欏倹鏆熼惄鎴炵ゴ 閳光偓閳光偓
         write_gradient_monitoring(tensorboard_writer, student, display_epoch, prefix="Grad/Student")
         write_gradient_monitoring(tensorboard_writer, detector, display_epoch, prefix="Grad/Detector")
         write_parameter_monitoring(tensorboard_writer, student, display_epoch, prefix="Param/Student")
         write_parameter_monitoring(tensorboard_writer, detector, display_epoch, prefix="Param/Detector")
-        # ── 混淆矩阵（每个验证 epoch）──
+        # 閳光偓閳光偓 濞ｉ攱绌惌鈺呮█閿涘牊鐦℃稉顏堢崣鐠?epoch閿涘鏀㈤埞鈧?
         if should_write_cm:
             write_confusion_matrix(
                 tensorboard_writer, cm_dets, cm_targets,
@@ -291,7 +293,12 @@ def run_epoch(
                 image_size=Config.RESOLUTION,
             )
 
-    if is_main:
+    phase_focus_checkpoint_due = (
+        stage_name == "phase_focus"
+        and Config.VIS_INTERVAL > 0
+        and display_epoch % Config.VIS_INTERVAL == 0
+    )
+    if is_main and (stage_name != "phase_focus" or phase_focus_checkpoint_due):
         save_current_student_checkpoint(
             student_raw,
             Config.get_student_current_path(),
@@ -325,11 +332,10 @@ def run_epoch(
             f"Tracked best normalized SLM student candidate: epoch={display_epoch}, train_loss={avg_total:.6f}, "
             f"val_loss={val_losses['total']:.6f}, map50={best_student_map50:.4f}" if val_metrics is not None else f"Tracked best normalized SLM student candidate: epoch={display_epoch}, train_loss={avg_total:.6f}",
         )
-    elif stage_name == "phase_focus" and not norm_is_deployment_ready:
+    elif phase_focus_checkpoint_due and not norm_is_deployment_ready:
         log_to_file(
             Config,
-            "Phase-focus stage was trained without deployment normalization; optical_student_current.pth "
-            "and a phase-focus optical_student_best.pth mirror were saved for phase inspection.",
+            "Phase-focus checkpoint saved for phase inspection without deployment normalization.",
         )
 
     # Detector best tracking
@@ -425,20 +431,3 @@ def run_epoch(
         torch.distributed.barrier()
 
     return best_map50, best_student_map50, best_student_loss, best_detector_loss, detector_no_improve_delta
-
-
-def _check_slm_quality(slm_stats, config):
-    """Check SLM quality thresholds across all layers dynamically."""
-    layer_names = set()
-    for key in slm_stats:
-        if key.endswith("_wrapped_std"):
-            layer_names.add(key.replace("_wrapped_std", ""))
-    if not layer_names:
-        return True  # No SLM stats → pass
-    for name in sorted(layer_names):
-        if not (slm_stats.get(f"{name}_wrapped_std", 0) >= config.PHASE_BEST_MIN_STD
-                and slm_stats.get(f"{name}_circular_std", 0) >= config.PHASE_BEST_MIN_CIRCULAR_STD
-                and slm_stats.get(f"{name}_near_boundary_ratio", 1) <= config.PHASE_BEST_MAX_NEAR_BOUNDARY_RATIO
-                and slm_stats.get(f"{name}_wrapped_span", 0) >= config.PHASE_BEST_MIN_SPAN):
-            return False
-    return True

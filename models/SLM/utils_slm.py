@@ -237,21 +237,12 @@ def collect_slm_statistics(student):
 
 
 def _collect_one_layer_stats(stats, slm, layer_name, config):
-    wrapped = slm.wrapped_phase().detach().float()
-    centered = torch.atan2(torch.sin(wrapped), torch.cos(wrapped))
-    wrapped_flat = wrapped.flatten(1)
-    cos_mean = torch.mean(torch.cos(wrapped_flat), dim=1)
-    sin_mean = torch.mean(torch.sin(wrapped_flat), dim=1)
-    resultant = torch.sqrt(cos_mean ** 2 + sin_mean ** 2)
-    circular_std = torch.sqrt(torch.clamp(-2.0 * torch.log(torch.clamp(resultant, min=1e-8)), min=0.0)).mean()
-    near_boundary = (
-        (wrapped_flat < config.PHASE_NEAR_BOUNDARY_EPS)
-        | (wrapped_flat > 2 * np.pi - config.PHASE_NEAR_BOUNDARY_EPS)
-    ).float().mean(dim=1).mean()
-    stats[f"{layer_name}_wrapped_std"] = float(centered.std(unbiased=False).item())
-    stats[f"{layer_name}_wrapped_span"] = float((centered.amax() - centered.amin()).item())
-    stats[f"{layer_name}_circular_std"] = float(circular_std.item())
-    stats[f"{layer_name}_near_boundary_ratio"] = float(near_boundary.item())
+    raw = slm._raw_phase().detach().float()
+    simulation = slm.simulation_phase().detach().float()
+    stats[f"{layer_name}_raw_mean"] = float(raw.mean().item())
+    stats[f"{layer_name}_raw_std"] = float(raw.std(unbiased=False).item())
+    stats[f"{layer_name}_simulation_min"] = float(simulation.min().item())
+    stats[f"{layer_name}_simulation_max"] = float(simulation.max().item())
 
 
 def save_student_best(config, student, path, epoch, loss_value, extra=None):
@@ -302,16 +293,38 @@ def save_detector_best(detector, path, epoch, loss_value, extra=None,
 
 
 def _save_wrapped_phases(payload, student):
-    """Save continuous phase plus the calibrated, finite-level SLM drive."""
+    """Save distinct optimization, simulator, and hardware phase conventions."""
+    payload["phase_export_convention"] = "hardware_phase=(raw_phase+pi) mod 2pi"
+    payload["phase_parameterization"] = str(
+        getattr(student.config, "SLM_PHASE_PARAM_MODE", "direct_sgd")
+    )
+    payload["phase_simulation_convention"] = "continuous: exp(1j * simulation_phase)"
+    payload["direct_sgd_pyramid_scale"] = float(
+        getattr(student.config, "SLM_DIRECT_SGD_PYRAMID_SCALE", 0.0)
+    )
+
+    def save_layer(layer_name, slm):
+        raw = slm._raw_phase().detach().cpu()
+        simulation = slm.simulation_phase().detach().cpu()
+        hardware = slm.hardware_export_phase().detach().cpu()
+        payload[f"{layer_name}_raw_phase"] = raw
+        if slm.direct_phase() is not None:
+            payload[f"{layer_name}_direct_phase"] = slm.direct_phase().detach().cpu()
+        if slm.pyramid_phase() is not None:
+            payload[f"{layer_name}_pyramid_phase"] = slm.pyramid_phase().detach().cpu()
+        payload[f"{layer_name}_simulation_phase"] = simulation
+        payload[f"{layer_name}_simulation_wrapped_phase"] = torch.remainder(simulation, 2 * np.pi)
+        payload[f"{layer_name}_hardware_export_phase"] = hardware
+        payload[f"{layer_name}_gray_drive"] = slm.phase_to_gray_uint8().cpu()
+        # Backward-compatible fields used by older visualization/extraction tools.
+        payload[f"{layer_name}_wrapped_phase"] = torch.remainder(raw, 2 * np.pi)
+        payload[f"{layer_name}_effective_phase"] = simulation
+
     if hasattr(student, "all_slm_layers"):
         for layer_name, slm in student.all_slm_layers():
-            payload[f"{layer_name}_wrapped_phase"] = slm.wrapped_phase().detach().cpu()
-            payload[f"{layer_name}_effective_phase"] = slm.effective_phase().detach().cpu()
-            payload[f"{layer_name}_gray_drive"] = slm.phase_to_gray_uint8().cpu()
+            save_layer(layer_name, slm)
     else:
         for layer_name in _layer_names_from_student(student):
             slm = getattr(student, layer_name, None)
             if slm is not None:
-                payload[f"{layer_name}_wrapped_phase"] = slm.wrapped_phase().detach().cpu()
-                payload[f"{layer_name}_effective_phase"] = slm.effective_phase().detach().cpu()
-                payload[f"{layer_name}_gray_drive"] = slm.phase_to_gray_uint8().cpu()
+                save_layer(layer_name, slm)
