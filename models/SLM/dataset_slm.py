@@ -100,7 +100,7 @@ class SLMFeatureDataset(Dataset):
         img, targets = letterbox_image_targets(img, targets, self.config.RESOLUTION)
         gray_tensor = image_to_intensity_tensor(
             img,
-            mode=getattr(self.config, "INPUT_INTENSITY_MODE", "srgb_linear"),
+            mode=getattr(self.config, "INPUT_INTENSITY_MODE", "srgb"),
         )
         rgb_tensor = gray_tensor
         return {

@@ -34,11 +34,15 @@ class ConfigSLM(OpticalConfig):
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
-    # Short optical pretraining, then optimize the SLM directly for detection.
-    PHASE_FOCUS_EPOCHS = 50
-    DETECTOR_FOCUS_EPOCHS = 35
-    JOINT_FIT_EPOCHS = 100
-    NORM_JOINT_EPOCHS = 30
+    # Match the proven two-stage baseline budget before testing any
+    # detector-guided SLM refinement. The detector stage can stop early once
+    # validation mAP50 has genuinely plateaued.
+    PHASE_FOCUS_EPOCHS = 145
+    DETECTOR_FOCUS_EPOCHS = 135
+    # The current direct-SGD run peaks during detector_focus. Keep its learned
+    # SLM/detector pair intact while the joint objectives are reworked.
+    JOINT_FIT_EPOCHS = 0
+    NORM_JOINT_EPOCHS = 0
     EPOCHS = PHASE_FOCUS_EPOCHS + DETECTOR_FOCUS_EPOCHS + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
 
     # =========================================================================
@@ -53,9 +57,8 @@ class ConfigSLM(OpticalConfig):
     RESOLUTION = (640, 640)
     OPTICAL_FIELD_EPS = 1e-8
     OPTICAL_NORM_EPS = 1e-6
-    # Preserve the old server experiment's input domain for an attributable
-    # joint-training comparison. Linear intensity is a separate teacher ablation.
-    INPUT_INTENSITY_MODE = "srgb_linear"
+    # DMD gray code is the incident intensity; must match teacher training.
+    INPUT_INTENSITY_MODE = "srgb"
 
     # -------- Phase parameterisation --------
     # "direct_sgd" is the validated continuous phase optimization used by
@@ -222,8 +225,8 @@ class ConfigSLM(OpticalConfig):
     LR_SCHEDULER = "CosineAnnealingLR"
     ETA_MIN = 1e-6
 
-    ENABLE_DETECTOR_FOCUS_EARLY_STOP = False
-    DETECTOR_FOCUS_EARLY_STOP_PATIENCE = 0
+    ENABLE_DETECTOR_FOCUS_EARLY_STOP = True
+    DETECTOR_FOCUS_EARLY_STOP_PATIENCE = 20
     DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA = 0.002
 
     # =========================================================================

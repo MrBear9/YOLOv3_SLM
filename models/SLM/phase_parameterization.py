@@ -325,10 +325,20 @@ class MultiScalePhaseField(nn.Module):
                 )
 
     def zero_residual(self):
-        """Make the complete pyramid contribution exactly zero."""
+        """Make the initial residual zero without disabling MLP gradients."""
         with torch.no_grad():
-            for parameter in self.parameters():
+            for parameter in self.scale_params:
                 parameter.zero_()
+            if self.blocks is not None:
+                for parameter in self.blocks:
+                    parameter.zero_()
+            # A zero output projection gives an exactly zero initial residual.
+            # Keep preceding layers at their small random initialization so the
+            # final projection receives non-zero features and can learn.
+            output_layer = self.mlp_field.net[-1]
+            output_layer.weight.zero_()
+            if output_layer.bias is not None:
+                output_layer.bias.zero_()
 
     def forward(self):
         h, w = self.resolution

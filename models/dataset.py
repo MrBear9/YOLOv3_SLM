@@ -39,7 +39,7 @@ def srgb_to_linear_intensity(srgb):
     )
 
 
-def image_to_intensity_tensor(image, mode="srgb_linear"):
+def image_to_intensity_tensor(image, mode="srgb"):
     """Convert a PIL RGB image into the detector/SLM one-channel intensity tensor."""
     rgb_srgb = TF.to_tensor(image.convert("RGB"))
     mode = str(mode).strip().lower()
@@ -179,7 +179,7 @@ class YOLODataset(Dataset):
             img, targets = self._augment(img, targets)
         img_tensor = image_to_intensity_tensor(
             img,
-            mode=getattr(self.config, "INPUT_INTENSITY_MODE", "srgb_linear"),
+            mode=getattr(self.config, "INPUT_INTENSITY_MODE", "srgb"),
         )
         if self.augment and random.random() < float(getattr(self.config, "AUG_NOISE_PROB", 0.10)):
             std = float(getattr(self.config, "AUG_NOISE_STD", 0.01))

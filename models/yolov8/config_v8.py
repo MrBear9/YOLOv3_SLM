@@ -36,7 +36,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/Tv1_light_srgb_linear_invertFalse"
+    TEACHER_OUTPUT_DIR = r"output/Tv1_light_srgb_invertFalse"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -52,9 +52,9 @@ class ConfigYOLOv8Anchor:
     RESOLUTION = (640, 640)
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
-    # Decode image sRGB values before the teacher sees intensity. Set "srgb"
-    # only to reproduce a legacy checkpoint trained in the display-encoded domain.
-    INPUT_INTENSITY_MODE = "srgb_linear"
+    # DMD gray code is treated as incident intensity; use "srgb_linear" only
+    # after calibrating and applying the corresponding DMD drive transform.
+    INPUT_INTENSITY_MODE = "srgb"
 
     STAGE1_LOCATE_EPOCHS = 40
     STAGE2_BALANCE_EPOCHS = 200
