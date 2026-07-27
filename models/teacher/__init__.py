@@ -2,7 +2,9 @@
 
 __version__ = "0.1.0"
 
-from .architectures import CVOCAConvTeacherV2, ConvTeacher, ConvTeacherV3
+from .architectures import ConvTeacher, ConvTeacherV3
+from .physical_simulator import PhysicalSLMSimulator
+from .physical_teacher_v2 import PhysicallyConstrainedTeacherV2
 from .building_blocks import (
     C2fCIB,
     CIB,
@@ -30,13 +32,12 @@ def build_teacher(config=None):
         b = int(getattr(config, "TEACHER_V2_C2F_BLOCKS", 3) if config is not None else 3)
         fb = int(getattr(config, "TEACHER_V2_FOURIER_BANDS", 8) if config is not None else 8)
         fs = float(getattr(config, "TEACHER_V2_FOURIER_LOW_PASS_SIGMA", 0.5) if config is not None else 0.5)
-        rs = float(getattr(config, "TEACHER_V2_RESIDUAL_SCALE", 0.30) if config is not None else 0.30)
-        return CVOCAConvTeacherV2(
+        return PhysicallyConstrainedTeacherV2(
+            config=config,
             base_channels=c,
             c2f_blocks=b,
             fourier_bands=fb,
             fourier_low_pass_sigma=fs,
-            residual_scale=rs,
         )
     if arch in {"convteacher_v3", "v3"}:
         c = int(getattr(config, "TEACHER_V3_BASE_CHANNELS", 24) if config is not None else 24)
@@ -50,7 +51,8 @@ __all__ = [
     "build_teacher",
     "ConvTeacher",
     "ConvTeacherV3",
-    "CVOCAConvTeacherV2",
+    "PhysicallyConstrainedTeacherV2",
+    "PhysicalSLMSimulator",
     "C2fCIB",
     "CIB",
     "FeedbackGuidance",

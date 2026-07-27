@@ -115,4 +115,4 @@ The SLM checkpoint payload intentionally avoids a top-level `"phase"` key, so ph
 Teacher architecture selection:
 
 - `TEACHER_ARCH = "convteacher"` keeps the original lightweight optical teacher.
-- `TEACHER_ARCH = "convteacher_v2"` uses the current light YOLOv8-style teacher front-end. It still accepts a 1-channel input and emits the same 1-channel feature bridge for the detector/SLM path, but adds lightweight C2f/SPPF context inside the teacher.
+- `TEACHER_ARCH = "convteacher_v2"` uses a C2fCIB phase-prediction network followed by phase-only SLM modulation and band-limited ASM propagation. It accepts a 1-channel intensity input and emits the propagated 1-channel intensity for the detector/SLM path; its physical settings must match the optical student.

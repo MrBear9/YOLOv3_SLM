@@ -36,7 +36,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/Tv1_light_srgb_invertFalse"
+    TEACHER_OUTPUT_DIR = r"output/Tv2_light"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -67,14 +67,19 @@ class ConfigYOLOv8Anchor:
     TEACHER_V1_C2F_BLOCKS = 3
 
     # =========================================================================
-    # TEACHER_ARCH = "convteacher_v2" | "v2"  (Fourier + C2fCIB + V3 output)
+    # TEACHER_ARCH = "convteacher_v2" | "v2"  (phase prediction + SLM/ASM)
     # =========================================================================
-    TEACHER_ARCH = "convteacher"
+    TEACHER_ARCH = "convteacher_v2"
     TEACHER_V2_BASE_CHANNELS = 32
     TEACHER_V2_C2F_BLOCKS = 3
     TEACHER_V2_FOURIER_BANDS = 8
     TEACHER_V2_FOURIER_LOW_PASS_SIGMA = 0.5
-    TEACHER_V2_RESIDUAL_SCALE = 0.30
+    # These must match the optical-student hardware/simulation settings.
+    # V2 is always physical; no CNN residual-output fallback is retained.
+    TEACHER_V2_NUM_SLM_LAYERS = 2
+    TEACHER_V2_WAVELENGTH = 532e-9
+    TEACHER_V2_PIXEL_SIZE = 6.4e-6
+    TEACHER_V2_PROP_DISTANCES = (0.10, 0.10)
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v3" | "v3"  (residual + gate)

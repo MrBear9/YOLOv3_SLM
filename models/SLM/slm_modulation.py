@@ -14,6 +14,11 @@ import torch.nn as nn
 
 from models.SLM.phase_parameterization import MultiScalePhaseField
 
+
+def apply_phase_modulation(field, phase):
+    """Apply continuous phase-only modulation to a complex optical field."""
+    return field * torch.exp(1j * phase)
+
 class SLMLayer(nn.Module):
     def __init__(self, config, resolution=None, mode=None, layer_index=1):
         super().__init__()
@@ -227,9 +232,10 @@ class SLMLayer(nn.Module):
         return torch.atan2(torch.sin(wrapped), torch.cos(wrapped))
 
     def forward(self, field):
-        mod = torch.exp(1j * self.simulation_phase())
+        phase = self.simulation_phase()
+        out = apply_phase_modulation(field, phase)
         if self.mode == "amp_phase":
-            mod = mod * torch.sigmoid(self.amp_raw)
-        return field * mod
+            out = out * torch.sigmoid(self.amp_raw)
+        return out
 
 

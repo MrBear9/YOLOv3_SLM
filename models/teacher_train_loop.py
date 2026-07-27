@@ -107,6 +107,17 @@ def _write_teacher_tensorboard_model_summary(writer, model):
     writer.add_text("Model/parameters", param_text, 0)
 
 
+def _write_physical_teacher_phase_maps(writer, step, teacher_aux):
+    """Record predicted V2 phase maps without retaining their training graph."""
+    if writer is None or teacher_aux is None:
+        return
+    for index, phase_map in enumerate(teacher_aux.get("phase_maps", ()), start=1):
+        phase = phase_map[:1].detach().float().cpu()
+        phase_image = (phase + torch.pi) / (2.0 * torch.pi)
+        writer.add_image(f"TeacherV2/phase_map_{index}", phase_image.clamp(0.0, 1.0), step)
+        add_tensorboard_scalar(writer, f"TeacherV2/phase_map_{index}_abs_mean", phase.abs().mean(), step)
+
+
 def _collect_teacher_val_detections(config, model, val_loader, device):
     """Collect all validation detections and targets for confusion matrix."""
     from models.runtime import prepare_batch
@@ -176,6 +187,7 @@ def train():
 
     arch_lower = str(Config.TEACHER_ARCH).strip().lower()
     is_v3 = arch_lower in {"convteacher_v3", "v3"}
+    is_physical_v2 = arch_lower in {"convteacher_v2", "v2"}
 
     detector = build_detector_head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
     resume_checkpoint = None
@@ -277,6 +289,7 @@ def train():
         if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
             train_sampler.set_epoch(epoch)
         model.train()
+        last_teacher_aux = None
         train_component_sums = {
             "total": 0.0,
             "box": 0.0,
@@ -319,13 +332,16 @@ def train():
                     teacher_features, predictions, teacher_aux, det_features = model(
                         batch_images, return_feature=True, return_teacher_aux=True, return_det_features=True
                     )
-                elif is_v3 or use_slm_cipher:
+                elif is_v3 or is_physical_v2 or use_slm_cipher:
                     teacher_features, predictions, teacher_aux = model(
                         batch_images, return_feature=True, return_teacher_aux=True
                     )
                 else:
                     teacher_features, predictions = model(batch_images, return_feature=True)
                     teacher_aux = None
+
+                if is_physical_v2 and is_main:
+                    last_teacher_aux = teacher_aux
 
                 loss, loss_stats = criterion(predictions, batch_targets)
 
@@ -393,6 +409,7 @@ def train():
             # ── 梯度 & 参数监测 ──
             write_gradient_monitoring(tensorboard_writer, model, epoch + 1, prefix="Grad")
             write_parameter_monitoring(tensorboard_writer, model, epoch + 1, prefix="Param")
+            _write_physical_teacher_phase_maps(tensorboard_writer, epoch + 1, last_teacher_aux)
             # ── 混淆矩阵（每 VIS_INTERVAL 个 epoch 或验证时）──
             if val_loader is not None and (epoch + 1) % max(Config.VIS_INTERVAL, 1) == 0:
                 cm_dets, cm_targets = _collect_teacher_val_detections(Config, model, val_loader, device)

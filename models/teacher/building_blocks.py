@@ -209,8 +209,8 @@ class CIB(nn.Module):
 class C2fCIB(nn.Module):
     """C2f block where each bottleneck is a CIB (YOLOv10-style).
 
-    Used by the Fourier-enhanced v2 teacher to replace the heavier standard
-    C2f stages without changing the v1/v3 code paths.
+    Used by the V2 phase-prediction backbone to replace heavier standard C2f
+    stages without changing the V1/V3 code paths.
     """
 
     def __init__(self, in_channels, out_channels, num_blocks=2, shortcut=True, expansion=0.5, bottle_expansion=2.0):

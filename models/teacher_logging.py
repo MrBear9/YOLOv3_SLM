@@ -77,11 +77,14 @@ def log_all_parameters():
     if arch_lower in {"convteacher_v2", "v2"}:
         log_to_file(
             Config,
-            f"V2 Fourier teacher: base_channels={Config.TEACHER_V2_BASE_CHANNELS}, "
+            f"V2 physical teacher: base_channels={Config.TEACHER_V2_BASE_CHANNELS}, "
             f"c2f_blocks={Config.TEACHER_V2_C2F_BLOCKS}, "
             f"fourier_bands={Config.TEACHER_V2_FOURIER_BANDS}, "
             f"low_pass_sigma={Config.TEACHER_V2_FOURIER_LOW_PASS_SIGMA}, "
-            f"residual_scale={Config.TEACHER_V2_RESIDUAL_SCALE}",
+            f"slm_layers={Config.TEACHER_V2_NUM_SLM_LAYERS}, "
+            f"wavelength={Config.TEACHER_V2_WAVELENGTH}, "
+            f"pixel_size={Config.TEACHER_V2_PIXEL_SIZE}, "
+            f"distances={Config.TEACHER_V2_PROP_DISTANCES}",
         )
     log_to_file(Config, f"Teacher parameters: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
     log_to_file(Config, f"Detector head type: {Config.DETECTOR_HEAD_TYPE}")

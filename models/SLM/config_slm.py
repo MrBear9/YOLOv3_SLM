@@ -16,14 +16,14 @@ class ConfigSLM(OpticalConfig):
     CLASS_NAMES = None
     NUM_CLASSES = None
     # Keep this run separate from the frozen-SLM baseline (mAP50=0.4647).
-    OUTPUT_DIR = r"output/SLM_Tv1_light_direct_sgd"
+    OUTPUT_DIR = r"output/SLM_Tv2_light_direct_sgd"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv1_light_srgb_linear_invertFalse/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_light/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -117,18 +117,23 @@ class ConfigSLM(OpticalConfig):
     # TEACHER_ARCH  (must match teacher-training checkpoint)
     # Options: "convteacher"/"v1", "convteacher_v2"/"v2", "convteacher_v3"/"v3".
     # =========================================================================
-    TEACHER_ARCH = "convteacher"
+    TEACHER_ARCH = "convteacher_v2"
 
     # -------- TEACHER_ARCH = "convteacher" / "v1" --------
     TEACHER_V1_BASE_CHANNELS = 32
     TEACHER_V1_C2F_BLOCKS = 3
 
-    # -------- TEACHER_ARCH = "convteacher_v2" --------
+    # -------- TEACHER_ARCH = "convteacher_v2" (phase-only SLM/ASM teacher) --------
     TEACHER_V2_BASE_CHANNELS = 32
     TEACHER_V2_C2F_BLOCKS = 3
     TEACHER_V2_FOURIER_BANDS = 8
     TEACHER_V2_FOURIER_LOW_PASS_SIGMA = 0.5
-    TEACHER_V2_RESIDUAL_SCALE = 0.30
+    # Keep these exactly aligned with WAVELENGTH, PIXEL_SIZE, NUM_LAYERS and
+    # PROP_DISTANCE above when using a V2 teacher checkpoint.
+    TEACHER_V2_NUM_SLM_LAYERS = 2
+    TEACHER_V2_WAVELENGTH = 532e-9
+    TEACHER_V2_PIXEL_SIZE = 6.4e-6
+    TEACHER_V2_PROP_DISTANCES = (0.10, 0.10)
 
     # -------- TEACHER_ARCH = "convteacher_v3" --------
     TEACHER_V3_BASE_CHANNELS = 24

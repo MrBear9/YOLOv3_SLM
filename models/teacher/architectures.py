@@ -1,9 +1,8 @@
 """Teacher architecture variants.
 
-Contains the three teacher model implementations:
+Contains the legacy CNN teacher model implementations:
   - ConvTeacher          : v1 deeper semantic projection teacher
   - ConvTeacherV3        : v3 residual+gate output teacher
-  - CVOCAConvTeacherV2   : v2 CVOCA-style optical teacher
 """
 
 import torch
@@ -11,16 +10,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .building_blocks import (
-    C2fCIB,
-    FeedbackGuidance,
-    RawImageBridge,
     TeacherC2f,
     TeacherConvBNAct,
     TeacherResidualBlock,
     TeacherSPPF,
     _interpolate_preserve_layout,
 )
-from .fourier_layers import FourierOpticalLayer
 
 
 class ConvTeacher(nn.Module):
@@ -128,8 +123,8 @@ class ConvTeacher(nn.Module):
         f_fused = self.dropout(f_fused)
 
         f_refined = self.refine(f_fused)                               # [B, c1, H/8, W/8]
-        feat_1ch = F.softplus(self.proj_out(f_refined))                # [B, 1, H/8, W/8]  — no saturation, ≥0
-        feat_1ch = self._normalize_intensity(feat_1ch)                  # per-sample [0, 1]  — forces full dynamic range
+        feat_1ch = F.softplus(self.proj_out(f_refined))                # [B, 1, H/8, W/8]  鈥?no saturation, 鈮?
+        feat_1ch = self._normalize_intensity(feat_1ch)                  # per-sample [0, 1]  鈥?forces full dynamic range
         feat_1ch = torch.clamp(feat_1ch * F.softplus(self.out_scale) + self.out_bias, min=0.0)
         det_feature = _interpolate_preserve_layout(feat_1ch, size=gray.shape[-2:], mode="bilinear", align_corners=False)
 
@@ -240,162 +235,5 @@ class ConvTeacherV3(nn.Module):
                 "feat_scale2": x1,       # [B, c1, H/2, W/2] shallow texture
                 "feat_scale4": x2,       # [B, c2, H/4, W/4] mid-level structure
                 "feat_scale8": feat_scale8,  # [B, c1, H/8, W/8] deep semantics
-            }
-        return det_feature
-
-
-class CVOCAConvTeacherV2(nn.Module):
-    """Fourier-enhanced v2 teacher for SLM-compatible optical features.
-
-    The v2 teacher is rebuilt on top of the proven v1 backbone (wide/deep
-    C2f/SPPF stages) but replaces the CVOCA complex-convolution optical block
-    with a learnable FourierOpticalLayer.  It also adopts the v3 output head
-    (gray + gated residual) so the produced intensity map stays physically
-    plausible and easy to distill for the SLM student.
-
-    Key components:
-      - C2fCIB blocks (YOLOv10-style inverted bottleneck) for efficiency
-      - FourierOpticalLayer: resolution-agnostic, low-pass-constrained freq filter
-      - FeedbackGuidance: spatial attention from deep features
-      - RawImageBridge: inject original grayscale into deep features
-      - V3 output: det_feature = gray + residual_scale * gate * residual
-    """
-
-    def __init__(
-        self,
-        base_channels=32,
-        c2f_blocks=3,
-        fourier_bands=8,
-        fourier_low_pass_sigma=0.5,
-        residual_scale=0.30,
-        synthetic_wavelengths=None,
-        complex_kernel_size=None,
-    ):
-        super().__init__()
-        c1 = base_channels
-        c2 = base_channels * 2
-        c3 = base_channels * 4
-        self.residual_scale = float(residual_scale)
-
-        # --- Backbone (v1 width/depth, C2fCIB blocks for efficiency) ---
-        self.stem = TeacherConvBNAct(1, c1, 3, 2)
-        self.stage1 = C2fCIB(c1, c1, num_blocks=c2f_blocks, shortcut=True)
-        self.down2 = TeacherConvBNAct(c1, c2, 3, 2)
-        self.stage2 = C2fCIB(c2, c2, num_blocks=c2f_blocks + 1, shortcut=True)
-        self.down3 = TeacherConvBNAct(c2, c3, 3, 2)
-        self.stage3 = C2fCIB(c3, c3, num_blocks=c2f_blocks + 2, shortcut=True)
-        self.sppf = TeacherSPPF(c3, c3)
-
-        # Skip connections to bottleneck
-        self.skip1 = nn.Sequential(nn.Conv2d(c1, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
-        self.skip2 = nn.Sequential(nn.Conv2d(c2, c3, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU())
-
-        # Deep context: C2fCIB + two dilated ResidualBlocks
-        self.context = nn.Sequential(
-            C2fCIB(c3, c3, num_blocks=c2f_blocks + 1, shortcut=True),
-            TeacherResidualBlock(c3, dilation=2),
-            TeacherResidualBlock(c3, dilation=4),
-        )
-
-        # Fourier optical frequency filtering (resolution-agnostic, low-pass constrained)
-        self.fourier = FourierOpticalLayer(c3, num_bands=fourier_bands, init_low_pass_sigma=fourier_low_pass_sigma)
-
-        # Feedback guidance for spatial attention
-        self.feedback_guidance = FeedbackGuidance([c3, c3, c3], guide_channels=16)
-
-        # Multi-scale lateral connections projected to stride-8
-        self.lateral_s4 = nn.Sequential(
-            nn.Conv2d(c2, c3, 3, 2, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU(),
-        )
-        self.lateral_s2 = nn.Sequential(
-            nn.Conv2d(c1, c2, 3, 2, 1, bias=False), nn.BatchNorm2d(c2), nn.SiLU(),
-            nn.Conv2d(c2, c3, 3, 2, 1, bias=False), nn.BatchNorm2d(c3), nn.SiLU(),
-        )
-
-        # Deep fusion of all three scales at stride-8
-        self.deep_fuse = nn.Sequential(
-            TeacherConvBNAct(c3 * 3, c3),
-            C2fCIB(c3, c3, num_blocks=c2f_blocks, shortcut=True),
-        )
-        self.dropout = nn.Dropout2d(0.1)
-
-        # Refinement at stride-8
-        self.refine = nn.Sequential(
-            TeacherConvBNAct(c3, c2, 3),
-            C2fCIB(c2, c2, num_blocks=c2f_blocks, shortcut=True),
-            TeacherConvBNAct(c2, c1, 1),
-        )
-
-        # Raw image bridge at s8 scale
-        self.raw_bridge_s8 = RawImageBridge(out_channels=c1)
-        self.fuse_bridge_s8 = nn.Conv2d(c1 * 2, c1, 1, bias=True)
-
-        # --- V3-style output head (SLM-friendly: gray + gated residual) ---
-        self.residual_head = nn.Sequential(TeacherConvBNAct(c1, c1), nn.Conv2d(c1, 1, 1))
-        self.gate_head = nn.Sequential(nn.Conv2d(c1, 1, 1), nn.Sigmoid())
-
-        # Auxiliary pretraining heads (not used in joint training)
-        self.heat_head = nn.Conv2d(c1, 1, 1)
-        self.box_head = nn.Conv2d(c1, 1, 1)
-        self.edge_head = nn.Conv2d(c1, 1, 1)
-
-    def forward(self, x, return_aux=False):
-        if x.shape[1] > 1:
-            x = x.mean(dim=1, keepdim=True)
-        gray = x.clamp(0.0, 1.0)
-
-        # Backbone
-        x1 = self.stage1(self.stem(gray))                              # [B, c1, H/2, W/2]
-        x2 = self.stage2(self.down2(x1))                               # [B, c2, H/4, W/4]
-        x3 = self.stage3(self.down3(x2))                               # [B, c3, H/8, W/8]
-        p3 = self.sppf(x3)                                             # [B, c3, H/8, W/8]
-
-        skip1 = _interpolate_preserve_layout(self.skip1(x1), size=p3.shape[-2:], mode="bilinear", align_corners=False)
-        skip2 = _interpolate_preserve_layout(self.skip2(x2), size=p3.shape[-2:], mode="bilinear", align_corners=False)
-        f_context = self.context(p3 + skip1 + skip2)                   # [B, c3, H/8, W/8]
-
-        # Fourier optical frequency filtering
-        f_context = self.fourier(f_context)                            # [B, c3, H/8, W/8]
-
-        # Multi-scale lateral features
-        f_s4 = self.lateral_s4(x2)                                     # [B, c3, H/8, W/8]
-        f_s2 = self.lateral_s2(x1)                                     # [B, c3, H/8, W/8]
-
-        # Feedback guidance: modulate context with multi-scale deep features
-        f_guided = self.feedback_guidance(f_context, p3, f_context, f_s4)
-
-        # Deep fusion
-        f_fused = self.deep_fuse(torch.cat([f_guided, f_s4, f_s2], dim=1))
-        f_fused = self.dropout(f_fused)
-
-        # Refine
-        f = self.refine(f_fused)                                       # [B, c1, H/8, W/8]
-        feat_scale8 = f
-
-        # Raw image bridge at s8
-        bridge_s8 = self.raw_bridge_s8(gray, f.shape[-2:])             # [B, c1, H/8, W/8]
-        f = self.fuse_bridge_s8(torch.cat([f, bridge_s8], dim=1))      # [B, c1, H/8, W/8]
-
-        # Upsample to original resolution before heads
-        f = _interpolate_preserve_layout(f, size=gray.shape[-2:], mode="bilinear", align_corners=False)
-
-        # V3 output: gray + gated residual
-        residual = torch.tanh(self.residual_head(f))
-        gate = self.gate_head(f)
-        det_feature = (gray + self.residual_scale * gate * residual).clamp(0.0, 1.0)
-
-        if return_aux:
-            return {
-                "det_feature": det_feature,
-                "gray": gray,
-                "heat_logits": self.heat_head(f),
-                "box_logits": self.box_head(f),
-                "edge_logits": self.edge_head(f),
-                "gate": gate,
-                "residual": residual,
-                "feat_raw_1ch": det_feature,
-                "feat_scale2": x1,        # [B, c1, H/2, W/2]
-                "feat_scale4": x2,        # [B, c2, H/4, W/4]
-                "feat_scale8": feat_scale8,
             }
         return det_feature
