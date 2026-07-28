@@ -36,6 +36,7 @@ from models.teacher_guidance import (
 )
 from models.teacher_logging import bootstrap_runtime, log_all_parameters, write_teacher_tensorboard_scalars
 from models.training_utils import (
+    add_tensorboard_scalar,
     build_optimizer_from_model,
     create_tensorboard_writer,
     initialize_teacher_weights,
@@ -112,7 +113,8 @@ def _write_physical_teacher_phase_maps(writer, step, teacher_aux):
     if writer is None or teacher_aux is None:
         return
     for index, phase_map in enumerate(teacher_aux.get("phase_maps", ()), start=1):
-        phase = phase_map[:1].detach().float().cpu()
+        # add_image expects CHW; retain only the first sample, not its batch axis.
+        phase = phase_map[0].detach().float().cpu()
         phase_image = (phase + torch.pi) / (2.0 * torch.pi)
         writer.add_image(f"TeacherV2/phase_map_{index}", phase_image.clamp(0.0, 1.0), step)
         add_tensorboard_scalar(writer, f"TeacherV2/phase_map_{index}_abs_mean", phase.abs().mean(), step)
@@ -474,15 +476,6 @@ def train():
             lr=current_lr,
             best_status=Config.EPOCH_TABLE_BEST_MARK if is_best else "",
             precision_op=val_metrics["precision_op"] if val_metrics is not None else None,
-        )
-        log_to_file(
-            Config,
-            f"Epoch {epoch + 1:03d} [{phase}] components "
-            f"slm_cipher={avg_train['slm_cipher']:.4f} "
-            f"tv={avg_train['slm_tv']:.4f} hf={avg_train['slm_hf']:.4f} "
-            f"range={avg_train['slm_range']:.4f} mean={avg_train['slm_mean']:.4f} "
-            f"peak={avg_train['slm_peak']:.4f} "
-            f"edge={avg_train['slm_edge']:.4f}",
         )
         # 每个 epoch 结束后同步所有 rank（唯一 barrier，确保所有 rank 完成本 epoch 的全部工作后再进入下一 epoch）
         # Rank 0 owns early-stopping state; all ranks must take the same exit path.
