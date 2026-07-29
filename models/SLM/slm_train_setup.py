@@ -14,6 +14,7 @@ from models.SLM.optical_layers import OpticalStudent
 from models.SLM.slm_utils import configure_backends, log_config
 from models.SLM.utils_slm import (
     load_student_checkpoint,
+    load_student_detector_checkpoint,
     load_teacher_detector_checkpoint,
     set_trainable,
 )
@@ -72,6 +73,11 @@ def setup_training(is_main, use_ddp):
         log_to_file(Config, f"Initialized SLM student with mode={init_mode}")
     detector = build_detector_head(Config, in_channels=1).to(device)
     detector.load_state_dict(reference_detector.state_dict(), strict=False)
+    if init_mode == "checkpoint":
+        joint_info = load_student_detector_checkpoint(student, detector, Config.SLM_INIT_CHECKPOINT, device)
+        log_to_file(Config, f"Restored paired student/detector checkpoint for joint refinement: {joint_info}")
+    else:
+        joint_info = None
     if Config.ENABLE_CHANNELS_LAST and torch.cuda.is_available():
         student = student.to(memory_format=torch.channels_last)
         detector = detector.to(memory_format=torch.channels_last)
@@ -155,11 +161,13 @@ def setup_training(is_main, use_ddp):
         "train_detection": [],
         "train_response": [],
         "train_privacy": [],
+        "train_phase_regularization": [],
         "val_total": [],
         "val_feature": [],
         "val_detection": [],
         "val_response": [],
         "val_privacy": [],
+        "val_phase_regularization": [],
         "precision": [],
         "recall": [],
         "f1": [],
@@ -187,6 +195,7 @@ def setup_training(is_main, use_ddp):
         "detection_criterion": detection_criterion,
         "history": history,
         "tensorboard_writer": tensorboard_writer,
+        "resume_info": joint_info,
         "use_ddp": use_ddp,
         "train_sampler": train_sampler,
     }

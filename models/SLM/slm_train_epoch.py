@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.evaluation_slm import evaluate_slm_detector, save_slm_detection_visualization
-from models.SLM.losses_slm import detection_response_loss, input_privacy_loss
+from models.SLM.losses_slm import detection_response_loss, input_privacy_loss, phase_regularization_loss
 from models.SLM.slm_utils import (
     collect_phase_grad_norm,
     collect_phase_grad_norms,
@@ -108,13 +108,15 @@ def run_epoch(
 
     if use_ddp and train_sampler is not None:
         train_sampler.set_epoch(global_epoch)
+    phase_only_stage = stage_name in {"phase_focus", "phase_refine"}
     student.train(stage_name != "detector_focus")
-    detector.train(stage_name != "phase_focus")
+    detector.train(not phase_only_stage)
     epoch_total_t = torch.zeros((), device=device)
     epoch_feature_t = torch.zeros((), device=device)
     epoch_detection_t = torch.zeros((), device=device)
     epoch_response_t = torch.zeros((), device=device)
     epoch_privacy_t = torch.zeros((), device=device)
+    epoch_phase_regularization_t = torch.zeros((), device=device)
     phase_snapshot = collect_phase_snapshot(student_raw)
     epoch_phase_grad_norm = 0.0
     # Use list to accumulate across batches 閳?dict built at epoch end
@@ -146,6 +148,10 @@ def run_epoch(
             privacy_loss, _ = input_privacy_loss(Config, student_feature, gray)
         else:
             privacy_loss = zero
+        if stage_weights["phase_regularization"] > 0:
+            phase_regularization_loss_value, _ = phase_regularization_loss(Config, student_raw)
+        else:
+            phase_regularization_loss_value = zero
         if stage_weights["detection"] > 0:
             predictions = detector(prepare_slm_detector_feature(Config, student_feature))
             detection_loss, _ = detection_criterion(predictions, targets)
@@ -157,12 +163,13 @@ def run_epoch(
             + detection_loss * stage_weights["detection"]
             + response_loss * stage_weights["response"]
             + privacy_loss * stage_weights["privacy"]
+            + phase_regularization_loss_value * stage_weights["phase_regularization"]
         )
 
         total_loss.backward()
         _phase_grad_norms_accum.append(collect_phase_grad_norms(student_raw))
         phase_grad_norm = collect_phase_grad_norm(student_raw)
-        if stage_name in {"joint_fit", "norm_joint"}:
+        if stage_name in {"phase_refine", "joint_fit", "norm_joint"}:
             clipped_norm = clip_phase_grad_norm(student_raw, Config.PHASE_GRAD_CLIP_NORM)
             if clipped_norm is not None:
                 phase_grad_norm = min(clipped_norm, Config.PHASE_GRAD_CLIP_NORM)
@@ -173,6 +180,7 @@ def run_epoch(
         epoch_detection_t += detection_loss.detach()
         epoch_response_t += response_loss.detach()
         epoch_privacy_t += privacy_loss.detach()
+        epoch_phase_regularization_t += phase_regularization_loss_value.detach()
 
     if scheduler is not None:
         scheduler.step()
@@ -183,6 +191,7 @@ def run_epoch(
     avg_detection = float(epoch_detection_t.item()) / num_batches
     avg_response = float(epoch_response_t.item()) / num_batches
     avg_privacy = float(epoch_privacy_t.item()) / num_batches
+    avg_phase_regularization = float(epoch_phase_regularization_t.item()) / num_batches
     avg_phase_grad_norm = epoch_phase_grad_norm / num_batches
 
     # Merge per-batch grad norms into epoch-level stats
@@ -208,6 +217,7 @@ def run_epoch(
     history["train_detection"].append(avg_detection)
     history["train_response"].append(avg_response)
     history["train_privacy"].append(avg_privacy)
+    history["train_phase_regularization"].append(avg_phase_regularization)
     display_epoch = global_epoch + 1
     slm_stats = collect_slm_statistics(student_raw)
     # Direct-SGD has no preferred phase histogram; diagnostics cannot veto a
@@ -235,6 +245,7 @@ def run_epoch(
         history["val_detection"].append(val_losses["detection"])
         history["val_response"].append(val_losses["response"])
         history["val_privacy"].append(val_losses["privacy"])
+        history["val_phase_regularization"].append(val_losses["phase_regularization"])
         history["precision"].append(val_metrics["precision"])
         history["recall"].append(val_metrics["recall"])
         history["f1"].append(val_metrics["f1"])
@@ -243,7 +254,7 @@ def run_epoch(
         history["recall_op"].append(val_metrics["recall_op"])
         history["f1_op"].append(val_metrics["f1_op"])
     else:
-        for key in ("val_total", "val_feature", "val_detection", "val_response", "val_privacy",
+        for key in ("val_total", "val_feature", "val_detection", "val_response", "val_privacy", "val_phase_regularization",
                      "precision", "recall", "f1", "map50",
                      "precision_op", "recall_op", "f1_op"):
             history[key].append(np.nan)
@@ -267,6 +278,7 @@ def run_epoch(
                 "detection": avg_detection,
                 "response": avg_response,
                 "privacy": avg_privacy,
+                "phase_regularization": avg_phase_regularization,
             },
             val_losses=val_losses,
             val_metrics=val_metrics,
@@ -293,12 +305,12 @@ def run_epoch(
                 image_size=Config.RESOLUTION,
             )
 
-    phase_focus_checkpoint_due = (
-        stage_name == "phase_focus"
+    phase_only_checkpoint_due = (
+        stage_name in {"phase_focus", "phase_refine"}
         and Config.VIS_INTERVAL > 0
         and display_epoch % Config.VIS_INTERVAL == 0
     )
-    if is_main and (stage_name != "phase_focus" or phase_focus_checkpoint_due):
+    if is_main and (stage_name not in {"phase_focus", "phase_refine"} or phase_only_checkpoint_due):
         save_current_student_checkpoint(
             student_raw,
             Config.get_student_current_path(),
@@ -313,7 +325,7 @@ def run_epoch(
             phase_grad_norm=avg_phase_grad_norm,
             phase_update_norm=phase_update_norm,
             phase_update_rel=phase_update_rel,
-            mirror_path=Config.get_student_best_path() if stage_name == "phase_focus" else None,
+            mirror_path=Config.get_student_best_path() if stage_name in {"phase_focus", "phase_refine"} else None,
         )
 
     # Student best tracking
@@ -332,20 +344,20 @@ def run_epoch(
             f"Tracked best normalized SLM student candidate: epoch={display_epoch}, train_loss={avg_total:.6f}, "
             f"val_loss={val_losses['total']:.6f}, map50={best_student_map50:.4f}" if val_metrics is not None else f"Tracked best normalized SLM student candidate: epoch={display_epoch}, train_loss={avg_total:.6f}",
         )
-    elif phase_focus_checkpoint_due and not norm_is_deployment_ready:
+    elif phase_only_checkpoint_due and not norm_is_deployment_ready:
         log_to_file(
             Config,
-            "Phase-focus checkpoint saved for phase inspection without deployment normalization.",
+            "Phase-only checkpoint saved for phase inspection without deployment normalization.",
         )
 
     # Detector best tracking
     detector_score_is_best = False
     detector_no_improve_delta = 0
-    detector_stages = {"detector_focus", "joint_fit", "norm_joint"}
+    detector_stages = {"detector_focus", "phase_refine", "joint_fit", "norm_joint"}
     if stage_name in detector_stages and val_metrics is not None and val_metrics["map50"] > best_map50 + Config.DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA:
         best_map50 = val_metrics["map50"]
         detector_score_is_best = True
-    elif val_metrics is not None and stage_name == "detector_focus":
+    elif val_metrics is not None and stage_name in {"detector_focus", "phase_refine", "joint_fit"}:
         detector_no_improve_delta = 1
     elif stage_name in detector_stages and val_metrics is None and avg_total < best_detector_loss:
         detector_score_is_best = True

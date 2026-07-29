@@ -367,6 +367,47 @@ def _render_confusion_matrix_image(confusion, class_names, title="Detection Conf
     return buf
 
 
+def _render_normalized_confusion_matrix_image(confusion, class_names, title="Normalized Detection Confusion Matrix"):
+    """Render GT-row-normalized confusion percentages for quick class-error review."""
+    n = confusion.shape[0]
+    num_classes = n - 1
+    labels = [class_names.get(i, f"class_{i}") for i in range(num_classes)] + ["background"]
+    row_totals = confusion.sum(axis=1, keepdims=True)
+    percentages = np.divide(confusion * 100.0, row_totals, out=np.zeros_like(confusion), where=row_totals > 0)
+
+    fig, ax = plt.subplots(figsize=(max(8, n * 1.0), max(6, n * 0.8)))
+    im = ax.imshow(percentages, interpolation="nearest", cmap="Blues", vmin=0.0, vmax=100.0)
+    ax.set_title(title, fontsize=12)
+    colorbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    colorbar.set_label("percentage (%)", fontsize=9)
+
+    tick_marks = np.arange(n)
+    ax.set_xticks(tick_marks)
+    ax.set_yticks(tick_marks)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xlabel("Predicted category", fontsize=10)
+    ax.set_ylabel("Ground truth category", fontsize=10)
+
+    for i in range(n):
+        for j in range(n):
+            value = percentages[i, j]
+            ax.text(
+                j, i, f"{value:.0f}%",
+                ha="center", va="center",
+                color="white" if value >= 50.0 else "black",
+                fontsize=8,
+                fontweight="bold" if i == j else "normal",
+            )
+
+    plt.tight_layout()
+    fig.canvas.draw()
+    width, height = fig.canvas.get_width_height()
+    image = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(height, width, 4)[:, :, :3]
+    plt.close(fig)
+    return image
+
+
 def write_confusion_matrix(
     writer,
     detections_list,
@@ -406,6 +447,11 @@ def write_confusion_matrix(
     )
     # TensorBoard add_image expects (C, H, W) or (H, W, C) with dataformats
     writer.add_image(prefix, img, step, dataformats="HWC")
+    normalized_img = _render_normalized_confusion_matrix_image(
+        confusion, class_names,
+        title=f"Normalized Detection Confusion Matrix (IoU≥{iou_threshold}, Conf≥{conf_threshold})"
+    )
+    writer.add_image(f"{prefix}/NormalizedPercent", normalized_img, step, dataformats="HWC")
 
     # Write per-class TP/FP/FN as scalars
     for cls_id in range(num_classes):

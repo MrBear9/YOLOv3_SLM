@@ -15,8 +15,8 @@ class ConfigSLM(OpticalConfig):
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    # Keep this run separate from the frozen-SLM baseline (mAP50=0.4647).
-    OUTPUT_DIR = r"output/SLM_Tv2_light_direct_sgd"
+    # Detection-guided refinement of the fixed two-layer direct-SGD student.
+    OUTPUT_DIR = r"output/SLM_Tv2_light_phase_refine"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
@@ -34,16 +34,21 @@ class ConfigSLM(OpticalConfig):
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
-    # Match the proven two-stage baseline budget before testing any
-    # detector-guided SLM refinement. The detector stage can stop early once
-    # validation mAP50 has genuinely plateaued.
-    PHASE_FOCUS_EPOCHS = 145
-    DETECTOR_FOCUS_EPOCHS = 135
-    # The current direct-SGD run peaks during detector_focus. Keep its learned
-    # SLM/detector pair intact while the joint objectives are reworked.
-    JOINT_FIT_EPOCHS = 0
+    # Resume the mAP50=0.4619 direct-SGD student/detector pair below. Its
+    # phase-focus and detector-focus stages have already completed.
+    PHASE_FOCUS_EPOCHS = 0
+    DETECTOR_FOCUS_EPOCHS = 0
+    # First improve the optical front end with a frozen, pretrained detector.
+    # This prevents the detector from compensating for weak phase modulation.
+    PHASE_REFINE_EPOCHS = 20
+    # Then allow only a short low-LR detector adaptation to the refined optics.
+    JOINT_FIT_EPOCHS = 12
+    # Deployment normalization is a separate hardware ablation.
     NORM_JOINT_EPOCHS = 0
-    EPOCHS = PHASE_FOCUS_EPOCHS + DETECTOR_FOCUS_EPOCHS + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
+    EPOCHS = (
+        PHASE_FOCUS_EPOCHS + DETECTOR_FOCUS_EPOCHS + PHASE_REFINE_EPOCHS
+        + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
+    )
 
     # =========================================================================
     # SLM optical parameters
@@ -94,10 +99,11 @@ class ConfigSLM(OpticalConfig):
     # -------- SLM phase init --------
     # Options: zero, random, vortex, checkpoint.
     # Direct-SGD starts from HolographSLM's small continuous random phase map.
-    SLM_INIT_MODE = "random"
+    SLM_INIT_MODE = "checkpoint"
     SLM_DIRECT_SGD_INIT_RANGE_RAD = 0.5
     SLM_INIT_NOISE_STD = 0.02
-    SLM_INIT_CHECKPOINT = r"output/OpticalSLM_YOLOv8Head_student/optical_student_best.pth"
+    # detector_best.pth includes the SLM state paired with its best detector.
+    SLM_INIT_CHECKPOINT = r"output/SLM_Tv2_light_direct_sgd/detector_best.pth"
     # Per-layer vortex charge and radial curvature: see OpticalConfig.vortex_init.
     # Vortex is always one global phase singularity; it is never tiled.
 
@@ -204,31 +210,52 @@ class ConfigSLM(OpticalConfig):
     RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
     PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
 
+    # Frozen-detector phase refinement: GT detection loss still backpropagates
+    # through the detector to the phase maps, but detector weights do not move.
+    FEATURE_LOSS_WEIGHT_PHASE_REFINE = 0.15
+    DETECTION_LOSS_WEIGHT_PHASE_REFINE = 1.00
+    RESPONSE_LOSS_WEIGHT_PHASE_REFINE = 0.00
+    PRIVACY_LOSS_WEIGHT_PHASE_REFINE = 0.00
+    PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE = 0.10
+
     FEATURE_LOSS_WEIGHT_JOINT = 0.15
     DETECTION_LOSS_WEIGHT_JOINT = 1.00
+    # Per-image max-normalized response matching did not improve validation
+    # mAP, so it remains disabled for this route.
     RESPONSE_LOSS_WEIGHT_JOINT = 0.00
     PRIVACY_LOSS_WEIGHT_JOINT = 0.00
+    PHASE_REGULARIZATION_WEIGHT_JOINT = 0.03
 
-    FEATURE_LOSS_WEIGHT_NORM_JOINT = 0.10
+    FEATURE_LOSS_WEIGHT_NORM_JOINT = 0.20
     DETECTION_LOSS_WEIGHT_NORM_JOINT = 1.00
     RESPONSE_LOSS_WEIGHT_NORM_JOINT = 0.00
     PRIVACY_LOSS_WEIGHT_NORM_JOINT = 0.00
+    PHASE_REGULARIZATION_WEIGHT_NORM_JOINT = 0.03
+
+    # The modulation hinge encourages adequate phase depth; TV and high-pass
+    # terms keep the extra depth from becoming pixel-scale noise.
+    PHASE_TARGET_STD_RAD = 0.60
+    PHASE_TV_WEIGHT = 0.10
+    PHASE_HIGH_FREQ_WEIGHT = 0.05
+    PHASE_STD_WEIGHT = 1.00
+    PHASE_HIGH_FREQ_KERNEL = 5
 
     # =========================================================================
     # Optimizer & LR schedule
     # =========================================================================
     PHASE_FOCUS_PHASE_PARAM_LR = 3e-3
+    PHASE_REFINE_PHASE_PARAM_LR = 1e-3
     DETECTOR_LR = 3e-4
-    JOINT_PHASE_PARAM_LR = 5e-4
+    JOINT_PHASE_PARAM_LR = 1e-4
     JOINT_DETECTOR_LR = 5e-5
-    NORM_JOINT_PHASE_PARAM_LR = 4e-4
+    NORM_JOINT_PHASE_PARAM_LR = 2e-4
     NORM_JOINT_DETECTOR_LR = 5e-5
     PHASE_GRAD_CLIP_NORM = 2.0
     WEIGHT_DECAY = 3e-5
     PHASE_WEIGHT_DECAY = 0.0
     # Options: "CosineAnnealingLR", "none".
     LR_SCHEDULER = "CosineAnnealingLR"
-    ETA_MIN = 1e-6
+    ETA_MIN = 1e-5
 
     ENABLE_DETECTOR_FOCUS_EARLY_STOP = True
     DETECTOR_FOCUS_EARLY_STOP_PATIENCE = 20
@@ -299,7 +326,11 @@ class ConfigSLM(OpticalConfig):
         cls.RESOLUTION = tuple(int(value) for value in cls.RESOLUTION)
         if min(cls.RESOLUTION) < 1:
             raise ValueError("RESOLUTION height and width must be positive.")
-        cls.EPOCHS = cls.PHASE_FOCUS_EPOCHS + cls.DETECTOR_FOCUS_EPOCHS + cls.JOINT_FIT_EPOCHS + cls.NORM_JOINT_EPOCHS
+        cls.EPOCHS = (
+            cls.PHASE_FOCUS_EPOCHS + cls.DETECTOR_FOCUS_EPOCHS
+            + cls.PHASE_REFINE_EPOCHS + cls.JOINT_FIT_EPOCHS
+            + cls.NORM_JOINT_EPOCHS
+        )
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
         cls.OUTPUT_DIR = resolve_project_path(cls.OUTPUT_DIR)
         cls.TEACHER_DETECTOR_CHECKPOINT = resolve_project_path(cls.TEACHER_DETECTOR_CHECKPOINT)
@@ -326,6 +357,15 @@ class ConfigSLM(OpticalConfig):
                 "detection": cls.DETECTION_LOSS_WEIGHT_PHASE_FOCUS,
                 "response": cls.RESPONSE_LOSS_WEIGHT_PHASE_FOCUS,
                 "privacy": cls.PRIVACY_LOSS_WEIGHT_PHASE_FOCUS,
+                "phase_regularization": 0.0,
+            }
+        if stage_name == "phase_refine":
+            return {
+                "feature": cls.FEATURE_LOSS_WEIGHT_PHASE_REFINE,
+                "detection": cls.DETECTION_LOSS_WEIGHT_PHASE_REFINE,
+                "response": cls.RESPONSE_LOSS_WEIGHT_PHASE_REFINE,
+                "privacy": cls.PRIVACY_LOSS_WEIGHT_PHASE_REFINE,
+                "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE,
             }
         if stage_name == "detector_focus":
             return {
@@ -333,6 +373,7 @@ class ConfigSLM(OpticalConfig):
                 "detection": cls.DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS,
                 "response": cls.RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS,
                 "privacy": cls.PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS,
+                "phase_regularization": 0.0,
             }
         if stage_name == "norm_joint":
             return {
@@ -340,12 +381,14 @@ class ConfigSLM(OpticalConfig):
                 "detection": cls.DETECTION_LOSS_WEIGHT_NORM_JOINT,
                 "response": cls.RESPONSE_LOSS_WEIGHT_NORM_JOINT,
                 "privacy": cls.PRIVACY_LOSS_WEIGHT_NORM_JOINT,
+                "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_NORM_JOINT,
             }
         return {
             "feature": cls.FEATURE_LOSS_WEIGHT_JOINT,
             "detection": cls.DETECTION_LOSS_WEIGHT_JOINT,
             "response": cls.RESPONSE_LOSS_WEIGHT_JOINT,
             "privacy": cls.PRIVACY_LOSS_WEIGHT_JOINT,
+            "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_JOINT,
         }
 
     @classmethod

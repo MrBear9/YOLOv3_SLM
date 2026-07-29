@@ -181,6 +181,41 @@ class CompositeOpticalFeatureLoss(nn.Module):
         return total, stats
 
 
+def phase_regularization_loss(config, student):
+    """Keep phase maps expressive while suppressing non-deployable pixel noise."""
+    layers = student.all_slm_layers() if hasattr(student, "all_slm_layers") else ()
+    terms = []
+    for _, slm in layers:
+        phase = slm._raw_phase()
+        dx = phase[..., :, 1:] - phase[..., :, :-1]
+        dy = phase[..., 1:, :] - phase[..., :-1, :]
+        tv = dx.abs().mean() + dy.abs().mean()
+        kernel = max(int(getattr(config, "PHASE_HIGH_FREQ_KERNEL", 5)), 1)
+        if kernel % 2 == 0:
+            kernel += 1
+        smooth = F.avg_pool2d(phase, kernel, stride=1, padding=kernel // 2)
+        high_freq = (phase - smooth).square().mean()
+        modulation = F.relu(float(config.PHASE_TARGET_STD_RAD) - phase.std(unbiased=False)).square()
+        terms.append((tv, high_freq, modulation))
+    if not terms:
+        zero = torch.zeros((), device=next(student.parameters()).device)
+        return zero, {"phase_regularization": 0.0, "phase_tv": 0.0, "phase_high_freq": 0.0, "phase_modulation": 0.0}
+    tv = torch.stack([term[0] for term in terms]).mean()
+    high_freq = torch.stack([term[1] for term in terms]).mean()
+    modulation = torch.stack([term[2] for term in terms]).mean()
+    total = (
+        float(config.PHASE_TV_WEIGHT) * tv
+        + float(config.PHASE_HIGH_FREQ_WEIGHT) * high_freq
+        + float(config.PHASE_STD_WEIGHT) * modulation
+    )
+    return total, {
+        "phase_regularization": float(total.detach().item()),
+        "phase_tv": float(tv.detach().item()),
+        "phase_high_freq": float(high_freq.detach().item()),
+        "phase_modulation": float(modulation.detach().item()),
+    }
+
+
 def prediction_response_tensor(config, preds):
     if isinstance(preds, dict):
         preds = (preds,)
@@ -190,6 +225,9 @@ def prediction_response_tensor(config, preds):
             if "heatmap" in pred:
                 response = torch.sigmoid(pred["heatmap"]).amax(dim=1, keepdim=True)
             elif "cls" in pred:
+                # Current YOLOLightHead is anchor-free TAL: each scale emits
+                # [B, num_classes, H, W] class logits and has no objectness
+                # branch.  Its strongest class probability is the response.
                 response = torch.sigmoid(pred["cls"]).amax(dim=1, keepdim=True)
                 if "obj" in pred:
                     response = response * torch.sigmoid(pred["obj"])

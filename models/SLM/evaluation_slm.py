@@ -8,7 +8,7 @@ import torch
 from tqdm import tqdm
 
 from models.geometry import bbox_iou_xywh
-from models.SLM.losses_slm import detection_response_loss, input_privacy_loss
+from models.SLM.losses_slm import detection_response_loss, input_privacy_loss, phase_regularization_loss
 from models.runtime import unwrap_module
 from models.teacher_guidance import enhance_feature_for_display
 from models.yolov8.feature_adapter import prepare_slm_detector_feature
@@ -45,7 +45,7 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
 
     metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
-    totals = {key: 0.0 for key in ("total", "feature", "detection", "response", "privacy", "box", "obj", "noobj", "cls", "dfl")}
+    totals = {key: 0.0 for key in ("total", "feature", "detection", "response", "privacy", "phase_regularization", "box", "obj", "noobj", "cls", "dfl")}
     total_tp = total_fp = total_fn = 0
     total_tp_op = total_fp_op = total_fn_op = 0
     op_conf_thresh = float(getattr(config, "CONF_THRESH", 0.35))
@@ -72,6 +72,10 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
                 privacy_loss, _ = input_privacy_loss(config, student_feature, gray)
             else:
                 privacy_loss = zero
+            if stage_weights["phase_regularization"] > 0:
+                phase_regularization_loss_value, _ = phase_regularization_loss(config, student_core)
+            else:
+                phase_regularization_loss_value = zero
 
             evaluate_detector = stage_weights["detection"] > 0
             if evaluate_detector:
@@ -87,6 +91,7 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
                 + detection_loss * stage_weights["detection"]
                 + response_loss * stage_weights["response"]
                 + privacy_loss * stage_weights["privacy"]
+                + phase_regularization_loss_value * stage_weights["phase_regularization"]
             )
 
             totals["total"] += float(total_loss.detach().item())
@@ -94,6 +99,7 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
             totals["detection"] += float(detection_loss.detach().item())
             totals["response"] += float(response_loss.detach().item())
             totals["privacy"] += float(privacy_loss.detach().item())
+            totals["phase_regularization"] += float(phase_regularization_loss_value.detach().item())
             for key in ("box", "obj", "noobj", "cls", "dfl"):
                 totals[key] += loss_stats.get(key, 0.0)
 

@@ -39,6 +39,7 @@ def stage_schedule():
     return [
         ("phase_focus", Config.PHASE_FOCUS_EPOCHS),
         ("detector_focus", Config.DETECTOR_FOCUS_EPOCHS),
+        ("phase_refine", Config.PHASE_REFINE_EPOCHS),
         ("joint_fit", Config.JOINT_FIT_EPOCHS),
         ("norm_joint", Config.NORM_JOINT_EPOCHS),
     ]
@@ -179,7 +180,8 @@ def write_slm_tensorboard_scalars(
     if slm_stats is not None:
         for key, value in slm_stats.items():
             if any(key.endswith(suffix) for suffix in (
-                "_raw_mean", "_raw_std", "_simulation_min", "_simulation_max",
+                "_raw_mean", "_raw_std", "_raw_range", "_raw_tv",
+                "_raw_high_freq", "_simulation_min", "_simulation_max",
             )):
                 add_tensorboard_scalar(writer, f"SLM/{stage_name}/{key}", value, step)
     add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_grad_norm", phase_grad_norm, step)
@@ -348,11 +350,12 @@ def log_config():
     log_to_file(
         Config,
         f"Stages: phase_focus={Config.PHASE_FOCUS_EPOCHS}  detector_focus={Config.DETECTOR_FOCUS_EPOCHS}  "
-        f"joint={Config.JOINT_FIT_EPOCHS}  norm_joint={Config.NORM_JOINT_EPOCHS}",
+        f"phase_refine={Config.PHASE_REFINE_EPOCHS}  joint={Config.JOINT_FIT_EPOCHS}  "
+        f"norm_joint={Config.NORM_JOINT_EPOCHS}",
     )
     log_to_file(
         Config,
-        f"LR: phase={Config.PHASE_FOCUS_PHASE_PARAM_LR}  detector={Config.DETECTOR_LR}  "
+        f"LR: phase={Config.PHASE_FOCUS_PHASE_PARAM_LR}  phase_refine={Config.PHASE_REFINE_PHASE_PARAM_LR}  detector={Config.DETECTOR_LR}  "
         f"joint_ph={Config.JOINT_PHASE_PARAM_LR}/{Config.JOINT_DETECTOR_LR}  "
         f"norm_ph={Config.NORM_JOINT_PHASE_PARAM_LR}/{Config.NORM_JOINT_DETECTOR_LR}",
     )
@@ -365,4 +368,9 @@ def log_config():
         f"j={Config.FEATURE_LOSS_WEIGHT_JOINT}/{Config.DETECTION_LOSS_WEIGHT_JOINT}  "
         f"nj={Config.FEATURE_LOSS_WEIGHT_NORM_JOINT}/{Config.DETECTION_LOSS_WEIGHT_NORM_JOINT}",
     )
-    log_to_file(Config, f"Phase reg: smooth/diversity by stage — see config for details")
+    log_to_file(
+        Config,
+        f"Phase regularization: target_std={Config.PHASE_TARGET_STD_RAD} rad, "
+        f"tv={Config.PHASE_TV_WEIGHT}, high_freq={Config.PHASE_HIGH_FREQ_WEIGHT}, "
+        f"std={Config.PHASE_STD_WEIGHT}",
+    )

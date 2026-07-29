@@ -92,6 +92,32 @@ def load_student_checkpoint(student, checkpoint_path, device):
     }
 
 
+def load_student_detector_checkpoint(student, detector, checkpoint_path, device):
+    """Restore the paired fixed-SLM and light-detector snapshot for joint refinement."""
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Student-detector checkpoint not found: {checkpoint_path}")
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError(f"Expected a checkpoint dictionary, got {type(checkpoint).__name__}.")
+    if "student_state_dict" not in checkpoint or "detector_state_dict" not in checkpoint:
+        raise KeyError("Joint refinement requires student_state_dict and detector_state_dict in the checkpoint.")
+    student_loaded, student_total = load_matching_state(student, checkpoint["student_state_dict"], prefixes=("student.",))
+    detector_loaded, detector_total = load_matching_state(detector, checkpoint["detector_state_dict"], prefixes=("detector.",))
+    if student_loaded == 0 or detector_loaded == 0:
+        raise RuntimeError("Joint refinement checkpoint has no compatible student or detector tensors.")
+    return {
+        "student_loaded": student_loaded,
+        "student_total": student_total,
+        "detector_loaded": detector_loaded,
+        "detector_total": detector_total,
+        "epoch": checkpoint.get("epoch"),
+        "val_map50": checkpoint.get("val_map50"),
+    }
+
+
 def _is_slm_phase_param(name):
     """Return True for any SLM phase-related parameter (all parametrisations)."""
     slm_keywords = ("phase_raw", "amp_raw", "phase_field", "scale_params", "mlp_field")
@@ -168,6 +194,9 @@ def build_stage_optimizer(config, student, detector, stage_name):
     if stage_name == "phase_focus":
         base_lr = config.PHASE_FOCUS_PHASE_PARAM_LR
         lr_mult_stage = "phase_focus"
+    elif stage_name == "phase_refine":
+        base_lr = config.PHASE_REFINE_PHASE_PARAM_LR
+        lr_mult_stage = "joint"
     elif stage_name == "norm_joint":
         base_lr = config.NORM_JOINT_PHASE_PARAM_LR
         lr_mult_stage = "norm_joint"
@@ -191,7 +220,7 @@ def build_stage_optimizer(config, student, detector, stage_name):
             groups.append({"params": params, "lr": base_lr * mult,
                           "weight_decay": config.PHASE_WEIGHT_DECAY})
 
-    if stage_name != "phase_focus":
+    if stage_name not in {"phase_focus", "phase_refine"}:
         detector_params = [p for p in detector.parameters() if p.requires_grad]
         detector_lr = (config.NORM_JOINT_DETECTOR_LR if stage_name == "norm_joint"
                        else config.JOINT_DETECTOR_LR)
@@ -239,8 +268,17 @@ def collect_slm_statistics(student):
 def _collect_one_layer_stats(stats, slm, layer_name, config):
     raw = slm._raw_phase().detach().float()
     simulation = slm.simulation_phase().detach().float()
+    dx = raw[..., :, 1:] - raw[..., :, :-1]
+    dy = raw[..., 1:, :] - raw[..., :-1, :]
+    kernel = max(int(getattr(config, "PHASE_HIGH_FREQ_KERNEL", 5)), 1)
+    if kernel % 2 == 0:
+        kernel += 1
+    smooth = torch.nn.functional.avg_pool2d(raw, kernel, stride=1, padding=kernel // 2)
     stats[f"{layer_name}_raw_mean"] = float(raw.mean().item())
     stats[f"{layer_name}_raw_std"] = float(raw.std(unbiased=False).item())
+    stats[f"{layer_name}_raw_range"] = float((raw.amax() - raw.amin()).item())
+    stats[f"{layer_name}_raw_tv"] = float((dx.abs().mean() + dy.abs().mean()).item())
+    stats[f"{layer_name}_raw_high_freq"] = float((raw - smooth).square().mean().sqrt().item())
     stats[f"{layer_name}_simulation_min"] = float(simulation.min().item())
     stats[f"{layer_name}_simulation_max"] = float(simulation.max().item())
 
