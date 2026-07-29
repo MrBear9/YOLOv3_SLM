@@ -27,7 +27,8 @@ class OpticalConfig:
     # ═══════════════════════════════════════════════════════════════════════
     # Per-layer 配置  {layer_idx (1-based): value}
     # ═══════════════════════════════════════════════════════════════════════
-    PROP_DISTANCE = {1: 0.10, 2: 0.10, 3: 0.20, 4: 0.20}
+    # Student geometry: SLM1 -> 20 cm -> SLM2 -> 20 cm.
+    PROP_DISTANCE = {1: 0.20, 2: 0.20, 3: 0.20, 4: 0.20}
     TRAIN_LAYER  = {1: True, 2: True, 3: True, 4: True}
 
     # Phase field block parameters

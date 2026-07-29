@@ -15,8 +15,8 @@ class ConfigSLM(OpticalConfig):
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    # Circular-phase, multi-scale residual refinement of the direct-SGD student.
-    OUTPUT_DIR = r"output/SLM_Tv2_light_circular_pyramid"
+    # Fresh two-SLM 20 cm propagation ablation. Keep prior experiments intact.
+    OUTPUT_DIR = r"output/SLM_Tv2_light_20cm_scratch"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
@@ -34,15 +34,12 @@ class ConfigSLM(OpticalConfig):
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
-    # Resume the mAP50=0.4619 direct-SGD student/detector pair below. Its
-    # phase-focus and detector-focus stages have already completed.
-    PHASE_FOCUS_EPOCHS = 0
-    DETECTOR_FOCUS_EPOCHS = 0
-    # Keep the pretrained detector frozen while growing a smooth phase residual
-    # from coarse to middle spatial scales. Fine residuals remain disabled.
+    # Fresh 20 cm student phase learning, then detector adaptation.
+    PHASE_FOCUS_EPOCHS = 245
+    DETECTOR_FOCUS_EPOCHS = 235
     PHASE_REFINE_EPOCHS = 0
-    PHASE_COARSE_EPOCHS = 16
-    PHASE_MID_EPOCHS = 16
+    PHASE_COARSE_EPOCHS = 0
+    PHASE_MID_EPOCHS = 0
     JOINT_FIT_EPOCHS = 0
     # Deployment normalization is a separate hardware ablation.
     NORM_JOINT_EPOCHS = 0
@@ -57,7 +54,6 @@ class ConfigSLM(OpticalConfig):
     # =========================================================================
     WAVELENGTH = 532e-9
     PIXEL_SIZE = 6.4e-6
-    # PROP_DISTANCE per-layer: see OpticalConfig.prop_distance(layer_idx)
     # Options: "phase", "amp_phase".
     SLM_MODE = "phase"
     # Optical/teacher canvas as (height, width). Example: (1080, 1920).
@@ -68,21 +64,9 @@ class ConfigSLM(OpticalConfig):
     INPUT_INTENSITY_MODE = "srgb"
 
     # -------- Phase parameterisation --------
-    # "direct_sgd" is the validated continuous phase optimization used by
-    # HolographSLM. "direct_sgb" remains a spelling-compatible alias.
-    # "direct_sgd_pyramid" adds a zero-initialized multi-scale residual while
-    # retaining the direct continuous phase path. "multiscale_mlp" remains a
-    # pure pyramid ablation.
+    # Keep the direct-SGD base plus zero-initialized multi-scale residual.
     SLM_PHASE_PARAM_MODE = "direct_sgd_pyramid"
-    # Multiplier applied to the pyramid residual before direct phase addition.
-    # Starting below one keeps the direct-SGD path dominant at early epochs.
     SLM_DIRECT_SGD_PYRAMID_SCALE = 0.50
-    # The residual uses only global pyramid scales. Blockwise detail would add
-    # a fine spatial degree of freedom that the current static SLM cannot
-    # validate reliably.
-    PHASE_USE_BLOCKWISE = False
-    PHASE_COARSE_NUM_SCALES = 2
-    PHASE_MID_NUM_SCALES = 3
 
     # Per-layer block/freq overrides: see OpticalConfig accessors
     #   phase_block_grid(layer_idx), phase_mlp_num_freqs(layer_idx), …
@@ -105,13 +89,11 @@ class ConfigSLM(OpticalConfig):
     STUDENT_OUTPUT_BLUR_KERNEL = 1
 
     # -------- SLM phase init --------
-    # Options: zero, random, vortex, checkpoint.
-    # Direct-SGD starts from HolographSLM's small continuous random phase map.
-    SLM_INIT_MODE = "checkpoint"
+    # Start both student SLM phase maps from a fresh continuous random state.
+    SLM_INIT_MODE = "random"
     SLM_DIRECT_SGD_INIT_RANGE_RAD = 0.5
     SLM_INIT_NOISE_STD = 0.02
-    # The available paired checkpoint is the best saved frozen-detector model.
-    # Pyramid residuals start from zero, so the loaded direct phase is intact.
+    # Retained for future checkpoint runs; ignored while SLM_INIT_MODE=random.
     SLM_INIT_CHECKPOINT = r"output/SLM_Tv2_light_phase_refine/detector_best.pth"
     # Per-layer vortex charge and radial curvature: see OpticalConfig.vortex_init.
     # Vortex is always one global phase singularity; it is never tiled.
@@ -143,8 +125,8 @@ class ConfigSLM(OpticalConfig):
     TEACHER_V2_C2F_BLOCKS = 3
     TEACHER_V2_FOURIER_BANDS = 8
     TEACHER_V2_FOURIER_LOW_PASS_SIGMA = 0.5
-    # Keep these exactly aligned with WAVELENGTH, PIXEL_SIZE, NUM_LAYERS and
-    # PROP_DISTANCE above when using a V2 teacher checkpoint.
+    # These remain fixed to the loaded V2 teacher checkpoint. Student distance
+    # is intentionally different in this 20 cm optical-geometry ablation.
     TEACHER_V2_NUM_SLM_LAYERS = 2
     TEACHER_V2_WAVELENGTH = 532e-9
     TEACHER_V2_PIXEL_SIZE = 6.4e-6
@@ -219,13 +201,11 @@ class ConfigSLM(OpticalConfig):
     RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
     PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
 
-    # Frozen-detector phase refinement: GT detection loss still backpropagates
-    # through the detector to the phase maps, but detector weights do not move.
     FEATURE_LOSS_WEIGHT_PHASE_REFINE = 0.05
     DETECTION_LOSS_WEIGHT_PHASE_REFINE = 1.00
     RESPONSE_LOSS_WEIGHT_PHASE_REFINE = 0.00
     PRIVACY_LOSS_WEIGHT_PHASE_REFINE = 0.00
-    PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE = 0.10
+    PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE = 0.05
 
     FEATURE_LOSS_WEIGHT_PHASE_COARSE = 0.05
     DETECTION_LOSS_WEIGHT_PHASE_COARSE = 1.00

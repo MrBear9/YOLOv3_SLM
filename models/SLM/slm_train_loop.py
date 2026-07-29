@@ -128,7 +128,7 @@ def train():
             global_epoch += 1
             detector_no_improve += no_improve_delta
             should_stop_stage = (
-                stage_name in {"detector_focus", "phase_refine", "phase_coarse", "phase_mid", "joint_fit"}
+                stage_name in {"detector_focus", "phase_coarse", "phase_mid", "joint_fit"}
                 and Config.ENABLE_DETECTOR_FOCUS_EARLY_STOP
                 and Config.DETECTOR_FOCUS_EARLY_STOP_PATIENCE > 0
                 and detector_no_improve >= Config.DETECTOR_FOCUS_EARLY_STOP_PATIENCE
