@@ -92,6 +92,10 @@ def setup_training(is_main, use_ddp):
         else getattr(Config, f"TRAIN_SLM{i}", True)
         for i in range(1, num_layers + 1)
     )
+    student_find_unused = student_find_unused or (
+        str(getattr(Config, "SLM_PHASE_PARAM_MODE", "")).lower() == "direct_sgd_pyramid"
+        and (getattr(Config, "PHASE_COARSE_EPOCHS", 0) > 0 or getattr(Config, "PHASE_MID_EPOCHS", 0) > 0)
+    )
     student = wrap_data_parallel(
         Config,
         student,

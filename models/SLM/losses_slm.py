@@ -182,37 +182,41 @@ class CompositeOpticalFeatureLoss(nn.Module):
 
 
 def phase_regularization_loss(config, student):
-    """Keep phase maps expressive while suppressing non-deployable pixel noise."""
+    """Regularize the physical complex phase, rather than unwrapped radians."""
     layers = student.all_slm_layers() if hasattr(student, "all_slm_layers") else ()
     terms = []
     for _, slm in layers:
         phase = slm._raw_phase()
-        dx = phase[..., :, 1:] - phase[..., :, :-1]
-        dy = phase[..., 1:, :] - phase[..., :-1, :]
+        phase_complex = torch.polar(torch.ones_like(phase), phase)
+        dx = phase_complex[..., :, 1:] - phase_complex[..., :, :-1]
+        dy = phase_complex[..., 1:, :] - phase_complex[..., :-1, :]
         tv = dx.abs().mean() + dy.abs().mean()
         kernel = max(int(getattr(config, "PHASE_HIGH_FREQ_KERNEL", 5)), 1)
         if kernel % 2 == 0:
             kernel += 1
-        smooth = F.avg_pool2d(phase, kernel, stride=1, padding=kernel // 2)
-        high_freq = (phase - smooth).square().mean()
-        modulation = F.relu(float(config.PHASE_TARGET_STD_RAD) - phase.std(unbiased=False)).square()
-        terms.append((tv, high_freq, modulation))
+        real_smooth = F.avg_pool2d(phase_complex.real, kernel, stride=1, padding=kernel // 2)
+        imag_smooth = F.avg_pool2d(phase_complex.imag, kernel, stride=1, padding=kernel // 2)
+        high_freq = (phase_complex.real - real_smooth).square().mean() + (phase_complex.imag - imag_smooth).square().mean()
+        circular_variance = 1.0 - phase_complex.mean(dim=(2, 3), keepdim=True).abs()
+        modulation = F.relu(float(config.PHASE_TARGET_CIRCULAR_VARIANCE) - circular_variance).square().mean()
+        terms.append((tv, high_freq, modulation, circular_variance.mean()))
     if not terms:
         zero = torch.zeros((), device=next(student.parameters()).device)
-        return zero, {"phase_regularization": 0.0, "phase_tv": 0.0, "phase_high_freq": 0.0, "phase_modulation": 0.0}
+        return zero, {"phase_regularization": 0.0, "phase_tv": 0.0, "phase_high_freq": 0.0, "phase_circular_variance": 0.0}
     tv = torch.stack([term[0] for term in terms]).mean()
     high_freq = torch.stack([term[1] for term in terms]).mean()
     modulation = torch.stack([term[2] for term in terms]).mean()
+    circular_variance = torch.stack([term[3] for term in terms]).mean()
     total = (
-        float(config.PHASE_TV_WEIGHT) * tv
-        + float(config.PHASE_HIGH_FREQ_WEIGHT) * high_freq
-        + float(config.PHASE_STD_WEIGHT) * modulation
+        float(config.PHASE_CIRCULAR_TV_WEIGHT) * tv
+        + float(config.PHASE_CIRCULAR_HIGH_FREQ_WEIGHT) * high_freq
+        + float(config.PHASE_CIRCULAR_VARIANCE_WEIGHT) * modulation
     )
     return total, {
         "phase_regularization": float(total.detach().item()),
         "phase_tv": float(tv.detach().item()),
         "phase_high_freq": float(high_freq.detach().item()),
-        "phase_modulation": float(modulation.detach().item()),
+        "phase_circular_variance": float(circular_variance.detach().item()),
     }
 
 

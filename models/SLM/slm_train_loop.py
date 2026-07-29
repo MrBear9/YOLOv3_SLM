@@ -86,8 +86,10 @@ def train():
         ctx["student_raw"].enable_norm = bool(Config.ENABLE_STUDENT_NORM and stage_norm_mode != "none")
 
         # Configure trainable components per stage
-        if stage_name in {"phase_focus", "phase_refine"}:
+        if stage_name in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"}:
             _set_trainable_both(ctx["student"], ctx["detector"], student_trainable=True, detector_trainable=False)
+            from models.SLM.utils_slm import set_pyramid_residual_stage
+            set_pyramid_residual_stage(ctx["student_raw"], stage_name)
         elif stage_name == "detector_focus":
             _set_trainable_both(ctx["student"], ctx["detector"], student_trainable=False, detector_trainable=True)
         else:
@@ -126,7 +128,7 @@ def train():
             global_epoch += 1
             detector_no_improve += no_improve_delta
             should_stop_stage = (
-                stage_name in {"detector_focus", "phase_refine", "joint_fit"}
+                stage_name in {"detector_focus", "phase_refine", "phase_coarse", "phase_mid", "joint_fit"}
                 and Config.ENABLE_DETECTOR_FOCUS_EARLY_STOP
                 and Config.DETECTOR_FOCUS_EARLY_STOP_PATIENCE > 0
                 and detector_no_improve >= Config.DETECTOR_FOCUS_EARLY_STOP_PATIENCE
@@ -142,7 +144,7 @@ def train():
             if should_stop_stage:
                 log_to_file(
                     Config,
-                    f"Early stopping detector_focus after {detector_no_improve} epochs without mAP50 improvement. "
+                    f"Early stopping {stage_name} after {detector_no_improve} epochs without mAP50 improvement. "
                     f"Best mAP50={best_map50:.4f}.",
                 )
                 break

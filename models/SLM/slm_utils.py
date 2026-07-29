@@ -40,6 +40,8 @@ def stage_schedule():
         ("phase_focus", Config.PHASE_FOCUS_EPOCHS),
         ("detector_focus", Config.DETECTOR_FOCUS_EPOCHS),
         ("phase_refine", Config.PHASE_REFINE_EPOCHS),
+        ("phase_coarse", Config.PHASE_COARSE_EPOCHS),
+        ("phase_mid", Config.PHASE_MID_EPOCHS),
         ("joint_fit", Config.JOINT_FIT_EPOCHS),
         ("norm_joint", Config.NORM_JOINT_EPOCHS),
     ]
@@ -180,8 +182,8 @@ def write_slm_tensorboard_scalars(
     if slm_stats is not None:
         for key, value in slm_stats.items():
             if any(key.endswith(suffix) for suffix in (
-                "_raw_mean", "_raw_std", "_raw_range", "_raw_tv",
-                "_raw_high_freq", "_simulation_min", "_simulation_max",
+                "_raw_mean", "_raw_std", "_raw_range", "_circular_tv",
+                "_circular_high_freq", "_circular_variance", "_simulation_min", "_simulation_max",
             )):
                 add_tensorboard_scalar(writer, f"SLM/{stage_name}/{key}", value, step)
     add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_grad_norm", phase_grad_norm, step)
@@ -350,12 +352,14 @@ def log_config():
     log_to_file(
         Config,
         f"Stages: phase_focus={Config.PHASE_FOCUS_EPOCHS}  detector_focus={Config.DETECTOR_FOCUS_EPOCHS}  "
-        f"phase_refine={Config.PHASE_REFINE_EPOCHS}  joint={Config.JOINT_FIT_EPOCHS}  "
+        f"phase_refine={Config.PHASE_REFINE_EPOCHS}  coarse={Config.PHASE_COARSE_EPOCHS}  "
+        f"mid={Config.PHASE_MID_EPOCHS}  joint={Config.JOINT_FIT_EPOCHS}  "
         f"norm_joint={Config.NORM_JOINT_EPOCHS}",
     )
     log_to_file(
         Config,
-        f"LR: phase={Config.PHASE_FOCUS_PHASE_PARAM_LR}  phase_refine={Config.PHASE_REFINE_PHASE_PARAM_LR}  detector={Config.DETECTOR_LR}  "
+        f"LR: phase={Config.PHASE_FOCUS_PHASE_PARAM_LR}  coarse/mid={Config.PHASE_COARSE_PARAM_LR}/{Config.PHASE_MID_PARAM_LR}  "
+        f"detector={Config.DETECTOR_LR}  "
         f"joint_ph={Config.JOINT_PHASE_PARAM_LR}/{Config.JOINT_DETECTOR_LR}  "
         f"norm_ph={Config.NORM_JOINT_PHASE_PARAM_LR}/{Config.NORM_JOINT_DETECTOR_LR}",
     )
@@ -370,7 +374,6 @@ def log_config():
     )
     log_to_file(
         Config,
-        f"Phase regularization: target_std={Config.PHASE_TARGET_STD_RAD} rad, "
-        f"tv={Config.PHASE_TV_WEIGHT}, high_freq={Config.PHASE_HIGH_FREQ_WEIGHT}, "
-        f"std={Config.PHASE_STD_WEIGHT}",
+        f"Circular phase regularization: target_variance={Config.PHASE_TARGET_CIRCULAR_VARIANCE}, "
+        f"tv={Config.PHASE_CIRCULAR_TV_WEIGHT}, high_freq={Config.PHASE_CIRCULAR_HIGH_FREQ_WEIGHT}",
     )

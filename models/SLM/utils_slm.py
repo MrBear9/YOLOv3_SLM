@@ -197,6 +197,12 @@ def build_stage_optimizer(config, student, detector, stage_name):
     elif stage_name == "phase_refine":
         base_lr = config.PHASE_REFINE_PHASE_PARAM_LR
         lr_mult_stage = "joint"
+    elif stage_name == "phase_coarse":
+        base_lr = config.PHASE_COARSE_PARAM_LR
+        lr_mult_stage = "joint"
+    elif stage_name == "phase_mid":
+        base_lr = config.PHASE_MID_PARAM_LR
+        lr_mult_stage = "joint"
     elif stage_name == "norm_joint":
         base_lr = config.NORM_JOINT_PHASE_PARAM_LR
         lr_mult_stage = "norm_joint"
@@ -220,7 +226,7 @@ def build_stage_optimizer(config, student, detector, stage_name):
             groups.append({"params": params, "lr": base_lr * mult,
                           "weight_decay": config.PHASE_WEIGHT_DECAY})
 
-    if stage_name not in {"phase_focus", "phase_refine"}:
+    if stage_name not in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"}:
         detector_params = [p for p in detector.parameters() if p.requires_grad]
         detector_lr = (config.NORM_JOINT_DETECTOR_LR if stage_name == "norm_joint"
                        else config.JOINT_DETECTOR_LR)
@@ -251,6 +257,32 @@ def set_trainable(module, trainable):
         param.requires_grad = trainable
 
 
+def set_pyramid_residual_stage(student, stage_name):
+    """Open only smooth residual scales while preserving the direct-SGD base."""
+    if stage_name not in {"phase_coarse", "phase_mid"}:
+        return
+    trainable_scales = int(
+        getattr(student.config, "PHASE_COARSE_NUM_SCALES", 2)
+        if stage_name == "phase_coarse"
+        else getattr(student.config, "PHASE_MID_NUM_SCALES", 3)
+    )
+    for _, slm in student.all_slm_layers():
+        if slm.direct_phase() is not None:
+            slm.direct_phase().requires_grad_(False)
+        field = slm.phase_field
+        if field is None:
+            continue
+        for index, param in enumerate(field.scale_params):
+            param.requires_grad_(index < trainable_scales)
+        # The Fourier MLP and block residuals add uncontrolled fine detail;
+        # keep them frozen for this fixed-pattern optical experiment.
+        for param in field.mlp_field.parameters():
+            param.requires_grad_(False)
+        if field.blocks is not None:
+            for param in field.blocks:
+                param.requires_grad_(False)
+
+
 def collect_slm_statistics(student):
     stats = {}
     if hasattr(student, "all_slm_layers"):
@@ -268,17 +300,24 @@ def collect_slm_statistics(student):
 def _collect_one_layer_stats(stats, slm, layer_name, config):
     raw = slm._raw_phase().detach().float()
     simulation = slm.simulation_phase().detach().float()
-    dx = raw[..., :, 1:] - raw[..., :, :-1]
-    dy = raw[..., 1:, :] - raw[..., :-1, :]
+    phase_complex = torch.polar(torch.ones_like(raw), raw)
+    dx = phase_complex[..., :, 1:] - phase_complex[..., :, :-1]
+    dy = phase_complex[..., 1:, :] - phase_complex[..., :-1, :]
     kernel = max(int(getattr(config, "PHASE_HIGH_FREQ_KERNEL", 5)), 1)
     if kernel % 2 == 0:
         kernel += 1
-    smooth = torch.nn.functional.avg_pool2d(raw, kernel, stride=1, padding=kernel // 2)
+    real_smooth = torch.nn.functional.avg_pool2d(phase_complex.real, kernel, stride=1, padding=kernel // 2)
+    imag_smooth = torch.nn.functional.avg_pool2d(phase_complex.imag, kernel, stride=1, padding=kernel // 2)
     stats[f"{layer_name}_raw_mean"] = float(raw.mean().item())
     stats[f"{layer_name}_raw_std"] = float(raw.std(unbiased=False).item())
     stats[f"{layer_name}_raw_range"] = float((raw.amax() - raw.amin()).item())
-    stats[f"{layer_name}_raw_tv"] = float((dx.abs().mean() + dy.abs().mean()).item())
-    stats[f"{layer_name}_raw_high_freq"] = float((raw - smooth).square().mean().sqrt().item())
+    stats[f"{layer_name}_circular_tv"] = float((dx.abs().mean() + dy.abs().mean()).item())
+    stats[f"{layer_name}_circular_high_freq"] = float(
+        ((phase_complex.real - real_smooth).square().mean() + (phase_complex.imag - imag_smooth).square().mean()).sqrt().item()
+    )
+    stats[f"{layer_name}_circular_variance"] = float(
+        (1.0 - phase_complex.mean(dim=(2, 3), keepdim=True).abs()).mean().item()
+    )
     stats[f"{layer_name}_simulation_min"] = float(simulation.min().item())
     stats[f"{layer_name}_simulation_max"] = float(simulation.max().item())
 

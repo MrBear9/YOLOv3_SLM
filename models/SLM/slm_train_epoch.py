@@ -108,7 +108,7 @@ def run_epoch(
 
     if use_ddp and train_sampler is not None:
         train_sampler.set_epoch(global_epoch)
-    phase_only_stage = stage_name in {"phase_focus", "phase_refine"}
+    phase_only_stage = stage_name in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"}
     student.train(stage_name != "detector_focus")
     detector.train(not phase_only_stage)
     epoch_total_t = torch.zeros((), device=device)
@@ -169,7 +169,7 @@ def run_epoch(
         total_loss.backward()
         _phase_grad_norms_accum.append(collect_phase_grad_norms(student_raw))
         phase_grad_norm = collect_phase_grad_norm(student_raw)
-        if stage_name in {"phase_refine", "joint_fit", "norm_joint"}:
+        if stage_name in {"phase_refine", "phase_coarse", "phase_mid", "joint_fit", "norm_joint"}:
             clipped_norm = clip_phase_grad_norm(student_raw, Config.PHASE_GRAD_CLIP_NORM)
             if clipped_norm is not None:
                 phase_grad_norm = min(clipped_norm, Config.PHASE_GRAD_CLIP_NORM)
@@ -306,11 +306,11 @@ def run_epoch(
             )
 
     phase_only_checkpoint_due = (
-        stage_name in {"phase_focus", "phase_refine"}
+        stage_name in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"}
         and Config.VIS_INTERVAL > 0
         and display_epoch % Config.VIS_INTERVAL == 0
     )
-    if is_main and (stage_name not in {"phase_focus", "phase_refine"} or phase_only_checkpoint_due):
+    if is_main and (stage_name not in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"} or phase_only_checkpoint_due):
         save_current_student_checkpoint(
             student_raw,
             Config.get_student_current_path(),
@@ -325,7 +325,7 @@ def run_epoch(
             phase_grad_norm=avg_phase_grad_norm,
             phase_update_norm=phase_update_norm,
             phase_update_rel=phase_update_rel,
-            mirror_path=Config.get_student_best_path() if stage_name in {"phase_focus", "phase_refine"} else None,
+            mirror_path=Config.get_student_best_path() if stage_name in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"} else None,
         )
 
     # Student best tracking
@@ -353,11 +353,11 @@ def run_epoch(
     # Detector best tracking
     detector_score_is_best = False
     detector_no_improve_delta = 0
-    detector_stages = {"detector_focus", "phase_refine", "joint_fit", "norm_joint"}
+    detector_stages = {"detector_focus", "phase_refine", "phase_coarse", "phase_mid", "joint_fit", "norm_joint"}
     if stage_name in detector_stages and val_metrics is not None and val_metrics["map50"] > best_map50 + Config.DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA:
         best_map50 = val_metrics["map50"]
         detector_score_is_best = True
-    elif val_metrics is not None and stage_name in {"detector_focus", "phase_refine", "joint_fit"}:
+    elif val_metrics is not None and stage_name in {"detector_focus", "phase_refine", "phase_coarse", "phase_mid", "joint_fit"}:
         detector_no_improve_delta = 1
     elif stage_name in detector_stages and val_metrics is None and avg_total < best_detector_loss:
         detector_score_is_best = True
