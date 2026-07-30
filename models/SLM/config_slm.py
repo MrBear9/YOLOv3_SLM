@@ -35,8 +35,8 @@ class ConfigSLM(OpticalConfig):
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
     # Fresh 20 cm student phase learning, then detector adaptation.
-    PHASE_FOCUS_EPOCHS = 245
-    DETECTOR_FOCUS_EPOCHS = 235
+    PHASE_FOCUS_EPOCHS = 145
+    DETECTOR_FOCUS_EPOCHS = 135
     PHASE_REFINE_EPOCHS = 0
     PHASE_COARSE_EPOCHS = 0
     PHASE_MID_EPOCHS = 0

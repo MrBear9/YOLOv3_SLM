@@ -368,12 +368,19 @@ def _render_confusion_matrix_image(confusion, class_names, title="Detection Conf
 
 
 def _render_normalized_confusion_matrix_image(confusion, class_names, title="Normalized Detection Confusion Matrix"):
-    """Render GT-row-normalized confusion percentages for quick class-error review."""
-    n = confusion.shape[0]
-    num_classes = n - 1
-    labels = [class_names.get(i, f"class_{i}") for i in range(num_classes)] + ["background"]
-    row_totals = confusion.sum(axis=1, keepdims=True)
-    percentages = np.divide(confusion * 100.0, row_totals, out=np.zeros_like(confusion), where=row_totals > 0)
+    """Render foreground-only GT-row-normalized confusion percentages."""
+    num_classes = confusion.shape[0] - 1
+    # Exclude the background row/column from both the display and normalization.
+    foreground_confusion = confusion[:num_classes, :num_classes]
+    labels = [class_names.get(i, f"class_{i}") for i in range(num_classes)]
+    row_totals = foreground_confusion.sum(axis=1, keepdims=True)
+    percentages = np.divide(
+        foreground_confusion * 100.0,
+        row_totals,
+        out=np.zeros_like(foreground_confusion),
+        where=row_totals > 0,
+    )
+    n = num_classes
 
     fig, ax = plt.subplots(figsize=(max(8, n * 1.0), max(6, n * 0.8)))
     im = ax.imshow(percentages, interpolation="nearest", cmap="Blues", vmin=0.0, vmax=100.0)

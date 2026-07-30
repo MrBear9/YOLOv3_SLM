@@ -36,7 +36,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/Tv2_light"
+    TEACHER_OUTPUT_DIR = r"output/Tv2_light_20cm"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
