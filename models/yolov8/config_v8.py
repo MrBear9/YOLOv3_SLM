@@ -79,7 +79,7 @@ class ConfigYOLOv8Anchor:
     TEACHER_V2_NUM_SLM_LAYERS = 2
     TEACHER_V2_WAVELENGTH = 532e-9
     TEACHER_V2_PIXEL_SIZE = 6.4e-6
-    TEACHER_V2_PROP_DISTANCES = (0.10, 0.10)
+    TEACHER_V2_PROP_DISTANCES = (0.20, 0.20)
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v3" | "v3"  (residual + gate)

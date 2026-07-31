@@ -16,14 +16,14 @@ class ConfigSLM(OpticalConfig):
     CLASS_NAMES = None
     NUM_CLASSES = None
     # Fresh two-SLM 20 cm propagation ablation. Keep prior experiments intact.
-    OUTPUT_DIR = r"output/SLM_Tv2_light_20cm_scratch"
+    OUTPUT_DIR = r"output/SLM_Tv2_light_20cm"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_light/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_light_20cm/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -130,7 +130,7 @@ class ConfigSLM(OpticalConfig):
     TEACHER_V2_NUM_SLM_LAYERS = 2
     TEACHER_V2_WAVELENGTH = 532e-9
     TEACHER_V2_PIXEL_SIZE = 6.4e-6
-    TEACHER_V2_PROP_DISTANCES = (0.10, 0.10)
+    TEACHER_V2_PROP_DISTANCES = (0.20, 0.20)
 
     # -------- TEACHER_ARCH = "convteacher_v3" --------
     TEACHER_V3_BASE_CHANNELS = 24
