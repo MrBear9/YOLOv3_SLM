@@ -349,6 +349,14 @@ def log_config():
         f"quantization={Config.SIMULATE_PHASE_QUANTIZATION}, inverted_gray={Config.SLM_GRAY_INVERTED}, "
         f"lut={Config.SLM_GRAY_TO_PHASE_LUT or 'ideal_linear'}",
     )
+    student_distances = tuple(
+        float(Config.prop_distance(index)) for index in range(1, num_layers + 1)
+    )
+    teacher_distances = tuple(getattr(Config, "TEACHER_V2_PROP_DISTANCES", ()))
+    log_to_file(
+        Config,
+        f"Propagation: teacher_v2={teacher_distances} m, student={student_distances} m",
+    )
     log_to_file(
         Config,
         f"Stages: phase_focus={Config.PHASE_FOCUS_EPOCHS}  detector_focus={Config.DETECTOR_FOCUS_EPOCHS}  "

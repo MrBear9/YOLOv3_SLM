@@ -47,6 +47,7 @@ def train():
     best_map50 = resume_map50
     best_student_map50 = resume_map50
     global_epoch = 0
+    best_paired_checkpoint_path = None
 
     if is_main and resume_map50 >= 0.0:
         _seed_baseline_checkpoint(ctx, resume_map50)
@@ -81,6 +82,20 @@ def train():
     for stage_name, stage_epochs in stage_schedule():
         if stage_epochs <= 0:
             continue
+        if (
+            stage_name in {"phase_refine", "phase_coarse", "phase_mid", "joint_fit", "norm_joint"}
+            and best_paired_checkpoint_path is not None
+            and Config.RESTORE_BEST_PAIRED_BEFORE_REFINEMENT
+        ):
+            from models.SLM.utils_slm import load_student_detector_checkpoint
+            restored = load_student_detector_checkpoint(
+                ctx["student_raw"], ctx["detector_raw"], best_paired_checkpoint_path, ctx["device"]
+            )
+            log_to_file(
+                Config,
+                f"Restored validation-best paired checkpoint before {stage_name}: {restored}",
+            )
+            best_paired_checkpoint_path = None
         stage_norm_mode = configure_student_norm_for_stage(stage_name, deployment_norm_mode)
         stage_weights = Config.get_stage_loss_weights(stage_name)
         ctx["student_raw"].enable_norm = bool(Config.ENABLE_STUDENT_NORM and stage_norm_mode != "none")
@@ -114,7 +129,7 @@ def train():
         detector_no_improve = 0
 
         for _ in range(stage_epochs):
-            best_map50, best_student_map50, best_student_loss, best_detector_loss, no_improve_delta = run_epoch(
+            best_map50, best_student_map50, best_student_loss, best_detector_loss, no_improve_delta, new_best_path = run_epoch(
                 global_epoch,
                 stage_name,
                 stage_weights,
@@ -125,6 +140,8 @@ def train():
                 best_student_loss,
                 best_detector_loss,
             )
+            if new_best_path is not None:
+                best_paired_checkpoint_path = new_best_path
             global_epoch += 1
             detector_no_improve += no_improve_delta
             should_stop_stage = (

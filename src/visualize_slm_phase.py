@@ -89,7 +89,7 @@ def format_stats(phase):
 
 def save_colormap(phase, name, output_dir):
     fig, axis = plt.subplots(figsize=(7.0, 6.0), constrained_layout=True)
-    image = axis.imshow(phase, cmap="twilight", vmin=0.0, vmax=TWO_PI, interpolation="nearest")
+    image = axis.imshow(phase, cmap="viridis", vmin=0.0, vmax=TWO_PI, interpolation="nearest")
     axis.set_title(f"{name} phase map\n{format_stats(phase)}", fontweight="bold")
     axis.set_xlabel("x (pixel)")
     axis.set_ylabel("y (pixel)")
@@ -110,19 +110,36 @@ def save_spatial_profiles(phase, name, output_dir, profile_index):
     if not 0 <= row < height or not 0 <= col < width:
         raise ValueError(f"--profile-index must be in [0, {min(height, width) - 1}].")
 
-    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.0), constrained_layout=True, sharey=True)
-    axes[0].plot(np.arange(width), phase[row, :], color="#1f77b4", linewidth=1.1)
-    axes[0].set_title(f"Horizontal profile (y = {row})")
-    axes[0].set_xlabel("x (pixel)")
-    axes[0].set_ylabel("phase (rad)")
-    axes[1].plot(np.arange(height), phase[:, col], color="#d62728", linewidth=1.1)
-    axes[1].set_title(f"Vertical profile (x = {col})")
-    axes[1].set_xlabel("y (pixel)")
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "DejaVu Serif"],
+        "font.size": 10,
+        "axes.labelsize": 11,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "mathtext.fontset": "stix",
+    })
+
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.0), constrained_layout=True, sharey=True)
+
+    axes[0].plot(np.arange(width), phase[row, :], color="#2166ac", linewidth=1.5)
+    axes[0].axhline(y=phase[row, col], color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    axes[0].set_xlabel("x (pixels)")
+    axes[0].set_ylabel("Phase (rad)")
+    axes[0].text(-0.20, 1.04, "(a)", transform=axes[0].transAxes, fontweight="bold", fontsize=11)
+
+    axes[1].plot(np.arange(height), phase[:, col], color="#b2182b", linewidth=1.5)
+    axes[1].axhline(y=phase[row, col], color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    axes[1].set_xlabel("y (pixels)")
+    axes[1].text(-0.20, 1.04, "(b)", transform=axes[1].transAxes, fontweight="bold", fontsize=11)
+
     for axis in axes:
         axis.set_ylim(0.0, TWO_PI)
-        axis.set_yticks([0.0, math.pi, TWO_PI], ["0", "pi", "2pi"])
-        axis.grid(alpha=0.25, linewidth=0.6)
-    fig.suptitle(f"{name} spatial phase profiles ({format_stats(phase)})", fontweight="bold")
+        axis.set_yticks([0.0, math.pi, TWO_PI])
+        axis.set_yticklabels(["0", "$\\pi$", "$2\\pi$"])
+        axis.tick_params(direction="in", top=True, right=True)
+        axis.grid(alpha=0.3, linewidth=0.5, linestyle="--")
+
     path = output_dir / f"{name}_phase_profiles.png"
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)

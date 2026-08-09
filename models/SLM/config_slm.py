@@ -34,10 +34,13 @@ class ConfigSLM(OpticalConfig):
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
-    # Fresh 20 cm student phase learning, then detector adaptation.
+    # Learn the optical mapping first, then fit a detector against that fixed
+    # mapping.  Later optical refinement is deliberately opt-in: it restores
+    # the validation-best paired checkpoint and only opens SLM2's smooth
+    # pyramid residual.
     PHASE_FOCUS_EPOCHS = 145
     DETECTOR_FOCUS_EPOCHS = 135
-    PHASE_REFINE_EPOCHS = 0
+    PHASE_REFINE_EPOCHS = 20
     PHASE_COARSE_EPOCHS = 0
     PHASE_MID_EPOCHS = 0
     JOINT_FIT_EPOCHS = 0
@@ -66,7 +69,17 @@ class ConfigSLM(OpticalConfig):
     # -------- Phase parameterisation --------
     # Keep the direct-SGD base plus zero-initialized multi-scale residual.
     SLM_PHASE_PARAM_MODE = "direct_sgd_pyramid"
-    SLM_DIRECT_SGD_PYRAMID_SCALE = 0.50
+    SLM_DIRECT_SGD_PYRAMID_SCALE = 1.0
+    # SLM2 is a post-propagation shaper.  Its direct full-resolution phase is
+    # kept fixed in protected refinement; only its low-frequency residual may
+    # adapt after detector fitting.
+    SLM2_REFINEMENT_LOW_FREQ_SCALES = 2
+    SLM2_REFINEMENT_LR_MULT = 0.20
+
+    # Before any optical refinement stage, restore the student/detector pair
+    # selected by validation mAP during detector_focus.  This prevents a later
+    # stage from starting from the final (often overfit) detector epoch.
+    RESTORE_BEST_PAIRED_BEFORE_REFINEMENT = True
 
     # Per-layer block/freq overrides: see OpticalConfig accessors
     #   phase_block_grid(layer_idx), phase_mlp_num_freqs(layer_idx), …
@@ -85,13 +98,13 @@ class ConfigSLM(OpticalConfig):
     # Options: "max", "percentile", "mean", "none".
     STUDENT_NORM_MODE = "percentile"
     STUDENT_NORM_PERCENTILE = 0.990
-    STUDENT_OUTPUT_CLAMP_MAX = 2.5
+    STUDENT_OUTPUT_CLAMP_MAX = 3.5
     STUDENT_OUTPUT_BLUR_KERNEL = 1
 
     # -------- SLM phase init --------
     # Start both student SLM phase maps from a fresh continuous random state.
     SLM_INIT_MODE = "random"
-    SLM_DIRECT_SGD_INIT_RANGE_RAD = 0.5
+    SLM_DIRECT_SGD_INIT_RANGE_RAD = 1.5
     SLM_INIT_NOISE_STD = 0.02
     # Retained for future checkpoint runs; ignored while SLM_INIT_MODE=random.
     SLM_INIT_CHECKPOINT = r"output/SLM_Tv2_light_phase_refine/detector_best.pth"
@@ -205,7 +218,7 @@ class ConfigSLM(OpticalConfig):
     DETECTION_LOSS_WEIGHT_PHASE_REFINE = 1.00
     RESPONSE_LOSS_WEIGHT_PHASE_REFINE = 0.00
     PRIVACY_LOSS_WEIGHT_PHASE_REFINE = 0.00
-    PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE = 0.05
+    PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE = 0.01
 
     FEATURE_LOSS_WEIGHT_PHASE_COARSE = 0.05
     DETECTION_LOSS_WEIGHT_PHASE_COARSE = 1.00
@@ -231,17 +244,17 @@ class ConfigSLM(OpticalConfig):
     # All phase constraints are evaluated on exp(j * phase), so 0 and 2pi
     # remain physically identical. Circular variance is a bounded modulation
     # measure; TV/high-pass suppress non-deployable pixel noise.
-    PHASE_TARGET_CIRCULAR_VARIANCE = 0.18
-    PHASE_CIRCULAR_TV_WEIGHT = 0.08
-    PHASE_CIRCULAR_HIGH_FREQ_WEIGHT = 0.04
+    PHASE_TARGET_CIRCULAR_VARIANCE = 0.25
+    PHASE_CIRCULAR_TV_WEIGHT = 0.04
+    PHASE_CIRCULAR_HIGH_FREQ_WEIGHT = 0.02
     PHASE_CIRCULAR_VARIANCE_WEIGHT = 1.00
     PHASE_HIGH_FREQ_KERNEL = 5
 
     # =========================================================================
     # Optimizer & LR schedule
     # =========================================================================
-    PHASE_FOCUS_PHASE_PARAM_LR = 3e-3
-    PHASE_REFINE_PHASE_PARAM_LR = 1e-3
+    PHASE_FOCUS_PHASE_PARAM_LR = 5e-3
+    PHASE_REFINE_PHASE_PARAM_LR = 1e-4
     PHASE_COARSE_PARAM_LR = 1e-3
     PHASE_MID_PARAM_LR = 5e-4
     DETECTOR_LR = 3e-4
@@ -256,10 +269,10 @@ class ConfigSLM(OpticalConfig):
     LR_SCHEDULER = "CosineAnnealingLR"
     ETA_MIN = 1e-5
 
-    ENABLE_DETECTOR_FOCUS_EARLY_STOP = True
+    ENABLE_DETECTOR_FOCUS_EARLY_STOP = False
     DETECTOR_FOCUS_EARLY_STOP_PATIENCE = 20
     # SLM ablations often improve by <0.002 mAP; retain real improvements.
-    DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA = 1e-4
+    DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA = 1e-5
 
     # =========================================================================
     # Detection post-process
@@ -275,7 +288,7 @@ class ConfigSLM(OpticalConfig):
     # =========================================================================
     # Validation
     # =========================================================================
-    VAL_INTERVAL = 1
+    VAL_INTERVAL = 5
     METRIC_IOU_THRESHOLD = 0.5
 
     # =========================================================================

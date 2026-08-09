@@ -325,7 +325,7 @@ def run_epoch(
             phase_grad_norm=avg_phase_grad_norm,
             phase_update_norm=phase_update_norm,
             phase_update_rel=phase_update_rel,
-            mirror_path=Config.get_student_best_path() if stage_name in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"} else None,
+            mirror_path=None,
         )
 
     # Student best tracking
@@ -359,8 +359,14 @@ def run_epoch(
         detector_score_is_best = True
     elif val_metrics is not None and stage_name in {"detector_focus", "phase_refine", "phase_coarse", "phase_mid", "joint_fit"}:
         detector_no_improve_delta = 1
-    elif stage_name in detector_stages and val_metrics is None and avg_total < best_detector_loss:
+    elif (
+        stage_name in detector_stages
+        and val_loader is None
+        and val_metrics is None
+        and avg_total < best_detector_loss
+    ):
         detector_score_is_best = True
+    best_checkpoint_path = None
     if stage_name in detector_stages and detector_score_is_best:
         best_detector_loss = avg_total
         if is_main:
@@ -410,6 +416,7 @@ def run_epoch(
                     "slm_quality_passed": bool(slm_ok),
                 },
             )
+            best_checkpoint_path = Config.get_detector_best_path()
         best_student_map50 = max(best_student_map50, best_map50)
 
     # Visualization
@@ -442,4 +449,4 @@ def run_epoch(
     if use_ddp:
         torch.distributed.barrier()
 
-    return best_map50, best_student_map50, best_student_loss, best_detector_loss, detector_no_improve_delta
+    return best_map50, best_student_map50, best_student_loss, best_detector_loss, detector_no_improve_delta, best_checkpoint_path

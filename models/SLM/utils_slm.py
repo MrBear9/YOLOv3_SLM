@@ -223,6 +223,8 @@ def build_stage_optimizer(config, student, detector, stage_name):
             # Extract layer index from e.g. "slm2" → 2
             layer_idx = int(re.match(r"slm(\d+)", key).group(1))
             mult = _resolve_lr_mult(config, layer_idx, lr_mult_stage)
+            if stage_name == "phase_refine" and layer_idx == 2:
+                mult *= float(getattr(config, "SLM2_REFINEMENT_LR_MULT", 1.0))
             groups.append({"params": params, "lr": base_lr * mult,
                           "weight_decay": config.PHASE_WEIGHT_DECAY})
 
@@ -258,22 +260,24 @@ def set_trainable(module, trainable):
 
 
 def set_pyramid_residual_stage(student, stage_name):
-    """Open only smooth residual scales while preserving the direct-SGD base."""
-    if stage_name not in {"phase_coarse", "phase_mid"}:
+    """Restrict late optical refinement to SLM2's smooth residual scales."""
+    if stage_name not in {"phase_refine", "phase_coarse", "phase_mid"}:
         return
-    trainable_scales = int(
-        getattr(student.config, "PHASE_COARSE_NUM_SCALES", 2)
-        if stage_name == "phase_coarse"
-        else getattr(student.config, "PHASE_MID_NUM_SCALES", 3)
-    )
-    for _, slm in student.all_slm_layers():
+    if stage_name == "phase_refine":
+        trainable_scales = int(getattr(student.config, "SLM2_REFINEMENT_LOW_FREQ_SCALES", 2))
+    elif stage_name == "phase_coarse":
+        trainable_scales = int(getattr(student.config, "PHASE_COARSE_NUM_SCALES", 2))
+    else:
+        trainable_scales = int(getattr(student.config, "PHASE_MID_NUM_SCALES", 3))
+    for layer_name, slm in student.all_slm_layers():
+        allow_residual = layer_name == "slm2"
         if slm.direct_phase() is not None:
             slm.direct_phase().requires_grad_(False)
         field = slm.phase_field
         if field is None:
             continue
         for index, param in enumerate(field.scale_params):
-            param.requires_grad_(index < trainable_scales)
+            param.requires_grad_(allow_residual and index < trainable_scales)
         # The Fourier MLP and block residuals add uncontrolled fine detail;
         # keep them frozen for this fixed-pattern optical experiment.
         for param in field.mlp_field.parameters():
