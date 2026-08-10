@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 
 from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.dataset_slm import SLMFeatureDataset, slm_collate_fn
-from models.SLM.losses_slm import CompositeOpticalFeatureLoss, detection_response_loss, input_privacy_loss
+from models.SLM.losses_slm import CompositeOpticalFeatureLoss, detection_response_loss
 from models.SLM.optical_layers import OpticalStudent
 from models.SLM.slm_utils import configure_backends, log_config
 from models.SLM.utils_slm import (
@@ -168,13 +168,11 @@ def setup_training(is_main, use_ddp):
         "train_feature": [],
         "train_detection": [],
         "train_response": [],
-        "train_privacy": [],
         "train_phase_regularization": [],
         "val_total": [],
         "val_feature": [],
         "val_detection": [],
         "val_response": [],
-        "val_privacy": [],
         "val_phase_regularization": [],
         "precision": [],
         "recall": [],

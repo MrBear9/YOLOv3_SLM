@@ -15,52 +15,6 @@ def _interpolate_preserve_layout(x, *args, **kwargs):
     return out.contiguous()
 
 
-def _max_normalize(x, eps):
-    return x / (x.amax(dim=(2, 3), keepdim=True) + eps)
-
-
-def _pearson_abs(a, b, eps):
-    batch_size = a.shape[0]
-    a_flat = a.reshape(batch_size, -1)
-    b_flat = b.reshape(batch_size, -1)
-    a_centered = a_flat - a_flat.mean(dim=1, keepdim=True)
-    b_centered = b_flat - b_flat.mean(dim=1, keepdim=True)
-    a_std = a_centered.std(dim=1, keepdim=True, unbiased=False)
-    b_std = b_centered.std(dim=1, keepdim=True, unbiased=False)
-    corr = (a_centered * b_centered).mean(dim=1, keepdim=True) / (a_std * b_std + eps)
-    return corr.abs().mean()
-
-
-def _ssim_similarity(a, b, eps):
-    avg_pool = F.avg_pool2d
-    c1 = 0.01 ** 2
-    c2 = 0.03 ** 2
-    mu_a = avg_pool(a, 3, 1, 1)
-    mu_b = avg_pool(b, 3, 1, 1)
-    sigma_a = avg_pool(a * a, 3, 1, 1) - mu_a * mu_a
-    sigma_b = avg_pool(b * b, 3, 1, 1) - mu_b * mu_b
-    sigma_ab = avg_pool(a * b, 3, 1, 1) - mu_a * mu_b
-    ssim_map = ((2 * mu_a * mu_b + c1) * (2 * sigma_ab + c2)) / (
-        (mu_a * mu_a + mu_b * mu_b + c1) * (sigma_a + sigma_b + c2) + eps
-    )
-    return torch.clamp(ssim_map.mean(), min=0.0, max=1.0)
-
-
-def input_privacy_loss(config, student_feature, input_gray):
-    student_view = _max_normalize(student_feature.float(), config.OPTICAL_NORM_EPS)
-    gray_view = _max_normalize(input_gray.float().clamp(min=0), config.OPTICAL_NORM_EPS)
-    corr_abs = _pearson_abs(student_view, gray_view, config.OPTICAL_FIELD_EPS)
-    ssim_sim = _ssim_similarity(student_view, gray_view, config.OPTICAL_FIELD_EPS)
-    corr_target = float(getattr(config, "PRIVACY_CORR_TARGET", 0.15))
-    ssim_target = float(getattr(config, "PRIVACY_SSIM_TARGET", 0.20))
-    raw = F.relu(corr_abs - corr_target) + F.relu(ssim_sim - ssim_target)
-    return raw, {
-        "privacy": float(raw.detach().item()),
-        "privacy_corr": float(corr_abs.detach().item()),
-        "privacy_ssim": float(ssim_sim.detach().item()),
-    }
-
-
 class CompositeOpticalFeatureLoss(nn.Module):
     def __init__(self, config):
         super().__init__()

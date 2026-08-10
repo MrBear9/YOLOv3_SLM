@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.evaluation_slm import evaluate_slm_detector, save_slm_detection_visualization
-from models.SLM.losses_slm import detection_response_loss, input_privacy_loss, phase_regularization_loss
+from models.SLM.losses_slm import detection_response_loss, phase_regularization_loss
 from models.SLM.slm_utils import (
     collect_phase_grad_norm,
     collect_phase_grad_norms,
@@ -115,7 +115,6 @@ def run_epoch(
     epoch_feature_t = torch.zeros((), device=device)
     epoch_detection_t = torch.zeros((), device=device)
     epoch_response_t = torch.zeros((), device=device)
-    epoch_privacy_t = torch.zeros((), device=device)
     epoch_phase_regularization_t = torch.zeros((), device=device)
     phase_snapshot = collect_phase_snapshot(student_raw)
     epoch_phase_grad_norm = 0.0
@@ -144,10 +143,6 @@ def run_epoch(
             response_loss, _ = detection_response_loss(Config, reference_detector, student_feature, teacher_feature.detach())
         else:
             response_loss = zero
-        if stage_weights["privacy"] > 0:
-            privacy_loss, _ = input_privacy_loss(Config, student_feature, gray)
-        else:
-            privacy_loss = zero
         if stage_weights["phase_regularization"] > 0:
             phase_regularization_loss_value, _ = phase_regularization_loss(Config, student_raw)
         else:
@@ -162,7 +157,6 @@ def run_epoch(
             feature_loss * stage_weights["feature"]
             + detection_loss * stage_weights["detection"]
             + response_loss * stage_weights["response"]
-            + privacy_loss * stage_weights["privacy"]
             + phase_regularization_loss_value * stage_weights["phase_regularization"]
         )
 
@@ -179,7 +173,6 @@ def run_epoch(
         epoch_feature_t += feature_loss.detach()
         epoch_detection_t += detection_loss.detach()
         epoch_response_t += response_loss.detach()
-        epoch_privacy_t += privacy_loss.detach()
         epoch_phase_regularization_t += phase_regularization_loss_value.detach()
 
     if scheduler is not None:
@@ -190,7 +183,6 @@ def run_epoch(
     avg_feature = float(epoch_feature_t.item()) / num_batches
     avg_detection = float(epoch_detection_t.item()) / num_batches
     avg_response = float(epoch_response_t.item()) / num_batches
-    avg_privacy = float(epoch_privacy_t.item()) / num_batches
     avg_phase_regularization = float(epoch_phase_regularization_t.item()) / num_batches
     avg_phase_grad_norm = epoch_phase_grad_norm / num_batches
 
@@ -216,7 +208,6 @@ def run_epoch(
     history["train_feature"].append(avg_feature)
     history["train_detection"].append(avg_detection)
     history["train_response"].append(avg_response)
-    history["train_privacy"].append(avg_privacy)
     history["train_phase_regularization"].append(avg_phase_regularization)
     display_epoch = global_epoch + 1
     slm_stats = collect_slm_statistics(student_raw)
@@ -244,7 +235,6 @@ def run_epoch(
         history["val_feature"].append(val_losses["feature"])
         history["val_detection"].append(val_losses["detection"])
         history["val_response"].append(val_losses["response"])
-        history["val_privacy"].append(val_losses["privacy"])
         history["val_phase_regularization"].append(val_losses["phase_regularization"])
         history["precision"].append(val_metrics["precision"])
         history["recall"].append(val_metrics["recall"])
@@ -254,7 +244,7 @@ def run_epoch(
         history["recall_op"].append(val_metrics["recall_op"])
         history["f1_op"].append(val_metrics["f1_op"])
     else:
-        for key in ("val_total", "val_feature", "val_detection", "val_response", "val_privacy", "val_phase_regularization",
+        for key in ("val_total", "val_feature", "val_detection", "val_response", "val_phase_regularization",
                      "precision", "recall", "f1", "map50",
                      "precision_op", "recall_op", "f1_op"):
             history[key].append(np.nan)
@@ -277,7 +267,6 @@ def run_epoch(
                 "feature": avg_feature,
                 "detection": avg_detection,
                 "response": avg_response,
-                "privacy": avg_privacy,
                 "phase_regularization": avg_phase_regularization,
             },
             val_losses=val_losses,

@@ -1,7 +1,6 @@
 ﻿import os
 from datetime import datetime
 
-import numpy as np
 import torch
 
 from models.SLM.config_optical import OpticalConfig
@@ -52,76 +51,18 @@ class ConfigSLM(OpticalConfig):
         + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
     )
 
-    # =========================================================================
-    # SLM optical parameters
-    # =========================================================================
-    WAVELENGTH = 532e-9
-    PIXEL_SIZE = 6.4e-6
-    # Options: "phase", "amp_phase".
-    SLM_MODE = "phase"
-    # Optical/teacher canvas as (height, width). Example: (1080, 1920).
-    RESOLUTION = (640, 640)
-    OPTICAL_FIELD_EPS = 1e-8
-    OPTICAL_NORM_EPS = 1e-6
-    # DMD gray code is the incident intensity; must match teacher training.
-    INPUT_INTENSITY_MODE = "srgb"
-
-    # -------- Phase parameterisation --------
-    # Keep the direct-SGD base plus zero-initialized multi-scale residual.
-    SLM_PHASE_PARAM_MODE = "direct_sgd_pyramid"
-    SLM_DIRECT_SGD_PYRAMID_SCALE = 1.0
-    # SLM2 is a post-propagation shaper.  Its direct full-resolution phase is
-    # kept fixed in protected refinement; only its low-frequency residual may
-    # adapt after detector fitting.
-    SLM2_REFINEMENT_LOW_FREQ_SCALES = 2
-    SLM2_REFINEMENT_LR_MULT = 0.20
-
-    # Before any optical refinement stage, restore the student/detector pair
-    # selected by validation mAP during detector_focus.  This prevents a later
-    # stage from starting from the final (often overfit) detector epoch.
-    RESTORE_BEST_PAIRED_BEFORE_REFINEMENT = True
-
     # Per-layer block/freq overrides: see OpticalConfig accessors
     #   phase_block_grid(layer_idx), phase_mlp_num_freqs(layer_idx), …
     # Per-layer trainable flag and LR multipliers: see OpticalConfig accessors
     #   is_trainable(layer_idx), layer_lr_mult(layer_idx, stage)
 
-    # -------- Plan D: multi-head virtual SLM (training-time capacity boost) --------
-    SLM_MULTI_HEAD_ENABLED = False
-    SLM_MULTI_HEAD_NUM_HEADS = 2
-    SLM_MULTI_HEAD_FUSION = "mean" # "learned_gate"
+    # Late refinement is a training-policy setting, not an optical constant.
+    SLM2_REFINEMENT_LOW_FREQ_SCALES = 2
+    SLM2_REFINEMENT_LR_MULT = 0.20
+    RESTORE_BEST_PAIRED_BEFORE_REFINEMENT = True
 
-    # -------- Student normalization --------
-    ENABLE_STUDENT_NORM = True
-    # Options: "joint_and_norm", "norm_joint_only", "always", "none".
-    STUDENT_NORM_SCHEDULE = "norm_joint_only"
-    # Options: "max", "percentile", "mean", "none".
-    STUDENT_NORM_MODE = "percentile"
-    STUDENT_NORM_PERCENTILE = 0.990
-    STUDENT_OUTPUT_CLAMP_MAX = 3.5
-    STUDENT_OUTPUT_BLUR_KERNEL = 1
-
-    # -------- SLM phase init --------
-    # Start both student SLM phase maps from a fresh continuous random state.
-    SLM_INIT_MODE = "random"
-    SLM_DIRECT_SGD_INIT_RANGE_RAD = 1.5
-    SLM_INIT_NOISE_STD = 0.02
-    # Retained for future checkpoint runs; ignored while SLM_INIT_MODE=random.
-    SLM_INIT_CHECKPOINT = r"output/SLM_Tv2_light_phase_refine/detector_best.pth"
     # Per-layer vortex charge and radial curvature: see OpticalConfig.vortex_init.
     # Vortex is always one global phase singularity; it is never tiled.
-
-    # -------- SLM drive calibration --------
-    SLM_PHASE_LEVELS = 256
-    # Hardware calibration is applied only when exporting a displayed phase map.
-    # Direct-SGD optimizes exp(1j * raw_phase) continuously in simulation.
-    SIMULATE_PHASE_QUANTIZATION = False
-    SLM_GRAY_INVERTED = True
-    SLM_EXPORT_PHASE_OFFSET_RAD = float(np.pi)
-    # Optional .npy/.csv/.txt measured gray-to-phase curve in radians.
-    # A one-column file is sampled uniformly over gray codes; two columns are
-    # interpreted as (gray_code, measured_phase_radians).
-    SLM_GRAY_TO_PHASE_LUT = r""
 
     # =========================================================================
     # TEACHER_ARCH  (must match teacher-training checkpoint)
@@ -197,27 +138,19 @@ class ConfigSLM(OpticalConfig):
     # Options: "mean_std", "minmax"/"min_max", "none".
     FEATURE_DOMAIN_ALIGN_MODE = "minmax"
 
-    # -------- Privacy / optical obfuscation loss --------
-    PRIVACY_CORR_TARGET = 0.15
-    PRIVACY_SSIM_TARGET = 0.20
-
     # =========================================================================
     # Stage loss weights
     # =========================================================================
     FEATURE_LOSS_WEIGHT_PHASE_FOCUS = 1.1
     DETECTION_LOSS_WEIGHT_PHASE_FOCUS = 0.0
     RESPONSE_LOSS_WEIGHT_PHASE_FOCUS = 0.0
-    PRIVACY_LOSS_WEIGHT_PHASE_FOCUS = 0.0
-
     FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
     DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS = 1.0
     RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
-    PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
 
     FEATURE_LOSS_WEIGHT_PHASE_REFINE = 0.05
     DETECTION_LOSS_WEIGHT_PHASE_REFINE = 1.00
     RESPONSE_LOSS_WEIGHT_PHASE_REFINE = 0.00
-    PRIVACY_LOSS_WEIGHT_PHASE_REFINE = 0.00
     PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE = 0.01
 
     FEATURE_LOSS_WEIGHT_PHASE_COARSE = 0.05
@@ -232,13 +165,11 @@ class ConfigSLM(OpticalConfig):
     # Per-image max-normalized response matching did not improve validation
     # mAP, so it remains disabled for this route.
     RESPONSE_LOSS_WEIGHT_JOINT = 0.00
-    PRIVACY_LOSS_WEIGHT_JOINT = 0.00
     PHASE_REGULARIZATION_WEIGHT_JOINT = 0.03
 
     FEATURE_LOSS_WEIGHT_NORM_JOINT = 0.20
     DETECTION_LOSS_WEIGHT_NORM_JOINT = 1.00
     RESPONSE_LOSS_WEIGHT_NORM_JOINT = 0.00
-    PRIVACY_LOSS_WEIGHT_NORM_JOINT = 0.00
     PHASE_REGULARIZATION_WEIGHT_NORM_JOINT = 0.03
 
     # All phase constraints are evaluated on exp(j * phase), so 0 and 2pi
@@ -370,7 +301,6 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_PHASE_FOCUS,
                 "detection": cls.DETECTION_LOSS_WEIGHT_PHASE_FOCUS,
                 "response": cls.RESPONSE_LOSS_WEIGHT_PHASE_FOCUS,
-                "privacy": cls.PRIVACY_LOSS_WEIGHT_PHASE_FOCUS,
                 "phase_regularization": 0.0,
             }
         if stage_name == "phase_refine":
@@ -378,7 +308,6 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_PHASE_REFINE,
                 "detection": cls.DETECTION_LOSS_WEIGHT_PHASE_REFINE,
                 "response": cls.RESPONSE_LOSS_WEIGHT_PHASE_REFINE,
-                "privacy": cls.PRIVACY_LOSS_WEIGHT_PHASE_REFINE,
                 "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE,
             }
         if stage_name in {"phase_coarse", "phase_mid"}:
@@ -387,7 +316,6 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_PHASE_COARSE if is_coarse else cls.FEATURE_LOSS_WEIGHT_PHASE_MID,
                 "detection": cls.DETECTION_LOSS_WEIGHT_PHASE_COARSE if is_coarse else cls.DETECTION_LOSS_WEIGHT_PHASE_MID,
                 "response": 0.0,
-                "privacy": 0.0,
                 "phase_regularization": (
                     cls.PHASE_REGULARIZATION_WEIGHT_PHASE_COARSE if is_coarse
                     else cls.PHASE_REGULARIZATION_WEIGHT_PHASE_MID
@@ -398,7 +326,6 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS,
                 "detection": cls.DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS,
                 "response": cls.RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS,
-                "privacy": cls.PRIVACY_LOSS_WEIGHT_DETECTOR_FOCUS,
                 "phase_regularization": 0.0,
             }
         if stage_name == "norm_joint":
@@ -406,14 +333,12 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_NORM_JOINT,
                 "detection": cls.DETECTION_LOSS_WEIGHT_NORM_JOINT,
                 "response": cls.RESPONSE_LOSS_WEIGHT_NORM_JOINT,
-                "privacy": cls.PRIVACY_LOSS_WEIGHT_NORM_JOINT,
                 "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_NORM_JOINT,
             }
         return {
             "feature": cls.FEATURE_LOSS_WEIGHT_JOINT,
             "detection": cls.DETECTION_LOSS_WEIGHT_JOINT,
             "response": cls.RESPONSE_LOSS_WEIGHT_JOINT,
-            "privacy": cls.PRIVACY_LOSS_WEIGHT_JOINT,
             "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_JOINT,
         }
 

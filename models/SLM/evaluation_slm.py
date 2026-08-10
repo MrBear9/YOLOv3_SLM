@@ -8,7 +8,7 @@ import torch
 from tqdm import tqdm
 
 from models.geometry import bbox_iou_xywh
-from models.SLM.losses_slm import detection_response_loss, input_privacy_loss, phase_regularization_loss
+from models.SLM.losses_slm import detection_response_loss, phase_regularization_loss
 from models.runtime import unwrap_module
 from models.teacher_guidance import enhance_feature_for_display
 from models.yolov8.feature_adapter import prepare_slm_detector_feature
@@ -45,7 +45,7 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
 
     metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
-    totals = {key: 0.0 for key in ("total", "feature", "detection", "response", "privacy", "phase_regularization", "box", "obj", "noobj", "cls", "dfl")}
+    totals = {key: 0.0 for key in ("total", "feature", "detection", "response", "phase_regularization", "box", "obj", "noobj", "cls", "dfl")}
     total_tp = total_fp = total_fn = 0
     total_tp_op = total_fp_op = total_fn_op = 0
     op_conf_thresh = float(getattr(config, "CONF_THRESH", 0.35))
@@ -68,10 +68,6 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
                 response_loss, _ = detection_response_loss(config, response_detector_core, student_feature, teacher_feature)
             else:
                 response_loss = zero
-            if stage_weights["privacy"] > 0:
-                privacy_loss, _ = input_privacy_loss(config, student_feature, gray)
-            else:
-                privacy_loss = zero
             if stage_weights["phase_regularization"] > 0:
                 phase_regularization_loss_value, _ = phase_regularization_loss(config, student_core)
             else:
@@ -90,7 +86,6 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
                 feature_loss * stage_weights["feature"]
                 + detection_loss * stage_weights["detection"]
                 + response_loss * stage_weights["response"]
-                + privacy_loss * stage_weights["privacy"]
                 + phase_regularization_loss_value * stage_weights["phase_regularization"]
             )
 
@@ -98,7 +93,6 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
             totals["feature"] += float(feature_loss.detach().item())
             totals["detection"] += float(detection_loss.detach().item())
             totals["response"] += float(response_loss.detach().item())
-            totals["privacy"] += float(privacy_loss.detach().item())
             totals["phase_regularization"] += float(phase_regularization_loss_value.detach().item())
             for key in ("box", "obj", "noobj", "cls", "dfl"):
                 totals[key] += loss_stats.get(key, 0.0)
@@ -278,7 +272,7 @@ def save_slm_detection_visualization(config, epoch, teacher, student, detector, 
             axes[row, 0].set_title("Input")
             axes[row, 1].imshow(teacher_np, cmap="viridis") # "magma" "gray" "viridis" "inferno"
             axes[row, 1].set_title("Teacher feature")
-            axes[row, 2].imshow(student_np, cmap="inferno") # "magma" "gray" "viridis" "inferno"
+            axes[row, 2].imshow(student_np, cmap="viridis") # "magma" "gray" "viridis" "inferno"
             axes[row, 2].set_title("SLM student feature")
             axes[row, 3].imshow(img_np, cmap="gray")
             axes[row, 3].set_title("GT + Predictions")

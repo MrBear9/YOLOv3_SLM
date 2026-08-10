@@ -119,10 +119,10 @@ def save_slm_component_curves(history, output_dir):
     axes[2].set_title("Response distillation loss")
     axes[2].legend()
 
-    for key in ("train_privacy", "val_privacy"):
+    for key in ("train_phase_regularization", "val_phase_regularization"):
         xs, ys = valid_history_points(history.get(key, []))
         axes[3].plot(xs, ys, label=key)
-    axes[3].set_title("Privacy obfuscation loss")
+    axes[3].set_title("Phase regularization loss")
     axes[3].legend()
 
     for key in ("train_total", "val_total"):
@@ -130,7 +130,6 @@ def save_slm_component_curves(history, output_dir):
         axes[4].plot(xs, ys, label=key)
     axes[4].set_title("Total loss")
     axes[4].legend()
-
     axes[5].axis("off")
 
     plt.tight_layout()

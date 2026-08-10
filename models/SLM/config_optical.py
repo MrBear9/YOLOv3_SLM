@@ -3,6 +3,8 @@
 使用方式: ``ConfigSLM(OpticalConfig)`` 继承，然后通过访问器方法取值。
 """
 
+import math
+
 class OpticalConfig:
     """光学传播的共享默认值 + per-layer 可覆盖配置。
 
@@ -15,6 +17,43 @@ class OpticalConfig:
     # 传播层数  2 | 3 | 4
     # ═══════════════════════════════════════════════════════════════════════
     NUM_LAYERS = 2
+
+    # Optical canvas and shared physical constants.
+    # Spatial sizes are always expressed as (height, width).
+    RESOLUTION = (640, 640)
+    WAVELENGTH = 532e-9
+    PIXEL_SIZE = 6.4e-6
+    SLM_MODE = "phase"
+    INPUT_INTENSITY_MODE = "srgb"
+    OPTICAL_FIELD_EPS = 1e-8
+    OPTICAL_NORM_EPS = 1e-6
+
+    # Phase parameterisation and protected late refinement.
+    SLM_PHASE_PARAM_MODE = "direct_sgd_pyramid"
+    SLM_DIRECT_SGD_PYRAMID_SCALE = 1.0
+    # Optional virtual multi-head optical path.
+    SLM_MULTI_HEAD_ENABLED = False
+    SLM_MULTI_HEAD_NUM_HEADS = 2
+    SLM_MULTI_HEAD_FUSION = "mean"
+
+    # Student optical output normalization.
+    ENABLE_STUDENT_NORM = True
+    STUDENT_NORM_SCHEDULE = "norm_joint_only"
+    STUDENT_NORM_MODE = "percentile"
+    STUDENT_NORM_PERCENTILE = 0.990
+    STUDENT_OUTPUT_CLAMP_MAX = 3.5
+    STUDENT_OUTPUT_BLUR_KERNEL = 1
+
+    # SLM phase initialization and hardware export.
+    SLM_INIT_MODE = "random"
+    SLM_DIRECT_SGD_INIT_RANGE_RAD = 1.5
+    SLM_INIT_NOISE_STD = 0.02
+    SLM_INIT_CHECKPOINT = r"output/SLM_Tv2_light_phase_refine/detector_best.pth"
+    SLM_PHASE_LEVELS = 256
+    SIMULATE_PHASE_QUANTIZATION = False
+    SLM_GRAY_INVERTED = True
+    SLM_EXPORT_PHASE_OFFSET_RAD = float(math.pi)
+    SLM_GRAY_TO_PHASE_LUT = r""
 
     # ═══════════════════════════════════════════════════════════════════════
     # 共享默认值（所有层共用，除非 per-layer dict 覆盖）
