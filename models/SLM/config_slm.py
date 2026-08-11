@@ -15,7 +15,7 @@ class ConfigSLM(OpticalConfig):
     CLASS_NAMES = None
     NUM_CLASSES = None
     # 10 cm + 10 cm static-phase run with conservative direct-SGD settings.
-    OUTPUT_DIR = r"output/SLM_Tv2_light_10cm_legacy_init_joint"
+    OUTPUT_DIR = r"output/SLM_Tv2_light_10cm_joint_v2"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
@@ -35,12 +35,12 @@ class ConfigSLM(OpticalConfig):
 
     # Learn the static optical mapping, fit the detector, then jointly make a
     # short, mAP-selected adjustment to both phase maps and the detector.
-    PHASE_FOCUS_EPOCHS = 145
-    DETECTOR_FOCUS_EPOCHS = 135
+    PHASE_FOCUS_EPOCHS = 100
+    DETECTOR_FOCUS_EPOCHS = 80
     PHASE_REFINE_EPOCHS = 0
     PHASE_COARSE_EPOCHS = 0
     PHASE_MID_EPOCHS = 0
-    JOINT_FIT_EPOCHS = 20
+    JOINT_FIT_EPOCHS = 30
     # Deployment normalization is a separate hardware ablation.
     NORM_JOINT_EPOCHS = 0
     EPOCHS = (
@@ -158,12 +158,12 @@ class ConfigSLM(OpticalConfig):
     DETECTION_LOSS_WEIGHT_PHASE_MID = 1.00
     PHASE_REGULARIZATION_WEIGHT_PHASE_MID = 0.08
 
-    FEATURE_LOSS_WEIGHT_JOINT = 0.15
+    FEATURE_LOSS_WEIGHT_JOINT = 0.05
     DETECTION_LOSS_WEIGHT_JOINT = 1.00
     # Per-image max-normalized response matching did not improve validation
     # mAP, so it remains disabled for this route.
     RESPONSE_LOSS_WEIGHT_JOINT = 0.00
-    PHASE_REGULARIZATION_WEIGHT_JOINT = 0.03
+    PHASE_REGULARIZATION_WEIGHT_JOINT = 0.00
 
     FEATURE_LOSS_WEIGHT_NORM_JOINT = 0.20
     DETECTION_LOSS_WEIGHT_NORM_JOINT = 1.00
@@ -187,8 +187,8 @@ class ConfigSLM(OpticalConfig):
     PHASE_COARSE_PARAM_LR = 1e-3
     PHASE_MID_PARAM_LR = 5e-4
     DETECTOR_LR = 3e-4
-    JOINT_PHASE_PARAM_LR = 1e-4
-    JOINT_DETECTOR_LR = 5e-5
+    JOINT_PHASE_PARAM_LR = 3e-4
+    JOINT_DETECTOR_LR = 1e-5
     NORM_JOINT_PHASE_PARAM_LR = 2e-4
     NORM_JOINT_DETECTOR_LR = 5e-5
     PHASE_GRAD_CLIP_NORM = 2.0

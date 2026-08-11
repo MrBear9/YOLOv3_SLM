@@ -169,6 +169,15 @@ def write_slm_tensorboard_scalars(
         for key in ("precision", "recall", "f1", "map50", "precision_op", "recall_op", "f1_op"):
             add_tensorboard_scalar(writer, f"Metrics/{stage_name}/{key}", val_metrics.get(key), step)
             add_tensorboard_scalar(writer, f"Metrics/All_Stages/{key}", val_metrics.get(key), step)
+        class_names = getattr(Config, "CLASS_NAMES", None) or []
+        for cls_id in range(int(getattr(Config, "NUM_CLASSES", len(class_names)) or 0)):
+            ap = val_metrics.get(f"ap_class_{cls_id}")
+            if ap is None:
+                continue
+            class_name = class_names[cls_id] if cls_id < len(class_names) else f"class_{cls_id}"
+            class_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(class_name)).strip("_") or f"class_{cls_id}"
+            add_tensorboard_scalar(writer, f"Metrics/{stage_name}/AP/{class_name}", ap, step)
+            add_tensorboard_scalar(writer, f"Metrics/All_Stages/AP/{class_name}", ap, step)
         op_conf = float(getattr(Config, "CONF_THRESH", 0.35))
         threshold_tag = f"conf_{op_conf:g}"
         for key in ("precision_op", "recall_op", "f1_op"):

@@ -200,8 +200,10 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
     recall_op = total_tp_op / (total_tp_op + total_fn_op + 1e-6)
     f1_op = 2.0 * precision_op * recall_op / (precision_op + recall_op + 1e-6)
     ap_values = []
+    ap_by_class = {}
     for cls_id in range(config.NUM_CLASSES):
         ap = compute_average_precision(metric_storage[cls_id], gt_counts[cls_id])
+        ap_by_class[f"ap_class_{cls_id}"] = float(ap) if ap is not None else None
         if ap is not None:
             ap_values.append(ap)
     metrics = {
@@ -213,6 +215,7 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
         "recall_op": float(recall_op),
         "f1_op": float(f1_op),
         "stage": stage_name,
+        **ap_by_class,
     }
 
     if was_student_training:
