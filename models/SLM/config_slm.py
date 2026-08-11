@@ -14,8 +14,8 @@ class ConfigSLM(OpticalConfig):
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    # Fresh two-SLM 20 cm propagation ablation. Keep prior experiments intact.
-    OUTPUT_DIR = r"output/SLM_Tv2_light_20cm"
+    # 10 cm + 10 cm static-phase run with conservative direct-SGD settings.
+    OUTPUT_DIR = r"output/SLM_Tv2_light_10cm_legacy_init_joint"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
@@ -33,16 +33,14 @@ class ConfigSLM(OpticalConfig):
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
-    # Learn the optical mapping first, then fit a detector against that fixed
-    # mapping.  Later optical refinement is deliberately opt-in: it restores
-    # the validation-best paired checkpoint and only opens SLM2's smooth
-    # pyramid residual.
+    # Learn the static optical mapping, fit the detector, then jointly make a
+    # short, mAP-selected adjustment to both phase maps and the detector.
     PHASE_FOCUS_EPOCHS = 145
     DETECTOR_FOCUS_EPOCHS = 135
-    PHASE_REFINE_EPOCHS = 20
+    PHASE_REFINE_EPOCHS = 0
     PHASE_COARSE_EPOCHS = 0
     PHASE_MID_EPOCHS = 0
-    JOINT_FIT_EPOCHS = 0
+    JOINT_FIT_EPOCHS = 20
     # Deployment normalization is a separate hardware ablation.
     NORM_JOINT_EPOCHS = 0
     EPOCHS = (
@@ -184,7 +182,7 @@ class ConfigSLM(OpticalConfig):
     # =========================================================================
     # Optimizer & LR schedule
     # =========================================================================
-    PHASE_FOCUS_PHASE_PARAM_LR = 5e-3
+    PHASE_FOCUS_PHASE_PARAM_LR = 3e-3
     PHASE_REFINE_PHASE_PARAM_LR = 1e-4
     PHASE_COARSE_PARAM_LR = 1e-3
     PHASE_MID_PARAM_LR = 5e-4

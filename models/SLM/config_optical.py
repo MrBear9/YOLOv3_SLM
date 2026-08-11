@@ -28,9 +28,10 @@ class OpticalConfig:
     OPTICAL_FIELD_EPS = 1e-8
     OPTICAL_NORM_EPS = 1e-6
 
-    # Phase parameterisation and protected late refinement.
+    # Keep the full-resolution direct phase primary; the pyramid is a
+    # deliberately smaller multi-scale residual during static-phase fitting.
     SLM_PHASE_PARAM_MODE = "direct_sgd_pyramid"
-    SLM_DIRECT_SGD_PYRAMID_SCALE = 1.0
+    SLM_DIRECT_SGD_PYRAMID_SCALE = 0.5
     # Optional virtual multi-head optical path.
     SLM_MULTI_HEAD_ENABLED = False
     SLM_MULTI_HEAD_NUM_HEADS = 2
@@ -46,7 +47,7 @@ class OpticalConfig:
 
     # SLM phase initialization and hardware export.
     SLM_INIT_MODE = "random"
-    SLM_DIRECT_SGD_INIT_RANGE_RAD = 1.5
+    SLM_DIRECT_SGD_INIT_RANGE_RAD = 0.5
     SLM_INIT_NOISE_STD = 0.02
     SLM_INIT_CHECKPOINT = r"output/SLM_Tv2_light_phase_refine/detector_best.pth"
     SLM_PHASE_LEVELS = 256

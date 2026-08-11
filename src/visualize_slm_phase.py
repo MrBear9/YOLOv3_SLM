@@ -120,16 +120,16 @@ def save_spatial_profiles(phase, name, output_dir, profile_index):
         "mathtext.fontset": "stix",
     })
 
-    fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.0), constrained_layout=True, sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.0), constrained_layout=True, sharey=True)
 
-    axes[0].plot(np.arange(width), phase[row, :], color="#2166ac", linewidth=1.5)
-    axes[0].axhline(y=phase[row, col], color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    axes[0].plot(np.arange(width), phase[row, :], color="#2166ac", linewidth=0.5)
+    axes[0].axhline(y=phase[row, col], color="gray", linestyle="--", linewidth=0.4, alpha=0.5)
     axes[0].set_xlabel("x (pixels)")
     axes[0].set_ylabel("Phase (rad)")
     axes[0].text(-0.20, 1.04, "(a)", transform=axes[0].transAxes, fontweight="bold", fontsize=11)
 
-    axes[1].plot(np.arange(height), phase[:, col], color="#b2182b", linewidth=1.5)
-    axes[1].axhline(y=phase[row, col], color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    axes[1].plot(np.arange(height), phase[:, col], color="#b2182b", linewidth=0.5)
+    axes[1].axhline(y=phase[row, col], color="gray", linestyle="--", linewidth=0.4, alpha=0.5)
     axes[1].set_xlabel("y (pixels)")
     axes[1].text(-0.20, 1.04, "(b)", transform=axes[1].transAxes, fontweight="bold", fontsize=11)
 
