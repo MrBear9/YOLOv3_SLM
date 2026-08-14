@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -80,6 +82,45 @@ class CompositeOpticalFeatureLoss(nn.Module):
         t_std = teacher_feature.std(dim=(2, 3), keepdim=True, unbiased=False)
         return (student_feature - s_mean) / (s_std + eps), (teacher_feature - t_mean) / (t_std + eps)
 
+    def target_roi_mask(self, targets, height, width, device, dtype):
+        """Build a soft target-and-context mask from normalized YOLO boxes."""
+        mask = torch.zeros((len(targets), 1, height, width), device=device, dtype=dtype)
+        context_scale = max(float(getattr(self.config, "TARGET_ROI_CONTEXT_SCALE", 1.0)), 1.0)
+        class_weights = getattr(self.config, "TARGET_ROI_CLASS_WEIGHTS", {})
+        for batch_idx, sample_targets in enumerate(targets):
+            if sample_targets is None or sample_targets.numel() == 0:
+                continue
+            for target in sample_targets:
+                if target.numel() < 5 or target[3] <= 0 or target[4] <= 0:
+                    continue
+                class_id = int(target[0].item())
+                weight = float(class_weights.get(class_id, 1.0))
+                cx, cy = float(target[1]), float(target[2])
+                half_w = float(target[3]) * context_scale * 0.5
+                half_h = float(target[4]) * context_scale * 0.5
+                x0 = max(0, min(width, int((cx - half_w) * width)))
+                x1 = max(0, min(width, int(math.ceil((cx + half_w) * width))))
+                y0 = max(0, min(height, int((cy - half_h) * height)))
+                y1 = max(0, min(height, int(math.ceil((cy + half_h) * height))))
+                if x1 > x0 and y1 > y0:
+                    mask[batch_idx, :, y0:y1, x0:x1] = torch.maximum(
+                        mask[batch_idx, :, y0:y1, x0:x1],
+                        mask.new_full((1, y1 - y0, x1 - x0), weight),
+                    )
+        feather_kernel = max(int(getattr(self.config, "TARGET_ROI_FEATHER_KERNEL", 1)), 1)
+        if feather_kernel > 1:
+            if feather_kernel % 2 == 0:
+                feather_kernel += 1
+            mask = F.max_pool2d(mask, feather_kernel, stride=1, padding=feather_kernel // 2)
+        return mask
+
+    @staticmethod
+    def masked_mse(student_feature, teacher_feature, mask):
+        if mask is None or not torch.any(mask > 0):
+            return student_feature.new_zeros(())
+        squared_error = (student_feature - teacher_feature).square()
+        return (squared_error * mask).sum() / (mask.sum() * student_feature.shape[1] + 1e-8)
+
     @staticmethod
     def _iter_slm_layers(student):
         """Yield (index, slm_layer) for all SLM layers across all heads.
@@ -102,7 +143,7 @@ class CompositeOpticalFeatureLoss(nn.Module):
             kernel_size += 1
         return F.avg_pool2d(x, kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
 
-    def forward(self, student_feature, teacher_feature, student, stage_name=None):
+    def forward(self, student_feature, teacher_feature, student, stage_name=None, targets=None):
         filtered_student = self.prefilter_feature(student_feature)
         filtered_teacher = self.prefilter_feature(teacher_feature)
         aligned_student, aligned_teacher = self.domain_align(filtered_student, filtered_teacher)
@@ -113,7 +154,7 @@ class CompositeOpticalFeatureLoss(nn.Module):
         loss_grad = self.gradient_loss(aligned_student, aligned_teacher)
         loss_freq = self.frequency_loss(aligned_student, aligned_teacher)
         loss_pearson = self.pearson_loss(filtered_student, filtered_teacher)
-        total = (
+        global_total = (
             loss_full * self.config.LOSS_FULL_WEIGHT
             + loss_low1 * self.config.LOSS_LOW1_WEIGHT
             + loss_low2 * self.config.LOSS_LOW2_WEIGHT
@@ -122,8 +163,19 @@ class CompositeOpticalFeatureLoss(nn.Module):
             + loss_freq * self.config.LOSS_FREQ_WEIGHT
             + loss_pearson * self.config.LOSS_PEARSON_WEIGHT
         )
+        roi_loss = student_feature.new_zeros(())
+        background_loss = student_feature.new_zeros(())
+        roi_weight = float(getattr(self.config, "LOSS_TARGET_ROI_WEIGHT", 0.0))
+        if bool(getattr(self.config, "ENABLE_TARGET_ROI_FEATURE_LOSS", False)) and targets is not None and roi_weight > 0:
+            roi_mask = self.target_roi_mask(targets, student_feature.shape[-2], student_feature.shape[-1], student_feature.device, student_feature.dtype)
+            roi_loss = self.masked_mse(aligned_student, aligned_teacher, roi_mask)
+            background_loss = self.masked_mse(aligned_student, aligned_teacher, (roi_mask <= 0).to(dtype=roi_mask.dtype))
+        total = global_total + roi_weight * roi_loss
         stats = {
             "feature_total": float(total.detach().item()),
+            "feature_global": float(global_total.detach().item()),
+            "feature_roi": float(roi_loss.detach().item()),
+            "feature_background": float(background_loss.detach().item()),
             "full": float(loss_full.detach().item()),
             "low1": float(loss_low1.detach().item()),
             "low2": float(loss_low2.detach().item()),

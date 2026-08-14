@@ -114,7 +114,7 @@ def train():
         from models.SLM.utils_slm import build_stage_optimizer
         from models.SLM.slm_utils import build_stage_scheduler
         optimizer = build_stage_optimizer(Config, ctx["student_raw"], ctx["detector_raw"], stage_name)
-        scheduler = build_stage_scheduler(optimizer, stage_epochs)
+        scheduler = build_stage_scheduler(optimizer, stage_name, stage_epochs)
         ctx["optimizer"] = optimizer
         ctx["scheduler"] = scheduler
         ctx["is_main"] = is_main

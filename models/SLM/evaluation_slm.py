@@ -45,7 +45,10 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
 
     metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
-    totals = {key: 0.0 for key in ("total", "feature", "detection", "response", "phase_regularization", "box", "obj", "noobj", "cls", "dfl")}
+    totals = {key: 0.0 for key in (
+        "total", "feature", "feature_global", "feature_roi", "feature_background",
+        "detection", "response", "phase_regularization", "box", "obj", "noobj", "cls", "dfl",
+    )}
     total_tp = total_fp = total_fn = 0
     total_tp_op = total_fp_op = total_fn_op = 0
     op_conf_thresh = float(getattr(config, "CONF_THRESH", 0.35))
@@ -61,9 +64,16 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
             student_feature = student_core(gray)
             zero = torch.zeros((), device=device, dtype=student_feature.dtype)
             if stage_weights["feature"] > 0:
-                feature_loss, _ = feature_criterion(student_feature, teacher_feature, student_core, stage_name=stage_name)
+                feature_loss, feature_stats = feature_criterion(
+                    student_feature,
+                    teacher_feature,
+                    student_core,
+                    stage_name=stage_name,
+                    targets=targets,
+                )
             else:
                 feature_loss = zero
+                feature_stats = {"feature_global": 0.0, "feature_roi": 0.0, "feature_background": 0.0}
             if stage_weights["response"] > 0:
                 response_loss, _ = detection_response_loss(config, response_detector_core, student_feature, teacher_feature)
             else:
@@ -91,6 +101,9 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
 
             totals["total"] += float(total_loss.detach().item())
             totals["feature"] += float(feature_loss.detach().item())
+            totals["feature_global"] += feature_stats["feature_global"]
+            totals["feature_roi"] += feature_stats["feature_roi"]
+            totals["feature_background"] += feature_stats["feature_background"]
             totals["detection"] += float(detection_loss.detach().item())
             totals["response"] += float(response_loss.detach().item())
             totals["phase_regularization"] += float(phase_regularization_loss_value.detach().item())

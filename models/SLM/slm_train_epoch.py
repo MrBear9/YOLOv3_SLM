@@ -113,6 +113,9 @@ def run_epoch(
     detector.train(not phase_only_stage)
     epoch_total_t = torch.zeros((), device=device)
     epoch_feature_t = torch.zeros((), device=device)
+    epoch_feature_global_t = torch.zeros((), device=device)
+    epoch_feature_roi_t = torch.zeros((), device=device)
+    epoch_feature_background_t = torch.zeros((), device=device)
     epoch_detection_t = torch.zeros((), device=device)
     epoch_response_t = torch.zeros((), device=device)
     epoch_phase_regularization_t = torch.zeros((), device=device)
@@ -136,9 +139,16 @@ def run_epoch(
 
         zero = torch.zeros((), device=device, dtype=student_feature.dtype)
         if stage_weights["feature"] > 0:
-            feature_loss, _ = feature_criterion(student_feature, teacher_feature.detach(), student_raw, stage_name=stage_name)
+            feature_loss, feature_stats = feature_criterion(
+                student_feature,
+                teacher_feature.detach(),
+                student_raw,
+                stage_name=stage_name,
+                targets=targets,
+            )
         else:
             feature_loss = zero
+            feature_stats = {"feature_global": 0.0, "feature_roi": 0.0, "feature_background": 0.0}
         if stage_weights["response"] > 0:
             response_loss, _ = detection_response_loss(Config, reference_detector, student_feature, teacher_feature.detach())
         else:
@@ -171,6 +181,9 @@ def run_epoch(
         optimizer.step()
         epoch_total_t += total_loss.detach()
         epoch_feature_t += feature_loss.detach()
+        epoch_feature_global_t += feature_stats["feature_global"]
+        epoch_feature_roi_t += feature_stats["feature_roi"]
+        epoch_feature_background_t += feature_stats["feature_background"]
         epoch_detection_t += detection_loss.detach()
         epoch_response_t += response_loss.detach()
         epoch_phase_regularization_t += phase_regularization_loss_value.detach()
@@ -181,6 +194,9 @@ def run_epoch(
     num_batches = max(len(train_loader), 1)
     avg_total = float(epoch_total_t.item()) / num_batches
     avg_feature = float(epoch_feature_t.item()) / num_batches
+    avg_feature_global = float(epoch_feature_global_t.item()) / num_batches
+    avg_feature_roi = float(epoch_feature_roi_t.item()) / num_batches
+    avg_feature_background = float(epoch_feature_background_t.item()) / num_batches
     avg_detection = float(epoch_detection_t.item()) / num_batches
     avg_response = float(epoch_response_t.item()) / num_batches
     avg_phase_regularization = float(epoch_phase_regularization_t.item()) / num_batches
@@ -249,6 +265,10 @@ def run_epoch(
                      "precision_op", "recall_op", "f1_op"):
             history[key].append(np.nan)
     current_lr = max(group["lr"] for group in optimizer.param_groups)
+    lr_by_group = {}
+    for group in optimizer.param_groups:
+        group_name = group.get("slm_group", "detector" if stage_name == "detector_focus" else "other")
+        lr_by_group[group_name] = max(lr_by_group.get(group_name, 0.0), float(group["lr"]))
 
     cm_dets = cm_targets = None
     should_write_cm = val_loader is not None and (global_epoch + 1) % Config.VAL_INTERVAL == 0
@@ -265,6 +285,9 @@ def run_epoch(
             {
                 "total": avg_total,
                 "feature": avg_feature,
+                "feature_global": avg_feature_global,
+                "feature_roi": avg_feature_roi,
+                "feature_background": avg_feature_background,
                 "detection": avg_detection,
                 "response": avg_response,
                 "phase_regularization": avg_phase_regularization,
@@ -277,6 +300,7 @@ def run_epoch(
             phase_update_rel=phase_update_rel,
             phase_layer_stats=phase_layer_stats,
             lr=current_lr,
+            lr_by_group=lr_by_group,
         )
         # 閳光偓閳光偓 濮婎垰瀹?& 閸欏倹鏆熼惄鎴炵ゴ 閳光偓閳光偓
         write_gradient_monitoring(tensorboard_writer, student, display_epoch, prefix="Grad/Student")

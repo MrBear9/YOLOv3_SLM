@@ -5,6 +5,7 @@ checkpoint management, and config logging helpers split out from the
 original train_helpers_slm.py so each module stays focused and small.
 """
 
+import math
 import os
 import re
 
@@ -13,7 +14,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 
 from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.utils_slm import save_student_best, _layer_names_from_student
@@ -70,7 +71,20 @@ def configure_student_norm_for_stage(stage_name, deployment_norm_mode):
     return stage_norm_mode
 
 
-def build_stage_scheduler(optimizer, stage_epochs):
+def build_stage_scheduler(optimizer, stage_name, stage_epochs):
+    if stage_name == "joint_fit" and str(getattr(Config, "JOINT_LR_SCHEDULER", "")).lower() == "cosine_phase_floor":
+        phase_floor = float(getattr(Config, "JOINT_PHASE_ETA_MIN", Config.ETA_MIN))
+        total_epochs = max(int(stage_epochs), 1)
+
+        def phase_cosine(epoch):
+            cosine = 0.5 * (1.0 + math.cos(math.pi * min(epoch, total_epochs) / total_epochs))
+            floor_ratio = phase_floor / Config.JOINT_PHASE_PARAM_LR
+            return floor_ratio + (1.0 - floor_ratio) * cosine
+
+        return LambdaLR(
+            optimizer,
+            lr_lambda=[phase_cosine if group.get("slm_group") == "phase" else lambda _: 1.0 for group in optimizer.param_groups],
+        )
     if str(getattr(Config, "LR_SCHEDULER", "")).lower() != "cosineannealinglr":
         return None
     return CosineAnnealingLR(optimizer, T_max=max(int(stage_epochs), 1), eta_min=Config.ETA_MIN)
@@ -155,6 +169,7 @@ def write_slm_tensorboard_scalars(
     phase_update_rel=None,
     phase_layer_stats=None,
     lr=None,
+    lr_by_group=None,
 ):
     if writer is None:
         return
@@ -203,6 +218,9 @@ def write_slm_tensorboard_scalars(
             add_tensorboard_scalar(writer, f"SLM/{stage_name}/{layer_name}_phase_update_norm", stats["update_norm"], step)
             add_tensorboard_scalar(writer, f"SLM/{stage_name}/{layer_name}_phase_update_rel", stats["update_rel"], step)
     add_tensorboard_scalar(writer, f"LR/{stage_name}", lr, step)
+    if lr_by_group is not None:
+        for group_name, group_lr in lr_by_group.items():
+            add_tensorboard_scalar(writer, f"LR/{stage_name}/{group_name}", group_lr, step)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -387,6 +405,12 @@ def log_config():
         f"d={Config.FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS}/{Config.DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS}  "
         f"j={Config.FEATURE_LOSS_WEIGHT_JOINT}/{Config.DETECTION_LOSS_WEIGHT_JOINT}  "
         f"nj={Config.FEATURE_LOSS_WEIGHT_NORM_JOINT}/{Config.DETECTION_LOSS_WEIGHT_NORM_JOINT}",
+    )
+    log_to_file(
+        Config,
+        f"Target ROI feature loss: enabled={Config.ENABLE_TARGET_ROI_FEATURE_LOSS}, "
+        f"weight={Config.LOSS_TARGET_ROI_WEIGHT}, context={Config.TARGET_ROI_CONTEXT_SCALE}, "
+        f"feather={Config.TARGET_ROI_FEATHER_KERNEL}, class_weights={Config.TARGET_ROI_CLASS_WEIGHTS}",
     )
     log_to_file(
         Config,

@@ -15,7 +15,7 @@ class ConfigSLM(OpticalConfig):
     CLASS_NAMES = None
     NUM_CLASSES = None
     # 10 cm + 10 cm static-phase run with conservative direct-SGD settings.
-    OUTPUT_DIR = r"output/SLM_Tv2_light_10cm_joint_v2"
+    OUTPUT_DIR = r"output/SLM_Tv2_light_10cm_roi_v5"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
@@ -124,17 +124,26 @@ class ConfigSLM(OpticalConfig):
     # =========================================================================
     # SLM feature loss (student teacher feature matching)
     # =========================================================================
-    LOSS_FULL_WEIGHT = 0.10
-    LOSS_LOW1_WEIGHT = 0.35
-    LOSS_LOW2_WEIGHT = 0.20
+    LOSS_FULL_WEIGHT = 0.20
+    LOSS_LOW1_WEIGHT = 0.25
+    LOSS_LOW2_WEIGHT = 0.10
     LOSS_SSIM_WEIGHT = 0.25
-    LOSS_GRAD_WEIGHT = 0.00
+    LOSS_GRAD_WEIGHT = 0.10
     LOSS_FREQ_WEIGHT = 0.00
-    LOSS_PEARSON_WEIGHT = 0.20
+    LOSS_PEARSON_WEIGHT = 0.10
     FEATURE_LOSS_PREFILTER_KERNEL = 1
     ENABLE_FEATURE_DOMAIN_ALIGNMENT = True
     # Options: "mean_std", "minmax"/"min_max", "none".
     FEATURE_DOMAIN_ALIGN_MODE = "minmax"
+    # Preserve detection-relevant local structure rather than only matching
+    # full-frame feature statistics. Boxes are expanded slightly for context.
+    ENABLE_TARGET_ROI_FEATURE_LOSS = True
+    LOSS_TARGET_ROI_WEIGHT = 0.75
+    TARGET_ROI_CONTEXT_SCALE = 1.20
+    TARGET_ROI_FEATHER_KERNEL = 9
+    # Macro mAP gives each class equal value. Aircraft and soldier are the
+    # current weak classes; warship already has strong AP and large boxes.
+    TARGET_ROI_CLASS_WEIGHTS = {0: 1.0, 1: 1.25, 2: 1.35, 3: 0.75}
 
     # =========================================================================
     # Stage loss weights
@@ -158,7 +167,7 @@ class ConfigSLM(OpticalConfig):
     DETECTION_LOSS_WEIGHT_PHASE_MID = 1.00
     PHASE_REGULARIZATION_WEIGHT_PHASE_MID = 0.08
 
-    FEATURE_LOSS_WEIGHT_JOINT = 0.05
+    FEATURE_LOSS_WEIGHT_JOINT = 0.10
     DETECTION_LOSS_WEIGHT_JOINT = 1.00
     # Per-image max-normalized response matching did not improve validation
     # mAP, so it remains disabled for this route.
@@ -197,6 +206,10 @@ class ConfigSLM(OpticalConfig):
     # Options: "CosineAnnealingLR", "none".
     LR_SCHEDULER = "CosineAnnealingLR"
     ETA_MIN = 1e-5
+    # Joint fitting keeps detector adaptation conservative while phase updates
+    # decay only to this floor instead of the global scheduler's 1e-5 floor.
+    JOINT_LR_SCHEDULER = "cosine_phase_floor"
+    JOINT_PHASE_ETA_MIN = 5e-5
 
     ENABLE_DETECTOR_FOCUS_EARLY_STOP = False
     DETECTOR_FOCUS_EARLY_STOP_PATIENCE = 20
@@ -236,6 +249,11 @@ class ConfigSLM(OpticalConfig):
     # Repeat each train-set entry for tiny subset experiments; validation is unchanged.
     TRAIN_DATASET_REPEAT = 1
 
+    # Fix model initialization, optical random phase, sampler order, and
+    # DataLoader workers so small mAP changes are comparable across runs.
+    TRAIN_SEED = 20260813
+    DETERMINISTIC_TRAINING = True
+
     # =========================================================================
     # Data loading
     # =========================================================================
@@ -246,7 +264,7 @@ class ConfigSLM(OpticalConfig):
     PREFETCH_FACTOR = (0 if _IS_WINDOWS else 4)
     ENABLE_CHANNELS_LAST = True
     ENABLE_TF32 = True
-    ENABLE_CUDNN_BENCHMARK = True
+    ENABLE_CUDNN_BENCHMARK = False
 
     # =========================================================================
     # Log / table formatting

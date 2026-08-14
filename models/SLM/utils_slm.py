@@ -218,7 +218,7 @@ def build_stage_optimizer(config, student, detector, stage_name):
             continue
         if key == "other":
             groups.append({"params": params, "lr": base_lr,
-                          "weight_decay": config.WEIGHT_DECAY})
+                          "weight_decay": config.WEIGHT_DECAY, "slm_group": "phase"})
         else:
             # Extract layer index from e.g. "slm2" → 2
             layer_idx = int(re.match(r"slm(\d+)", key).group(1))
@@ -226,7 +226,7 @@ def build_stage_optimizer(config, student, detector, stage_name):
             if stage_name == "phase_refine" and layer_idx == 2:
                 mult *= float(getattr(config, "SLM2_REFINEMENT_LR_MULT", 1.0))
             groups.append({"params": params, "lr": base_lr * mult,
-                          "weight_decay": config.PHASE_WEIGHT_DECAY})
+                          "weight_decay": config.PHASE_WEIGHT_DECAY, "slm_group": "phase"})
 
     if stage_name not in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"}:
         detector_params = [p for p in detector.parameters() if p.requires_grad]
@@ -234,7 +234,7 @@ def build_stage_optimizer(config, student, detector, stage_name):
                        else config.JOINT_DETECTOR_LR)
         if detector_params:
             groups.append({"params": detector_params, "lr": detector_lr,
-                          "weight_decay": config.WEIGHT_DECAY})
+                          "weight_decay": config.WEIGHT_DECAY, "slm_group": "detector"})
 
     return torch.optim.Adam(groups, weight_decay=0.0)
 

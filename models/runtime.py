@@ -1,10 +1,35 @@
 import os
+import random
 from datetime import datetime, timedelta
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Sampler
+
+
+def seed_training(seed, deterministic=False):
+    """Seed every local RNG before model and dataset construction."""
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        if deterministic:
+            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
+
+def seed_dataloader_worker(worker_id, base_seed, rank=0):
+    """Derive a reproducible but distinct seed for each DataLoader worker."""
+    worker_seed = (int(base_seed) + int(rank) * 100_000 + int(worker_id)) % (2 ** 32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
 
 
 class DistributedEvalSampler(Sampler):

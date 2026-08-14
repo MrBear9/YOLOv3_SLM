@@ -4,6 +4,8 @@ Contains setup_training() which initializes everything and returns a
 context dict consumed by train() and run_epoch().
 """
 
+from functools import partial
+
 import torch
 from torch.utils.data import DataLoader
 
@@ -23,6 +25,8 @@ from models.runtime import (
     get_runtime_device,
     init_log_file,
     log_to_file,
+    seed_dataloader_worker,
+    seed_training,
     wrap_data_parallel,
 )
 from models.teacher import build_teacher
@@ -34,6 +38,8 @@ from models.yolov8.detection_protocol import build_detection_criterion
 def setup_training(is_main, use_ddp):
     """Initialize everything and return a context dict for training."""
     Config.initialize()
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    seed_training(Config.TRAIN_SEED, deterministic=Config.DETERMINISTIC_TRAINING)
     init_log_file(Config)
     configure_backends()
     log_config()
@@ -118,8 +124,14 @@ def setup_training(is_main, use_ddp):
     train_sampler = None
     if use_ddp:
         from torch.utils.data.distributed import DistributedSampler
-        train_sampler = DistributedSampler(train_dataset, shuffle=True, drop_last=True)
+        train_sampler = DistributedSampler(
+            train_dataset,
+            shuffle=True,
+            drop_last=True,
+            seed=int(Config.TRAIN_SEED),
+        )
         log_to_file(Config, f"Using DistributedSampler for DDP training")
+    train_generator = torch.Generator().manual_seed(int(Config.TRAIN_SEED) + rank)
     loader_kwargs = {
         "batch_size": Config.BATCH_SIZE,
         "shuffle": train_sampler is None,
@@ -127,6 +139,8 @@ def setup_training(is_main, use_ddp):
         "num_workers": Config.NUM_WORKERS,
         "pin_memory": Config.PIN_MEMORY,
         "collate_fn": slm_collate_fn,
+        "generator": train_generator,
+        "worker_init_fn": partial(seed_dataloader_worker, base_seed=Config.TRAIN_SEED, rank=rank),
     }
     if Config.NUM_WORKERS > 0:
         loader_kwargs["persistent_workers"] = Config.PERSISTENT_WORKERS
@@ -148,6 +162,8 @@ def setup_training(is_main, use_ddp):
                 "num_workers": Config.NUM_WORKERS,
                 "pin_memory": Config.PIN_MEMORY,
                 "collate_fn": slm_collate_fn,
+                "generator": torch.Generator().manual_seed(int(Config.TRAIN_SEED) + 10_000 + rank),
+                "worker_init_fn": partial(seed_dataloader_worker, base_seed=Config.TRAIN_SEED + 10_000, rank=rank),
             }
             if Config.NUM_WORKERS > 0:
                 val_kwargs["persistent_workers"] = Config.PERSISTENT_WORKERS
@@ -184,6 +200,10 @@ def setup_training(is_main, use_ddp):
     }
 
     tensorboard_writer = create_tensorboard_writer(Config, Config.OUTPUT_DIR, log_to_file) if is_main else None
+    log_to_file(
+        Config,
+        f"Reproducibility: seed={Config.TRAIN_SEED}, deterministic={Config.DETERMINISTIC_TRAINING}, rank={rank}",
+    )
 
     return {
         "device": device,
