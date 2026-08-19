@@ -14,8 +14,8 @@ class ConfigSLM(OpticalConfig):
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    # 10 cm + 10 cm static-phase run with conservative direct-SGD settings.
-    OUTPUT_DIR = r"output/SLM_Tv2_light_10cm_roi_v5"
+    # Random-init 10 cm + 10 cm run using the v5 primary schedule.
+    OUTPUT_DIR = r"output/SLM_Tv2_light_10cm_roi_v10_scratch_v5_schedule"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
@@ -33,19 +33,20 @@ class ConfigSLM(OpticalConfig):
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
-    # Learn the static optical mapping, fit the detector, then jointly make a
-    # short, mAP-selected adjustment to both phase maps and the detector.
+    # SLM_INIT_MODE is inherited from OpticalConfig and remains ``random``.
+    # Fit the optical mapping and detector from zero before any task-aware
+    # phase update; no previous student or detector checkpoint is loaded.
     PHASE_FOCUS_EPOCHS = 100
     DETECTOR_FOCUS_EPOCHS = 80
+    # Keep optional SLM2-only refinement disabled in the primary scratch run.
     PHASE_REFINE_EPOCHS = 0
-    PHASE_COARSE_EPOCHS = 0
-    PHASE_MID_EPOCHS = 0
+    # Preserve the v5 final 30-epoch joint fitting stage for a direct schedule
+    # comparison; it starts from the detector-focus validation best pair.
     JOINT_FIT_EPOCHS = 30
-    # Deployment normalization is a separate hardware ablation.
+    # Deployment normalization remains a separate hardware experiment.
     NORM_JOINT_EPOCHS = 0
     EPOCHS = (
         PHASE_FOCUS_EPOCHS + DETECTOR_FOCUS_EPOCHS + PHASE_REFINE_EPOCHS
-        + PHASE_COARSE_EPOCHS + PHASE_MID_EPOCHS
         + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
     )
 
@@ -54,9 +55,8 @@ class ConfigSLM(OpticalConfig):
     # Per-layer trainable flag and LR multipliers: see OpticalConfig accessors
     #   is_trainable(layer_idx), layer_lr_mult(layer_idx, stage)
 
-    # Late refinement is a training-policy setting, not an optical constant.
-    SLM2_REFINEMENT_LOW_FREQ_SCALES = 2
-    SLM2_REFINEMENT_LR_MULT = 0.20
+    # Restore the validation-best paired state before every detector-aware
+    # optical stage, so a regressing ablation cannot affect the next one.
     RESTORE_BEST_PAIRED_BEFORE_REFINEMENT = True
 
     # Per-layer vortex charge and radial curvature: see OpticalConfig.vortex_init.
@@ -155,17 +155,12 @@ class ConfigSLM(OpticalConfig):
     DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS = 1.0
     RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS = 0.0
 
-    FEATURE_LOSS_WEIGHT_PHASE_REFINE = 0.05
+    # Preserve optical image/ROI correspondence while the frozen detector
+    # supplies task gradients to the final SLM.
+    FEATURE_LOSS_WEIGHT_PHASE_REFINE = 0.50
     DETECTION_LOSS_WEIGHT_PHASE_REFINE = 1.00
     RESPONSE_LOSS_WEIGHT_PHASE_REFINE = 0.00
-    PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE = 0.01
-
-    FEATURE_LOSS_WEIGHT_PHASE_COARSE = 0.05
-    DETECTION_LOSS_WEIGHT_PHASE_COARSE = 1.00
-    PHASE_REGULARIZATION_WEIGHT_PHASE_COARSE = 0.10
-    FEATURE_LOSS_WEIGHT_PHASE_MID = 0.05
-    DETECTION_LOSS_WEIGHT_PHASE_MID = 1.00
-    PHASE_REGULARIZATION_WEIGHT_PHASE_MID = 0.08
+    PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE = 0.00
 
     FEATURE_LOSS_WEIGHT_JOINT = 0.10
     DETECTION_LOSS_WEIGHT_JOINT = 1.00
@@ -192,9 +187,8 @@ class ConfigSLM(OpticalConfig):
     # Optimizer & LR schedule
     # =========================================================================
     PHASE_FOCUS_PHASE_PARAM_LR = 3e-3
+    # v8's best checkpoint was reached with this clipped SLM2-only step.
     PHASE_REFINE_PHASE_PARAM_LR = 1e-4
-    PHASE_COARSE_PARAM_LR = 1e-3
-    PHASE_MID_PARAM_LR = 5e-4
     DETECTOR_LR = 3e-4
     JOINT_PHASE_PARAM_LR = 3e-4
     JOINT_DETECTOR_LR = 1e-5
@@ -211,6 +205,7 @@ class ConfigSLM(OpticalConfig):
     JOINT_LR_SCHEDULER = "cosine_phase_floor"
     JOINT_PHASE_ETA_MIN = 5e-5
 
+    # Preserve all 30 v5 joint epochs for a direct schedule comparison.
     ENABLE_DETECTOR_FOCUS_EARLY_STOP = False
     DETECTOR_FOCUS_EARLY_STOP_PATIENCE = 20
     # SLM ablations often improve by <0.002 mAP; retain real improvements.
@@ -230,8 +225,22 @@ class ConfigSLM(OpticalConfig):
     # =========================================================================
     # Validation
     # =========================================================================
+    # Detector fitting converges slowly, while SLM2 refinements peak early.
+    # Use the cheaper cadence for the long stage and denser selection for the
+    # short, directly comparable residual ablations.
     VAL_INTERVAL = 5
+    PHASE_REFINE_VAL_INTERVAL = 2
     METRIC_IOU_THRESHOLD = 0.5
+    # Phase-focus has no detection objective and its mAP is necessarily zero;
+    # skip a full validation sweep there. Detector-aware stages still validate.
+    VALIDATE_PHASE_ONLY = False
+
+    # Expensive per-parameter TensorBoard diagnostics are sampled at this
+    # interval. Core losses, mAP, per-class AP, and SLM summaries remain
+    # available every epoch.
+    PARAMETER_MONITOR_INTERVAL = 10
+    # 0 records phase gradient norms from the final train batch only.
+    PHASE_GRAD_MONITOR_BATCH_INTERVAL = 0
 
     # =========================================================================
     # Visualization
@@ -288,8 +297,7 @@ class ConfigSLM(OpticalConfig):
             raise ValueError("RESOLUTION height and width must be positive.")
         cls.EPOCHS = (
             cls.PHASE_FOCUS_EPOCHS + cls.DETECTOR_FOCUS_EPOCHS
-            + cls.PHASE_REFINE_EPOCHS + cls.PHASE_COARSE_EPOCHS
-            + cls.PHASE_MID_EPOCHS + cls.JOINT_FIT_EPOCHS
+            + cls.PHASE_REFINE_EPOCHS + cls.JOINT_FIT_EPOCHS
             + cls.NORM_JOINT_EPOCHS
         )
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
@@ -326,17 +334,6 @@ class ConfigSLM(OpticalConfig):
                 "response": cls.RESPONSE_LOSS_WEIGHT_PHASE_REFINE,
                 "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE,
             }
-        if stage_name in {"phase_coarse", "phase_mid"}:
-            is_coarse = stage_name == "phase_coarse"
-            return {
-                "feature": cls.FEATURE_LOSS_WEIGHT_PHASE_COARSE if is_coarse else cls.FEATURE_LOSS_WEIGHT_PHASE_MID,
-                "detection": cls.DETECTION_LOSS_WEIGHT_PHASE_COARSE if is_coarse else cls.DETECTION_LOSS_WEIGHT_PHASE_MID,
-                "response": 0.0,
-                "phase_regularization": (
-                    cls.PHASE_REGULARIZATION_WEIGHT_PHASE_COARSE if is_coarse
-                    else cls.PHASE_REGULARIZATION_WEIGHT_PHASE_MID
-                ),
-            }
         if stage_name == "detector_focus":
             return {
                 "feature": cls.FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS,
@@ -357,6 +354,12 @@ class ConfigSLM(OpticalConfig):
             "response": cls.RESPONSE_LOSS_WEIGHT_JOINT,
             "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_JOINT,
         }
+
+    @classmethod
+    def validation_interval(cls, stage_name):
+        """Return the stage-specific validation cadence, with a safe default."""
+        stage_key = f"{str(stage_name).upper()}_VAL_INTERVAL"
+        return max(int(getattr(cls, stage_key, cls.VAL_INTERVAL)), 1)
 
     @classmethod
     def get_student_best_path(cls):

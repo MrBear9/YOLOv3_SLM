@@ -30,7 +30,19 @@ def _canvas_hw(config):
     return int(canvas[0]), int(canvas[1])
 
 
-def evaluate_slm_detector(config, teacher, student, detector, dataloader, detection_criterion, feature_criterion, device, stage_name, response_detector=None):
+def evaluate_slm_detector(
+    config,
+    teacher,
+    student,
+    detector,
+    dataloader,
+    detection_criterion,
+    feature_criterion,
+    device,
+    stage_name,
+    response_detector=None,
+    collect_detections=False,
+):
     teacher_core = unwrap_module(teacher)
     student_core = unwrap_module(student)
     detector_core = unwrap_module(detector)
@@ -52,6 +64,8 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
     total_tp = total_fp = total_fn = 0
     total_tp_op = total_fp_op = total_fn_op = 0
     op_conf_thresh = float(getattr(config, "CONF_THRESH", 0.35))
+    collected_detections = [] if collect_detections else None
+    collected_targets = [] if collect_detections else None
 
     with torch.no_grad():
         stage_weights = config.get_stage_loss_weights(stage_name)
@@ -121,6 +135,9 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
                 max_det=getattr(config, "METRIC_MAX_DET", config.MAX_DET),
             )
             for sample_idx, sample_detections in enumerate(detections):
+                if collect_detections:
+                    collected_detections.append(np.asarray(sample_detections, dtype=np.float32))
+                    collected_targets.append(targets[sample_idx].detach().cpu().numpy())
                 gt_by_class = {}
                 for gt in targets[sample_idx]:
                     if gt.shape[0] < 5 or gt[3] <= 0 or gt[4] <= 0:
@@ -237,6 +254,8 @@ def evaluate_slm_detector(config, teacher, student, detector, dataloader, detect
         detector_core.train()
     if response_detector_core is not detector_core and was_response_detector_training:
         response_detector_core.train()
+    if collect_detections:
+        return avg_losses, metrics, (collected_detections, collected_targets)
     return avg_losses, metrics
 
 

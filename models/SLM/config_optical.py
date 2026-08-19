@@ -46,6 +46,9 @@ class OpticalConfig:
     STUDENT_OUTPUT_BLUR_KERNEL = 1
 
     # SLM phase initialization and hardware export.
+    # A validated paired checkpoint can be used as a non-regression starting
+    # point for a short optical refinement.  ``ConfigSLM`` selects the actual
+    # checkpoint for the 10 cm experiment; keep random as the general default.
     SLM_INIT_MODE = "random"
     SLM_DIRECT_SGD_INIT_RANGE_RAD = 0.5
     SLM_INIT_NOISE_STD = 0.02
@@ -70,7 +73,14 @@ class OpticalConfig:
     # Student geometry for the current ablation: SLM1 -> 10 cm -> SLM2 -> 10 cm.
     # Teacher V2 geometry is configured separately in ConfigSLM as 20/20 cm.
     PROP_DISTANCE = {1: 0.10, 2: 0.10, 3: 0.20, 4: 0.20}
-    TRAIN_LAYER  = {1: True, 2: True, 3: True, 4: True}
+
+    # Which optical layers each phase-only stage may update.  The refinement
+    # stage deliberately gives the final SLM its own detector-aware update;
+    # SLM1 remains the stable image/detail encoder at that point.
+    PHASE_TRAINABLE_LAYERS = {
+        "phase_focus": {1: True, 2: True, 3: True, 4: True},
+        "phase_refine": {1: False, 2: True, 3: True, 4: True},
+    }
 
     # Phase field block parameters
     # Accept an int for square panels or (rows, cols) for rectangular panels.
@@ -81,6 +91,7 @@ class OpticalConfig:
 
     # Per-layer LR multipliers (× base LR)
     PHASE_FOCUS_LR_MULT = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
+    PHASE_REFINE_LR_MULT = {1: 0.0, 2: 1.0, 3: 1.0, 4: 1.0}
     JOINT_LR_MULT       = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
     NORM_JOINT_LR_MULT  = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0}
 
@@ -108,8 +119,13 @@ class OpticalConfig:
         return cls._layer_val(cls.PROP_DISTANCE, layer_idx, 0.10)
 
     @classmethod
-    def is_trainable(cls, layer_idx):
-        return cls._layer_val(cls.TRAIN_LAYER, layer_idx, True)
+    def is_trainable(cls, layer_idx, stage=None):
+        """Return the layer policy for a phase-only stage."""
+        stage = str(stage or "phase_focus")
+        layer_policy = cls.PHASE_TRAINABLE_LAYERS.get(stage)
+        if layer_policy is None:
+            return True
+        return cls._layer_val(layer_policy, layer_idx, True)
 
     @classmethod
     def phase_block_grid(cls, layer_idx):
@@ -129,9 +145,10 @@ class OpticalConfig:
 
     @classmethod
     def layer_lr_mult(cls, layer_idx, stage):
-        """stage: 'phase_focus' | 'joint' | 'norm_joint'"""
+        """stage: 'phase_focus' | 'phase_refine' | 'joint' | 'norm_joint'"""
         mapping = {
             "phase_focus": cls.PHASE_FOCUS_LR_MULT,
+            "phase_refine": cls.PHASE_REFINE_LR_MULT,
             "joint": cls.JOINT_LR_MULT,
             "norm_joint": cls.NORM_JOINT_LR_MULT,
         }

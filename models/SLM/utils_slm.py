@@ -170,13 +170,15 @@ def _layer_names_from_student(student):
     return ["slm1", "slm2"]
 
 
-def split_phase_param_groups(student):
+def split_phase_param_groups(student, allowed_layers=None):
     groups = defaultdict(list)
     for name, param in student.named_parameters():
         if not param.requires_grad:
             continue
         if _is_slm_phase_param(name):
             layer = _param_layer_name(name)
+            if allowed_layers is not None and layer is not None and layer not in allowed_layers:
+                continue
             groups[layer or "other"].append(param)
         else:
             groups["other"].append(param)
@@ -196,13 +198,7 @@ def build_stage_optimizer(config, student, detector, stage_name):
         lr_mult_stage = "phase_focus"
     elif stage_name == "phase_refine":
         base_lr = config.PHASE_REFINE_PHASE_PARAM_LR
-        lr_mult_stage = "joint"
-    elif stage_name == "phase_coarse":
-        base_lr = config.PHASE_COARSE_PARAM_LR
-        lr_mult_stage = "joint"
-    elif stage_name == "phase_mid":
-        base_lr = config.PHASE_MID_PARAM_LR
-        lr_mult_stage = "joint"
+        lr_mult_stage = "phase_refine"
     elif stage_name == "norm_joint":
         base_lr = config.NORM_JOINT_PHASE_PARAM_LR
         lr_mult_stage = "norm_joint"
@@ -210,7 +206,15 @@ def build_stage_optimizer(config, student, detector, stage_name):
         base_lr = config.JOINT_PHASE_PARAM_LR
         lr_mult_stage = "joint"
 
-    phase_groups = split_phase_param_groups(student)
+    allowed_phase_layers = None
+    if stage_name in {"phase_focus", "phase_refine"} and hasattr(config, "is_trainable"):
+        num_layers = int(getattr(student, "num_layers", 2))
+        allowed_phase_layers = {
+            f"slm{layer_idx}"
+            for layer_idx in range(1, num_layers + 1)
+            if config.is_trainable(layer_idx, stage_name)
+        }
+    phase_groups = split_phase_param_groups(student, allowed_layers=allowed_phase_layers)
     groups = []
 
     for key, params in sorted(phase_groups.items()):
@@ -223,12 +227,10 @@ def build_stage_optimizer(config, student, detector, stage_name):
             # Extract layer index from e.g. "slm2" → 2
             layer_idx = int(re.match(r"slm(\d+)", key).group(1))
             mult = _resolve_lr_mult(config, layer_idx, lr_mult_stage)
-            if stage_name == "phase_refine" and layer_idx == 2:
-                mult *= float(getattr(config, "SLM2_REFINEMENT_LR_MULT", 1.0))
             groups.append({"params": params, "lr": base_lr * mult,
                           "weight_decay": config.PHASE_WEIGHT_DECAY, "slm_group": "phase"})
 
-    if stage_name not in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"}:
+    if stage_name not in {"phase_focus", "phase_refine"}:
         detector_params = [p for p in detector.parameters() if p.requires_grad]
         detector_lr = (config.NORM_JOINT_DETECTOR_LR if stage_name == "norm_joint"
                        else config.JOINT_DETECTOR_LR)
@@ -247,6 +249,7 @@ def _resolve_lr_mult(config, layer_idx, stage):
     if layer_idx == 2:
         mapping = {
             "phase_focus": "SLM2_PHASE_FOCUS_LR_MULT",
+            "phase_refine": "SLM2_PHASE_REFINE_LR_MULT",
             "joint": "SLM2_JOINT_LR_MULT",
             "norm_joint": "SLM2_NORM_JOINT_LR_MULT",
         }
@@ -257,34 +260,6 @@ def _resolve_lr_mult(config, layer_idx, stage):
 def set_trainable(module, trainable):
     for param in module.parameters():
         param.requires_grad = trainable
-
-
-def set_pyramid_residual_stage(student, stage_name):
-    """Restrict late optical refinement to SLM2's smooth residual scales."""
-    if stage_name not in {"phase_refine", "phase_coarse", "phase_mid"}:
-        return
-    if stage_name == "phase_refine":
-        trainable_scales = int(getattr(student.config, "SLM2_REFINEMENT_LOW_FREQ_SCALES", 2))
-    elif stage_name == "phase_coarse":
-        trainable_scales = int(getattr(student.config, "PHASE_COARSE_NUM_SCALES", 2))
-    else:
-        trainable_scales = int(getattr(student.config, "PHASE_MID_NUM_SCALES", 3))
-    for layer_name, slm in student.all_slm_layers():
-        allow_residual = layer_name == "slm2"
-        if slm.direct_phase() is not None:
-            slm.direct_phase().requires_grad_(False)
-        field = slm.phase_field
-        if field is None:
-            continue
-        for index, param in enumerate(field.scale_params):
-            param.requires_grad_(allow_residual and index < trainable_scales)
-        # The Fourier MLP and block residuals add uncontrolled fine detail;
-        # keep them frozen for this fixed-pattern optical experiment.
-        for param in field.mlp_field.parameters():
-            param.requires_grad_(False)
-        if field.blocks is not None:
-            for param in field.blocks:
-                param.requires_grad_(False)
 
 
 def collect_slm_statistics(student):

@@ -90,22 +90,9 @@ def setup_training(is_main, use_ddp):
 
     student_raw = student
     detector_raw = detector
-    # Layer-wise ablations freeze one SLM after DDP has registered all parameters.
-    # Let DDP mark that layer unused instead of waiting for gradients that never arrive.
-    num_layers = int(getattr(Config, "NUM_LAYERS", 2))
-    student_find_unused = not all(
-        Config.is_trainable(i) if hasattr(Config, "is_trainable")
-        else getattr(Config, f"TRAIN_SLM{i}", True)
-        for i in range(1, num_layers + 1)
-    )
-    student_find_unused = student_find_unused or (
-        str(getattr(Config, "SLM_PHASE_PARAM_MODE", "")).lower() == "direct_sgd_pyramid"
-        and (
-            getattr(Config, "PHASE_REFINE_EPOCHS", 0) > 0
-            or getattr(Config, "PHASE_COARSE_EPOCHS", 0) > 0
-            or getattr(Config, "PHASE_MID_EPOCHS", 0) > 0
-        )
-    )
+    # The primary v5 route either trains all SLM parameters or keeps them
+    # active in the graph, so DDP unused-parameter traversal is unnecessary.
+    student_find_unused = False
     student = wrap_data_parallel(
         Config,
         student,

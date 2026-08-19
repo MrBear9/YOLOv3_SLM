@@ -40,17 +40,12 @@ def train():
 
     ctx = setup_training(is_main, use_ddp)
 
-    resume_map50 = (ctx.get("resume_info") or {}).get("val_map50")
-    resume_map50 = float(resume_map50) if resume_map50 is not None else -1.0
     best_student_loss = float("inf")
     best_detector_loss = float("inf")
-    best_map50 = resume_map50
-    best_student_map50 = resume_map50
+    best_map50 = -1.0
+    best_student_map50 = -1.0
     global_epoch = 0
     best_paired_checkpoint_path = None
-
-    if is_main and resume_map50 >= 0.0:
-        _seed_baseline_checkpoint(ctx, resume_map50)
 
     # 初始化参数快照用于变化追踪
     if is_main:
@@ -83,7 +78,7 @@ def train():
         if stage_epochs <= 0:
             continue
         if (
-            stage_name in {"phase_refine", "phase_coarse", "phase_mid", "joint_fit", "norm_joint"}
+            stage_name in {"phase_refine", "joint_fit", "norm_joint"}
             and best_paired_checkpoint_path is not None
             and Config.RESTORE_BEST_PAIRED_BEFORE_REFINEMENT
         ):
@@ -95,16 +90,22 @@ def train():
                 Config,
                 f"Restored validation-best paired checkpoint before {stage_name}: {restored}",
             )
-            best_paired_checkpoint_path = None
+            # Keep the path so every later optical ablation also starts from
+            # the current global validation-best pair, not a regressing end state.
         stage_norm_mode = configure_student_norm_for_stage(stage_name, deployment_norm_mode)
         stage_weights = Config.get_stage_loss_weights(stage_name)
         ctx["student_raw"].enable_norm = bool(Config.ENABLE_STUDENT_NORM and stage_norm_mode != "none")
 
         # Configure trainable components per stage
-        if stage_name in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"}:
-            _set_trainable_both(ctx["student"], ctx["detector"], student_trainable=True, detector_trainable=False)
-            from models.SLM.utils_slm import set_pyramid_residual_stage
-            set_pyramid_residual_stage(ctx["student_raw"], stage_name)
+        if stage_name in {"phase_focus", "phase_refine"}:
+            _set_trainable_both(
+                ctx["student"],
+                ctx["detector"],
+                student_trainable=True,
+                detector_trainable=False,
+                phase_stage=stage_name,
+                keep_frozen_phase_layers_active=use_ddp and stage_name == "phase_refine",
+            )
         elif stage_name == "detector_focus":
             _set_trainable_both(ctx["student"], ctx["detector"], student_trainable=False, detector_trainable=True)
         else:
@@ -145,7 +146,7 @@ def train():
             global_epoch += 1
             detector_no_improve += no_improve_delta
             should_stop_stage = (
-                stage_name in {"detector_focus", "phase_coarse", "phase_mid", "joint_fit"}
+                stage_name in {"detector_focus", "phase_refine", "joint_fit"}
                 and Config.ENABLE_DETECTOR_FOCUS_EARLY_STOP
                 and Config.DETECTOR_FOCUS_EARLY_STOP_PATIENCE > 0
                 and detector_no_improve >= Config.DETECTOR_FOCUS_EARLY_STOP_PATIENCE
@@ -170,7 +171,14 @@ def train():
     _finalize(ctx)
 
 
-def _set_trainable_both(student, detector, student_trainable, detector_trainable):
+def _set_trainable_both(
+    student,
+    detector,
+    student_trainable,
+    detector_trainable,
+    phase_stage=None,
+    keep_frozen_phase_layers_active=False,
+):
     from models.SLM.utils_slm import set_trainable
     set_trainable(student, student_trainable)
     if student_trainable:
@@ -180,66 +188,26 @@ def _set_trainable_both(student, detector, student_trainable, detector_trainable
         if hasattr(raw_student, "slm1_heads"):
             for layer_idx in range(1, num_layers + 1):
                 heads = getattr(raw_student, f"slm{layer_idx}_heads")
-                trainable = Config.is_trainable(layer_idx) if hasattr(Config, "is_trainable") else getattr(Config, f"TRAIN_SLM{layer_idx}", True)
+                trainable = (
+                    Config.is_trainable(layer_idx, phase_stage)
+                    if hasattr(Config, "is_trainable")
+                    else getattr(Config, f"TRAIN_SLM{layer_idx}", True)
+                )
+                trainable = trainable or keep_frozen_phase_layers_active
                 for head in heads:
                     set_trainable(head, trainable)
         else:
             for layer_idx in range(1, num_layers + 1):
                 slm = getattr(raw_student, f"slm{layer_idx}", None)
                 if slm is not None:
-                    trainable = Config.is_trainable(layer_idx) if hasattr(Config, "is_trainable") else getattr(Config, f"TRAIN_SLM{layer_idx}", True)
+                    trainable = (
+                        Config.is_trainable(layer_idx, phase_stage)
+                        if hasattr(Config, "is_trainable")
+                        else getattr(Config, f"TRAIN_SLM{layer_idx}", True)
+                    )
+                    trainable = trainable or keep_frozen_phase_layers_active
                     set_trainable(slm, trainable)
     set_trainable(detector, detector_trainable)
-
-
-def _seed_baseline_checkpoint(ctx, baseline_map50):
-    """Keep the restored paired model unless refinement improves validation mAP."""
-    student = ctx["student_raw"]
-    detector = ctx["detector_raw"]
-    slm_stats = collect_slm_statistics(student)
-    metadata = {
-        "train_loss": None,
-        "val_loss": None,
-        "val_map50": baseline_map50,
-        "selection_metric": "restored_direct_sgd_baseline",
-        "recommended_inference_checkpoint": True,
-        "paired_student_source": "student_state_dict",
-        "paired_student_epoch": 0,
-        "paired_student_stage": "restored_baseline",
-        "detector_head_type": Config.DETECTOR_HEAD_TYPE,
-        "detection_protocol": "anchor_free_tal",
-        "student_norm_mode": Config.STUDENT_NORM_MODE,
-        "student_norm_schedule": Config.STUDENT_NORM_SCHEDULE,
-        "slm_stats": slm_stats,
-        "slm_quality_passed": True,
-    }
-    save_detector_best(
-        detector,
-        Config.get_detector_best_path(),
-        0,
-        0.0,
-        extra=metadata,
-        student=student,
-        config=Config,
-    )
-    student_metadata = dict(metadata)
-    student_metadata.update({
-        "paired_with_detector_best": True,
-        "paired_detector_checkpoint": Config.get_detector_best_path(),
-        "recommended_inference_checkpoint": False,
-    })
-    save_student_best(
-        Config,
-        student,
-        Config.get_student_best_path(),
-        0,
-        0.0,
-        extra=student_metadata,
-    )
-    log_to_file(
-        Config,
-        f"Seeded refinement checkpoints from restored direct-SGD baseline (mAP50={baseline_map50:.4f}).",
-    )
 
 
 def _save_fallback_checkpoints(ctx, global_epoch):

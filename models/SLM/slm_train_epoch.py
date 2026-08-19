@@ -4,8 +4,6 @@ Contains run_epoch() which executes one training epoch (with optional
 validation) and returns updated best-model tracking values.
 """
 
-from contextlib import nullcontext
-
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -14,7 +12,6 @@ from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.evaluation_slm import evaluate_slm_detector, save_slm_detection_visualization
 from models.SLM.losses_slm import detection_response_loss, phase_regularization_loss
 from models.SLM.slm_utils import (
-    collect_phase_grad_norm,
     collect_phase_grad_norms,
     collect_phase_snapshot,
     collect_phase_update_norm,
@@ -29,49 +26,9 @@ from models.SLM.utils_slm import (
     save_detector_best,
     save_student_best,
 )
-from models.monitoring import (
-    snapshot_parameters,
-    write_confusion_matrix,
-    write_gradient_monitoring,
-    write_parameter_monitoring,
-)
-from models.runtime import gather_detection_results, log_epoch_table_row, log_to_file, unwrap_module
+from models.monitoring import write_confusion_matrix, write_gradient_monitoring, write_parameter_monitoring
+from models.runtime import gather_detection_results, log_epoch_table_row, log_to_file
 from models.yolov8.feature_adapter import prepare_slm_detector_feature
-
-
-def _collect_slm_val_detections(config, student, detector, val_loader, device):
-    """Collect all validation detections and targets for confusion matrix."""
-    from models.yolov8.detection_protocol import decode_detections
-
-    student = unwrap_module(student)
-    detector = unwrap_module(detector)
-    student.eval()
-    detector.eval()
-    all_dets = []
-    all_targets = []
-    amp_enabled = bool(getattr(config, "ENABLE_AMP", True)) and device.type == "cuda"
-    amp_dtype = torch.bfloat16 if str(getattr(config, "AMP_DTYPE", "float16")).lower() in {"bf16", "bfloat16"} else torch.float16
-    amp_ctx = torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled) if device.type == "cuda" else nullcontext()
-    with torch.no_grad():
-        for batch in val_loader:
-            gray = batch["gray_tensor"].to(device, non_blocking=config.PIN_MEMORY)
-            if config.ENABLE_CHANNELS_LAST and torch.cuda.is_available():
-                gray = gray.contiguous(memory_format=torch.channels_last)
-            with amp_ctx:
-                student_feature = student(gray) if hasattr(student, '__call__') else student
-                predictions = detector(prepare_slm_detector_feature(config, student_feature))
-            detections = decode_detections(
-                config, predictions,
-                conf_thresh=getattr(config, "METRIC_CONF_THRESH", config.CONF_THRESH),
-                nms_thresh=getattr(config, "METRIC_NMS_THRESH", config.NMS_THRESH),
-                max_det=getattr(config, "METRIC_MAX_DET", config.MAX_DET),
-            )
-            targets = batch["targets"]
-            for i, dets in enumerate(detections):
-                all_dets.append(np.array(dets) if not isinstance(dets, np.ndarray) else dets)
-                gt = targets[i]
-                all_targets.append(gt.cpu().numpy() if isinstance(gt, torch.Tensor) else gt)
-    return all_dets, all_targets
 
 
 def run_epoch(
@@ -108,7 +65,7 @@ def run_epoch(
 
     if use_ddp and train_sampler is not None:
         train_sampler.set_epoch(global_epoch)
-    phase_only_stage = stage_name in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"}
+    phase_only_stage = stage_name in {"phase_focus", "phase_refine"}
     student.train(stage_name != "detector_focus")
     detector.train(not phase_only_stage)
     epoch_total_t = torch.zeros((), device=device)
@@ -121,10 +78,13 @@ def run_epoch(
     epoch_phase_regularization_t = torch.zeros((), device=device)
     phase_snapshot = collect_phase_snapshot(student_raw)
     epoch_phase_grad_norm = 0.0
+    phase_grad_samples = 0
+    num_train_batches = max(len(train_loader), 1)
+    grad_monitor_interval = int(getattr(Config, "PHASE_GRAD_MONITOR_BATCH_INTERVAL", 0))
     # Use list to accumulate across batches 閳?dict built at epoch end
     _phase_grad_norms_accum = []
 
-    for batch in tqdm(train_loader, desc=f"Epoch {global_epoch + 1}/{Config.EPOCHS} [{stage_name}]", leave=True, disable=not is_main):
+    for batch_index, batch in enumerate(tqdm(train_loader, desc=f"Epoch {global_epoch + 1}/{Config.EPOCHS} [{stage_name}]", leave=True, disable=not is_main)):
         gray, rgb, targets = prepare_batch(batch, device)
         optimizer.zero_grad(set_to_none=True)
         teacher_feature = None
@@ -171,13 +131,23 @@ def run_epoch(
         )
 
         total_loss.backward()
-        _phase_grad_norms_accum.append(collect_phase_grad_norms(student_raw))
-        phase_grad_norm = collect_phase_grad_norm(student_raw)
-        if stage_name in {"phase_refine", "phase_coarse", "phase_mid", "joint_fit", "norm_joint"}:
+        monitor_phase_grad = (
+            batch_index + 1 == num_train_batches
+            if grad_monitor_interval <= 0
+            else (batch_index + 1) % grad_monitor_interval == 0
+        )
+        phase_grad_norm = 0.0
+        if monitor_phase_grad:
+            phase_grad_norms = collect_phase_grad_norms(student_raw)
+            _phase_grad_norms_accum.append(phase_grad_norms)
+            phase_grad_norm = sum(value * value for value in phase_grad_norms.values()) ** 0.5
+            phase_grad_samples += 1
+        if stage_name in {"phase_refine", "joint_fit", "norm_joint"}:
             clipped_norm = clip_phase_grad_norm(student_raw, Config.PHASE_GRAD_CLIP_NORM)
-            if clipped_norm is not None:
+            if monitor_phase_grad and clipped_norm is not None:
                 phase_grad_norm = min(clipped_norm, Config.PHASE_GRAD_CLIP_NORM)
-        epoch_phase_grad_norm += phase_grad_norm
+        if monitor_phase_grad:
+            epoch_phase_grad_norm += phase_grad_norm
         optimizer.step()
         epoch_total_t += total_loss.detach()
         epoch_feature_t += feature_loss.detach()
@@ -191,7 +161,7 @@ def run_epoch(
     if scheduler is not None:
         scheduler.step()
 
-    num_batches = max(len(train_loader), 1)
+    num_batches = num_train_batches
     avg_total = float(epoch_total_t.item()) / num_batches
     avg_feature = float(epoch_feature_t.item()) / num_batches
     avg_feature_global = float(epoch_feature_global_t.item()) / num_batches
@@ -200,7 +170,7 @@ def run_epoch(
     avg_detection = float(epoch_detection_t.item()) / num_batches
     avg_response = float(epoch_response_t.item()) / num_batches
     avg_phase_regularization = float(epoch_phase_regularization_t.item()) / num_batches
-    avg_phase_grad_norm = epoch_phase_grad_norm / num_batches
+    avg_phase_grad_norm = epoch_phase_grad_norm / max(phase_grad_samples, 1)
 
     # Merge per-batch grad norms into epoch-level stats
     from collections import defaultdict
@@ -209,16 +179,16 @@ def run_epoch(
         for k, v in batch_norms.items():
             epoch_phase_grad_norms[k] += v
     for k in epoch_phase_grad_norms:
-        epoch_phase_grad_norms[k] /= num_batches
+        epoch_phase_grad_norms[k] /= max(phase_grad_samples, 1)
 
     phase_update_norm, phase_update_rel = collect_phase_update_norm(student_raw, phase_snapshot)
     phase_layer_updates = collect_phase_update_norms(student_raw, phase_snapshot)
     phase_layer_stats = {
         layer_name: {
-            "grad_norm": epoch_phase_grad_norms[layer_name],
+            "grad_norm": epoch_phase_grad_norms.get(layer_name, 0.0),
             **phase_layer_updates[layer_name],
         }
-        for layer_name in epoch_phase_grad_norms
+        for layer_name in phase_layer_updates
     }
     history["train_total"].append(avg_total)
     history["train_feature"].append(avg_feature)
@@ -234,8 +204,16 @@ def run_epoch(
     # Validation
     val_losses = None
     val_metrics = None
-    if val_loader is not None and ((global_epoch + 1) % Config.VAL_INTERVAL == 0):
-        val_losses, val_metrics = evaluate_slm_detector(
+    validation_interval = Config.validation_interval(stage_name)
+    validation_due = (
+        val_loader is not None
+        and ((global_epoch + 1) % validation_interval == 0)
+        and (stage_weights["detection"] > 0 or bool(getattr(Config, "VALIDATE_PHASE_ONLY", False)))
+    )
+    should_write_cm = validation_due and stage_weights["detection"] > 0
+    cm_dets = cm_targets = None
+    if validation_due:
+        evaluation = evaluate_slm_detector(
             Config,
             teacher,
             student,
@@ -246,7 +224,13 @@ def run_epoch(
             device,
             stage_name,
             response_detector=reference_detector,
+            collect_detections=should_write_cm,
         )
+        if should_write_cm:
+            val_losses, val_metrics, (cm_dets, cm_targets) = evaluation
+            cm_dets, cm_targets = gather_detection_results(cm_dets, cm_targets)
+        else:
+            val_losses, val_metrics = evaluation
         history["val_total"].append(val_losses["total"])
         history["val_feature"].append(val_losses["feature"])
         history["val_detection"].append(val_losses["detection"])
@@ -269,12 +253,6 @@ def run_epoch(
     for group in optimizer.param_groups:
         group_name = group.get("slm_group", "detector" if stage_name == "detector_focus" else "other")
         lr_by_group[group_name] = max(lr_by_group.get(group_name, 0.0), float(group["lr"]))
-
-    cm_dets = cm_targets = None
-    should_write_cm = val_loader is not None and (global_epoch + 1) % Config.VAL_INTERVAL == 0
-    if should_write_cm:
-        cm_dets, cm_targets = _collect_slm_val_detections(Config, student, detector, val_loader, device)
-        cm_dets, cm_targets = gather_detection_results(cm_dets, cm_targets)
 
     # TensorBoard & checkpoint
     if is_main:
@@ -303,10 +281,12 @@ def run_epoch(
             lr_by_group=lr_by_group,
         )
         # 閳光偓閳光偓 濮婎垰瀹?& 閸欏倹鏆熼惄鎴炵ゴ 閳光偓閳光偓
-        write_gradient_monitoring(tensorboard_writer, student, display_epoch, prefix="Grad/Student")
-        write_gradient_monitoring(tensorboard_writer, detector, display_epoch, prefix="Grad/Detector")
-        write_parameter_monitoring(tensorboard_writer, student, display_epoch, prefix="Param/Student")
-        write_parameter_monitoring(tensorboard_writer, detector, display_epoch, prefix="Param/Detector")
+        monitor_interval = int(getattr(Config, "PARAMETER_MONITOR_INTERVAL", 0))
+        if monitor_interval > 0 and display_epoch % monitor_interval == 0:
+            write_gradient_monitoring(tensorboard_writer, student, display_epoch, prefix="Grad/Student")
+            write_gradient_monitoring(tensorboard_writer, detector, display_epoch, prefix="Grad/Detector")
+            write_parameter_monitoring(tensorboard_writer, student, display_epoch, prefix="Param/Student")
+            write_parameter_monitoring(tensorboard_writer, detector, display_epoch, prefix="Param/Detector")
         # 閳光偓閳光偓 濞ｉ攱绌惌鈺呮█閿涘牊鐦℃稉顏堢崣鐠?epoch閿涘鏀㈤埞鈧?
         if should_write_cm:
             write_confusion_matrix(
@@ -319,11 +299,11 @@ def run_epoch(
             )
 
     phase_only_checkpoint_due = (
-        stage_name in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"}
+        stage_name in {"phase_focus", "phase_refine"}
         and Config.VIS_INTERVAL > 0
         and display_epoch % Config.VIS_INTERVAL == 0
     )
-    if is_main and (stage_name not in {"phase_focus", "phase_refine", "phase_coarse", "phase_mid"} or phase_only_checkpoint_due):
+    if is_main and (stage_name not in {"phase_focus", "phase_refine"} or phase_only_checkpoint_due):
         save_current_student_checkpoint(
             student_raw,
             Config.get_student_current_path(),
@@ -366,11 +346,11 @@ def run_epoch(
     # Detector best tracking
     detector_score_is_best = False
     detector_no_improve_delta = 0
-    detector_stages = {"detector_focus", "phase_refine", "phase_coarse", "phase_mid", "joint_fit", "norm_joint"}
+    detector_stages = {"detector_focus", "phase_refine", "joint_fit", "norm_joint"}
     if stage_name in detector_stages and val_metrics is not None and val_metrics["map50"] > best_map50 + Config.DETECTOR_FOCUS_EARLY_STOP_MIN_DELTA:
         best_map50 = val_metrics["map50"]
         detector_score_is_best = True
-    elif val_metrics is not None and stage_name in {"detector_focus", "phase_refine", "phase_coarse", "phase_mid", "joint_fit"}:
+    elif val_metrics is not None and stage_name in {"detector_focus", "phase_refine", "joint_fit"}:
         detector_no_improve_delta = 1
     elif (
         stage_name in detector_stages

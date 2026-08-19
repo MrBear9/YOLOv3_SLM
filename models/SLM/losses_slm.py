@@ -1,5 +1,3 @@
-import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -83,30 +81,51 @@ class CompositeOpticalFeatureLoss(nn.Module):
         return (student_feature - s_mean) / (s_std + eps), (teacher_feature - t_mean) / (t_std + eps)
 
     def target_roi_mask(self, targets, height, width, device, dtype):
-        """Build a soft target-and-context mask from normalized YOLO boxes."""
+        """Build a soft target-and-context mask from normalized YOLO boxes.
+
+        Targets are batched per image before rasterization. The former
+        target-by-target ``torch.maximum`` loop issued a large number of small
+        CUDA kernels at 640x640, despite producing a simple per-pixel maximum.
+        """
         mask = torch.zeros((len(targets), 1, height, width), device=device, dtype=dtype)
         context_scale = max(float(getattr(self.config, "TARGET_ROI_CONTEXT_SCALE", 1.0)), 1.0)
         class_weights = getattr(self.config, "TARGET_ROI_CLASS_WEIGHTS", {})
+        max_class_id = max([int(key) for key in class_weights] + [0])
+        class_weight_lut = torch.ones(max_class_id + 1, device=device, dtype=dtype)
+        for class_id, weight in class_weights.items():
+            class_weight_lut[int(class_id)] = float(weight)
+        pixel_y = torch.arange(height, device=device).view(1, height, 1)
+        pixel_x = torch.arange(width, device=device).view(1, 1, width)
         for batch_idx, sample_targets in enumerate(targets):
             if sample_targets is None or sample_targets.numel() == 0:
                 continue
-            for target in sample_targets:
-                if target.numel() < 5 or target[3] <= 0 or target[4] <= 0:
-                    continue
-                class_id = int(target[0].item())
-                weight = float(class_weights.get(class_id, 1.0))
-                cx, cy = float(target[1]), float(target[2])
-                half_w = float(target[3]) * context_scale * 0.5
-                half_h = float(target[4]) * context_scale * 0.5
-                x0 = max(0, min(width, int((cx - half_w) * width)))
-                x1 = max(0, min(width, int(math.ceil((cx + half_w) * width))))
-                y0 = max(0, min(height, int((cy - half_h) * height)))
-                y1 = max(0, min(height, int(math.ceil((cy + half_h) * height))))
-                if x1 > x0 and y1 > y0:
-                    mask[batch_idx, :, y0:y1, x0:x1] = torch.maximum(
-                        mask[batch_idx, :, y0:y1, x0:x1],
-                        mask.new_full((1, y1 - y0, x1 - x0), weight),
-                    )
+            boxes = sample_targets.to(device=device, dtype=dtype)
+            if boxes.ndim != 2 or boxes.shape[1] < 5:
+                continue
+            valid = (boxes[:, 3] > 0) & (boxes[:, 4] > 0)
+            boxes = boxes[valid]
+            if boxes.numel() == 0:
+                continue
+            half_w = boxes[:, 3] * context_scale * 0.5
+            half_h = boxes[:, 4] * context_scale * 0.5
+            x0 = torch.trunc((boxes[:, 1] - half_w) * width).to(torch.long).clamp(0, width)
+            x1 = torch.ceil((boxes[:, 1] + half_w) * width).to(torch.long).clamp(0, width)
+            y0 = torch.trunc((boxes[:, 2] - half_h) * height).to(torch.long).clamp(0, height)
+            y1 = torch.ceil((boxes[:, 2] + half_h) * height).to(torch.long).clamp(0, height)
+            valid = (x1 > x0) & (y1 > y0)
+            if not torch.any(valid):
+                continue
+            class_ids = boxes[valid, 0].to(torch.long)
+            weights = torch.ones_like(class_ids, dtype=dtype)
+            known_class = (class_ids >= 0) & (class_ids < class_weight_lut.numel())
+            weights[known_class] = class_weight_lut[class_ids[known_class]]
+            inside = (
+                (pixel_x >= x0[valid].view(-1, 1, 1))
+                & (pixel_x < x1[valid].view(-1, 1, 1))
+                & (pixel_y >= y0[valid].view(-1, 1, 1))
+                & (pixel_y < y1[valid].view(-1, 1, 1))
+            )
+            mask[batch_idx, 0] = (inside.to(dtype) * weights.view(-1, 1, 1)).amax(dim=0)
         feather_kernel = max(int(getattr(self.config, "TARGET_ROI_FEATHER_KERNEL", 1)), 1)
         if feather_kernel > 1:
             if feather_kernel % 2 == 0:
