@@ -379,7 +379,22 @@ def log_config():
     teacher_distances = tuple(getattr(Config, "TEACHER_V2_PROP_DISTANCES", ()))
     log_to_file(
         Config,
-        f"Propagation: teacher_v2={teacher_distances} m, student={student_distances} m",
+        f"DMD: resolution={Config.RESOLUTION}, pitch={Config.DMD_PIXEL_PITCH:g} m, "
+        f"aperture={Config.dmd_aperture()} m",
+    )
+    layer_geometry = tuple(
+        {
+            "profile": Config.slm_profile_name(index),
+            "hardware_pitch_m": Config.hardware_pixel_pitch(index),
+            "sampling_pitch_m": Config.sampling_pitch(index),
+            "active_shape": Config.slm_active_shape(index),
+        }
+        for index in range(1, num_layers + 1)
+    )
+    log_to_file(
+        Config,
+        f"Propagation: teacher_v2={teacher_distances} m, student={student_distances} m, "
+        f"layers={layer_geometry}",
     )
     log_to_file(
         Config,

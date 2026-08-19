@@ -12,6 +12,16 @@ from datetime import datetime
 import torch
 import yaml
 
+from models.SLM.physical_defaults import (
+    DEFAULT_DMD_PIXEL_PITCH,
+    DEFAULT_DMD_RESOLUTION,
+    DEFAULT_PROPAGATION_DISTANCES,
+    DEFAULT_SLM_LAYER_PROFILES,
+    SLM_PROFILES,
+    active_pixel_shape,
+    aperture_size,
+)
+
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -36,7 +46,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/Tv2_light_20cm"
+    TEACHER_OUTPUT_DIR = r"output/Tv2_dmd640_scratch"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -49,7 +59,8 @@ class ConfigYOLOv8Anchor:
     # Training scale
     # =========================================================================
     # Shared image/feature canvas as (height, width). Example: (1080, 1920).
-    RESOLUTION = (640, 640)
+    RESOLUTION = DEFAULT_DMD_RESOLUTION
+    DMD_PIXEL_PITCH = DEFAULT_DMD_PIXEL_PITCH
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
     # DMD gray code is treated as incident intensity; use "srgb_linear" only
@@ -78,8 +89,19 @@ class ConfigYOLOv8Anchor:
     # V2 is always physical; no CNN residual-output fallback is retained.
     TEACHER_V2_NUM_SLM_LAYERS = 2
     TEACHER_V2_WAVELENGTH = 532e-9
-    TEACHER_V2_PIXEL_SIZE = 6.4e-6
-    TEACHER_V2_PROP_DISTANCES = (0.20, 0.20)
+    TEACHER_V2_SLM_PROFILES = tuple(
+        DEFAULT_SLM_LAYER_PROFILES[index] for index in range(1, 3)
+    )
+    TEACHER_V2_HARDWARE_PIXEL_PITCHES = tuple(
+        SLM_PROFILES[name]["hardware_pixel_pitch"] for name in TEACHER_V2_SLM_PROFILES
+    )
+    TEACHER_V2_SAMPLING_PITCHES = tuple(
+        SLM_PROFILES[name]["effective_sampling_pitch"] for name in TEACHER_V2_SLM_PROFILES
+    )
+    # Deprecated compatibility alias; the simulator uses the per-layer tuple.
+    TEACHER_V2_PIXEL_SIZE = TEACHER_V2_SAMPLING_PITCHES[0]
+    TEACHER_V2_PROP_DISTANCES = DEFAULT_PROPAGATION_DISTANCES
+    SIMULATE_HARDWARE_PIXEL_GRID = True
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v3" | "v3"  (residual + gate)
@@ -303,6 +325,14 @@ class ConfigYOLOv8Anchor:
         cls.RESOLUTION = tuple(int(value) for value in cls.RESOLUTION)
         if min(cls.RESOLUTION) < 1:
             raise ValueError("RESOLUTION height and width must be positive.")
+        if cls.get_teacher_init_mode() == "scratch" and cls.FREEZE_TEACHER:
+            raise ValueError("A scratch teacher cannot be frozen.")
+        if len(cls.TEACHER_V2_SLM_PROFILES) != cls.TEACHER_V2_NUM_SLM_LAYERS:
+            raise ValueError("TEACHER_V2_SLM_PROFILES must match TEACHER_V2_NUM_SLM_LAYERS.")
+        dmd_aperture = aperture_size(cls.RESOLUTION, cls.DMD_PIXEL_PITCH)
+        cls.TEACHER_V2_ACTIVE_PIXEL_SHAPES = tuple(
+            active_pixel_shape(name, dmd_aperture) for name in cls.TEACHER_V2_SLM_PROFILES
+        )
         cls.YAML_PATH = resolve_project_path(cls.YAML_PATH)
         cls.TEACHER_OUTPUT_DIR = resolve_project_path(cls.TEACHER_OUTPUT_DIR)
         cls.CLASS_NAMES, cls.NUM_CLASSES = load_class_names(cls.YAML_PATH)
@@ -382,6 +412,10 @@ class ConfigYOLOv8Anchor:
         print("=" * 80)
         print(f"Device: {cls.DEVICE}")
         print(f"Resolution (H, W): {cls.RESOLUTION}")
+        print(f"DMD aperture (m): {aperture_size(cls.RESOLUTION, cls.DMD_PIXEL_PITCH)}")
+        print(f"SLM profiles: {cls.TEACHER_V2_SLM_PROFILES}")
+        print(f"Hardware active shapes: {cls.TEACHER_V2_ACTIVE_PIXEL_SHAPES}")
+        print(f"ASM sampling pitches (m): {cls.TEACHER_V2_SAMPLING_PITCHES}")
         print(f"Batch Size: {cls.BATCH_SIZE}")
         print(f"Epochs: {cls.EPOCHS}")
         print(f"Num Classes: {cls.NUM_CLASSES}")

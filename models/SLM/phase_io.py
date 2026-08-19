@@ -47,8 +47,20 @@ def export_student_phase_images(config, checkpoint_path, output_dir, device="cpu
         "hardware_export_offset_rad": float(getattr(config, "SLM_EXPORT_PHASE_OFFSET_RAD", np.pi)),
         "gray_inverted": bool(getattr(config, "SLM_GRAY_INVERTED", False)),
         "phase_levels": int(getattr(config, "SLM_PHASE_LEVELS", 256)),
+        "simulate_hardware_pixel_grid": bool(getattr(config, "SIMULATE_HARDWARE_PIXEL_GRID", False)),
         "direct_sgd_pyramid_scale": float(getattr(config, "SLM_DIRECT_SGD_PYRAMID_SCALE", 0.0)),
-        "resolution_hw": [int(config.RESOLUTION[0]), int(config.RESOLUTION[1])],
+        "simulation_resolution_hw": [int(config.RESOLUTION[0]), int(config.RESOLUTION[1])],
+        "dmd_pixel_pitch_m": float(getattr(config, "DMD_PIXEL_PITCH", 0.0)),
+        "dmd_aperture_m": list(config.dmd_aperture()) if hasattr(config, "dmd_aperture") else None,
+        "slm_layers": {
+            f"slm{index}": {
+                "profile": config.slm_profile_name(index),
+                "hardware_pixel_pitch_m": config.hardware_pixel_pitch(index),
+                "effective_sampling_pitch_m": config.sampling_pitch(index),
+                "active_shape_hw": list(config.slm_active_shape(index)),
+            }
+            for index in range(1, int(getattr(config, "NUM_LAYERS", 2)) + 1)
+        } if hasattr(config, "slm_profile_name") else {},
         "gray_to_phase_lut": str(getattr(config, "SLM_GRAY_TO_PHASE_LUT", "") or ""),
     }
     with (output_dir / "phase_export_metadata.json").open("w", encoding="utf-8") as handle:

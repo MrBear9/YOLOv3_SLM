@@ -83,7 +83,10 @@ def log_all_parameters():
             f"low_pass_sigma={Config.TEACHER_V2_FOURIER_LOW_PASS_SIGMA}, "
             f"slm_layers={Config.TEACHER_V2_NUM_SLM_LAYERS}, "
             f"wavelength={Config.TEACHER_V2_WAVELENGTH}, "
-            f"pixel_size={Config.TEACHER_V2_PIXEL_SIZE}, "
+            f"slm_profiles={Config.TEACHER_V2_SLM_PROFILES}, "
+            f"hardware_pitches={Config.TEACHER_V2_HARDWARE_PIXEL_PITCHES}, "
+            f"sampling_pitches={Config.TEACHER_V2_SAMPLING_PITCHES}, "
+            f"active_shapes={Config.TEACHER_V2_ACTIVE_PIXEL_SHAPES}, "
             f"distances={Config.TEACHER_V2_PROP_DISTANCES}",
         )
     log_to_file(Config, f"Teacher parameters: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")

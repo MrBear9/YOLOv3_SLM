@@ -5,6 +5,16 @@
 
 import math
 
+from models.SLM.physical_defaults import (
+    DEFAULT_DMD_PIXEL_PITCH,
+    DEFAULT_DMD_RESOLUTION,
+    DEFAULT_PROPAGATION_DISTANCES,
+    DEFAULT_SLM_LAYER_PROFILES,
+    SLM_PROFILES,
+    active_pixel_shape,
+    aperture_size,
+)
+
 class OpticalConfig:
     """光学传播的共享默认值 + per-layer 可覆盖配置。
 
@@ -20,9 +30,15 @@ class OpticalConfig:
 
     # Optical canvas and shared physical constants.
     # Spatial sizes are always expressed as (height, width).
-    RESOLUTION = (640, 640)
+    # DMD input: 640 pixels * 5.4 um = 3.456 mm in both axes.
+    RESOLUTION = DEFAULT_DMD_RESOLUTION
+    DMD_PIXEL_PITCH = DEFAULT_DMD_PIXEL_PITCH
     WAVELENGTH = 532e-9
-    PIXEL_SIZE = 6.4e-6
+    # Real panel facts and fitted numerical ASM sampling are independent.
+    SLM_PROFILES = SLM_PROFILES
+    SLM_LAYER_PROFILES = dict(DEFAULT_SLM_LAYER_PROFILES)
+    # Compatibility scalar. New propagation code calls sampling_pitch(layer).
+    PIXEL_SIZE = SLM_PROFILES["magicholo_4p5"]["effective_sampling_pitch"]
     SLM_MODE = "phase"
     INPUT_INTENSITY_MODE = "srgb"
     OPTICAL_FIELD_EPS = 1e-8
@@ -55,6 +71,7 @@ class OpticalConfig:
     SLM_INIT_CHECKPOINT = r"output/SLM_Tv2_light_phase_refine/detector_best.pth"
     SLM_PHASE_LEVELS = 256
     SIMULATE_PHASE_QUANTIZATION = False
+    SIMULATE_HARDWARE_PIXEL_GRID = True
     SLM_GRAY_INVERTED = True
     SLM_EXPORT_PHASE_OFFSET_RAD = float(math.pi)
     SLM_GRAY_TO_PHASE_LUT = r""
@@ -70,9 +87,13 @@ class OpticalConfig:
     # ═══════════════════════════════════════════════════════════════════════
     # Per-layer 配置  {layer_idx (1-based): value}
     # ═══════════════════════════════════════════════════════════════════════
-    # Student geometry for the current ablation: SLM1 -> 10 cm -> SLM2 -> 10 cm.
-    # Teacher V2 geometry is configured separately in ConfigSLM as 20/20 cm.
-    PROP_DISTANCE = {1: 0.10, 2: 0.10, 3: 0.20, 4: 0.20}
+    # Student geometry: SLM1 -> 10 cm -> SLM2 -> 10 cm -> sensor plane.
+    PROP_DISTANCE = {
+        1: DEFAULT_PROPAGATION_DISTANCES[0],
+        2: DEFAULT_PROPAGATION_DISTANCES[1],
+        3: 0.20,
+        4: 0.20,
+    }
 
     # Which optical layers each phase-only stage may update.  The refinement
     # stage deliberately gives the final SLM its own detector-aware update;
@@ -117,6 +138,45 @@ class OpticalConfig:
     @classmethod
     def prop_distance(cls, layer_idx):
         return cls._layer_val(cls.PROP_DISTANCE, layer_idx, 0.10)
+
+    @classmethod
+    def slm_profile(cls, layer_idx):
+        name = cls._layer_val(cls.SLM_LAYER_PROFILES, layer_idx)
+        if name not in cls.SLM_PROFILES:
+            raise ValueError(f"Unknown SLM profile for layer {layer_idx}: {name!r}.")
+        return cls.SLM_PROFILES[name]
+
+    @classmethod
+    def slm_profile_name(cls, layer_idx):
+        return cls._layer_val(cls.SLM_LAYER_PROFILES, layer_idx)
+
+    @classmethod
+    def hardware_pixel_pitch(cls, layer_idx):
+        return float(cls.slm_profile(layer_idx)["hardware_pixel_pitch"])
+
+    @classmethod
+    def sampling_pitch(cls, layer_idx):
+        return float(cls.slm_profile(layer_idx)["effective_sampling_pitch"])
+
+    @classmethod
+    def dmd_aperture(cls):
+        return aperture_size(cls.RESOLUTION, cls.DMD_PIXEL_PITCH)
+
+    @classmethod
+    def slm_active_shape(cls, layer_idx):
+        return active_pixel_shape(cls.slm_profile_name(layer_idx), cls.dmd_aperture())
+
+    @classmethod
+    def validate_optical_geometry(cls):
+        if tuple(cls.RESOLUTION) != tuple(DEFAULT_DMD_RESOLUTION):
+            raise ValueError("This bench configuration expects the DMD canvas to be 640x640.")
+        for layer_idx in range(1, int(cls.NUM_LAYERS) + 1):
+            shape = cls.slm_active_shape(layer_idx)
+            pitch = cls.hardware_pixel_pitch(layer_idx)
+            represented = tuple(count * pitch for count in shape)
+            error = max(abs(a - b) for a, b in zip(represented, cls.dmd_aperture()))
+            if error > pitch / 2 + 1e-12:
+                raise ValueError(f"SLM{layer_idx} cannot cover the DMD aperture within half a hardware pixel.")
 
     @classmethod
     def is_trainable(cls, layer_idx, stage=None):

@@ -43,6 +43,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.SLM.optical_layers import SLMLayer, ASMPropagation, OpticalStudent, _resolve_prop_distance
+from models.SLM.slm_modulation import complex_intensity
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -121,7 +122,15 @@ class MultiHeadOpticalStudent(nn.Module):
         # --- Shared propagation per layer (fixed, no learnable parameters) ---
         for layer_idx in range(1, self.num_layers + 1):
             dist = _resolve_prop_distance(config, layer_idx)
-            setattr(self, f"prop{layer_idx}", ASMPropagation(config, dist))
+            sampling_pitch = (
+                config.sampling_pitch(layer_idx)
+                if hasattr(config, "sampling_pitch") else config.PIXEL_SIZE
+            )
+            setattr(
+                self,
+                f"prop{layer_idx}",
+                ASMPropagation(config, dist, pixel_size=sampling_pitch),
+            )
 
         # --- Gate network (only for learned_gate mode) ---
         if self._fusion_mode == "learned_gate":
@@ -175,7 +184,7 @@ class MultiHeadOpticalStudent(nn.Module):
             for layer_idx in range(1, self.num_layers + 1):
                 f = getattr(self, f"slm{layer_idx}_heads")[k](f)
                 f = getattr(self, f"prop{layer_idx}")(f)
-            out = torch.abs(f) ** 2
+            out = complex_intensity(f)
 
             blur_kernel = int(getattr(self.config, "STUDENT_OUTPUT_BLUR_KERNEL", 1))
             if blur_kernel > 1:

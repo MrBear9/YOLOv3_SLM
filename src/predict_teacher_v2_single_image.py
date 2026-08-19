@@ -20,6 +20,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from models.dataset import image_to_intensity_tensor, letterbox_image_targets
+from models.SLM.physical_defaults import aperture_size
+from models.SLM.slm_modulation import resample_phase_map
 from models.teacher import build_teacher
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 from models.yolov8.detection_protocol import decode_detections
@@ -139,16 +141,22 @@ def export_phase_maps(phase_maps, output_dir, args):
     lut_phase, lut_gray = load_phase_lut(args.lut)
     saved = []
     for index, phase_map in enumerate(phase_maps, start=1):
-        centered = phase_map[0, 0].detach().float().cpu().numpy()
+        hardware_shape = Config.TEACHER_V2_ACTIVE_PIXEL_SHAPES[index - 1]
+        centered = resample_phase_map(phase_map.float(), hardware_shape)[0, 0].detach().cpu().numpy()
         hardware_phase = np.remainder(centered + args.export_phase_offset_rad, 2.0 * math.pi)
         gray = phase_to_gray(hardware_phase, lut_phase, lut_gray, args.gray_inverted)
-        # The PNG is 8-bit; the exact continuous phase remains available as NPY.
+        gray = np.rint(gray * (args.phase_levels - 1)) / (args.phase_levels - 1)
+        # PNG storage is 8-bit; --phase-levels controls the actual drive levels.
         gray_u8 = np.rint(gray * 255.0).astype(np.uint8)
         np.save(output_dir / f"phase_map_{index}_centered_rad.npy", centered)
         np.save(output_dir / f"phase_map_{index}_hardware_phase_0_2pi_rad.npy", hardware_phase)
         Image.fromarray(gray_u8, mode="L").save(output_dir / f"phase_map_{index}_slm_gray.png")
         saved.append({
             "layer": index,
+            "profile": Config.TEACHER_V2_SLM_PROFILES[index - 1],
+            "hardware_pixel_pitch_m": Config.TEACHER_V2_HARDWARE_PIXEL_PITCHES[index - 1],
+            "effective_sampling_pitch_m": Config.TEACHER_V2_SAMPLING_PITCHES[index - 1],
+            "active_shape_hw": list(hardware_shape),
             "centered_phase_rad": f"phase_map_{index}_centered_rad.npy",
             "hardware_phase_rad": f"phase_map_{index}_hardware_phase_0_2pi_rad.npy",
             "slm_gray_png": f"phase_map_{index}_slm_gray.png",
@@ -211,10 +219,13 @@ def main():
         "checkpoint_epoch": checkpoint.get("epoch"),
         "checkpoint_map50": checkpoint.get("val_map50"),
         "teacher_arch": checkpoint.get("teacher_arch"),
-        "resolution_hw": list(Config.RESOLUTION),
+        "simulation_resolution_hw": list(Config.RESOLUTION),
+        "dmd_pixel_pitch_m": Config.DMD_PIXEL_PITCH,
+        "dmd_aperture_m": list(aperture_size(Config.RESOLUTION, Config.DMD_PIXEL_PITCH)),
         "input_intensity_mode": Config.INPUT_INTENSITY_MODE,
         "slm_layers": phase_files,
         "phase_export_offset_rad": args.export_phase_offset_rad,
+        "phase_levels": args.phase_levels,
         "gray_inverted": args.gray_inverted,
         "gray_to_phase_lut": str(args.lut.resolve()) if args.lut else "ideal_linear",
         "note": "Each phase map is valid only for input_letterboxed.png and its registered optical input.",
@@ -243,7 +254,7 @@ if __name__ == "__main__":
 # 仿真光学输出的检测图：detection_simulation.png
 # 检测框与置信度：detections_simulation.json
 # 相位、输入和硬件设置记录：export_metadata.json
-# 将两张相位图依次加载至两块 SLM，并保证输入图、DMD 显示方式、640×640 letterbox、波长、像元尺寸、传播距离均与训练一致。相位图只对本次指定输入图有效，换图后必须重新预测并加载相位。
+# 将两张相位图依次加载至两块 SLM，并保证输入图、DMD 显示方式、640×640 letterbox、波长、有效采样间隔、传播距离均与训练一致。相位图只对本次指定输入图有效，换图后必须重新预测并加载相位。
 # 若你拍到经过 SLM 系统后的相机灰度图，可追加：
 # --captured-feature path/to/camera_capture.png
 # 脚本会额外输出基于真实相机结果的 detection_hardware.png

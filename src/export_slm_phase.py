@@ -1,4 +1,4 @@
-"""Export a trained optical student to native-resolution SLM gray-drive PNGs."""
+"""Export trained phases for each DMD-aligned active SLM aperture."""
 
 import argparse
 from pathlib import Path

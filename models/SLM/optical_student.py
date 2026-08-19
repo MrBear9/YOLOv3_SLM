@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 from models.SLM.asm_propagation import ASMPropagation
 from models.SLM.phase_parameterization import _resolve_prop_distance
-from models.SLM.slm_modulation import SLMLayer
+from models.SLM.slm_modulation import SLMLayer, complex_intensity
 
 class OpticalStudent(nn.Module):
     """N-layer optical student: SLM1鈫扨rop1鈫扴LM2鈫扨rop2鈫?..鈫扴LM_N鈫扨rop_N.
@@ -30,7 +30,11 @@ class OpticalStudent(nn.Module):
         for layer_idx in range(1, self.num_layers + 1):
             slm = SLMLayer(config, layer_index=layer_idx)
             dist = _resolve_prop_distance(config, layer_idx)
-            prop = ASMPropagation(config, dist)
+            sampling_pitch = (
+                config.sampling_pitch(layer_idx)
+                if hasattr(config, "sampling_pitch") else config.PIXEL_SIZE
+            )
+            prop = ASMPropagation(config, dist, pixel_size=sampling_pitch)
             setattr(self, f"slm{layer_idx}", slm)
             setattr(self, f"prop{layer_idx}", prop)
 
@@ -44,7 +48,7 @@ class OpticalStudent(nn.Module):
         for layer_idx in range(1, self.num_layers + 1):
             field = getattr(self, f"slm{layer_idx}")(field)
             field = getattr(self, f"prop{layer_idx}")(field)
-        out = torch.abs(field) ** 2
+        out = complex_intensity(field)
         blur_kernel = int(getattr(self.config, "STUDENT_OUTPUT_BLUR_KERNEL", 1))
         if blur_kernel > 1:
             if blur_kernel % 2 == 0:

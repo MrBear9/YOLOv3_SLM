@@ -30,6 +30,9 @@ class ASMPropagation(nn.Module):
         wavelength, distance = float(wavelength), float(distance)
         if height < 1 or width < 1 or dy <= 0 or dx <= 0 or wavelength <= 0 or distance == 0:
             raise ValueError("ASM resolution, pixel size, wavelength, and non-zero distance must be valid.")
+        self.pixel_size = (dy, dx)
+        self.wavelength = wavelength
+        self.distance = distance
 
         padded_height, padded_width = (
             (height * 2, width * 2) if self._linear_conv else (height, width)

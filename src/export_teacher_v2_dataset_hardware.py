@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from models.dataset import YOLODataset
+from models.SLM.slm_modulation import resample_phase_map
 from models.teacher import build_teacher
 from models.teacher_guidance import enhance_feature_for_display
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
@@ -67,8 +68,10 @@ def build_output_directories(root, phase_count):
     return directories
 
 
-def phase_map_to_drive_image(phase_map, lut_phase, lut_gray, args):
-    centered_phase = phase_map[0, 0].detach().float().cpu().numpy()
+def phase_map_to_drive_image(phase_map, target_shape, lut_phase, lut_gray, args):
+    centered_phase = resample_phase_map(
+        phase_map.float(), target_shape
+    )[0, 0].detach().cpu().numpy()
     hardware_phase = np.remainder(centered_phase + args.export_phase_offset_rad, 2.0 * math.pi)
     gray = phase_to_gray(hardware_phase, lut_phase, lut_gray, args.gray_inverted)
     # Quantize to the actual available hardware levels before writing the PNG.
@@ -158,7 +161,10 @@ def main():
             phase_files = []
             for layer_index, phase_map in enumerate(phase_maps, start=1):
                 phase_path = directories[f"slm{layer_index}"] / f"{file_id}.png"
-                Image.fromarray(phase_map_to_drive_image(phase_map, lut_phase, lut_gray, args), mode="L").save(phase_path)
+                target_shape = Config.TEACHER_V2_ACTIVE_PIXEL_SHAPES[layer_index - 1]
+                Image.fromarray(
+                    phase_map_to_drive_image(phase_map, target_shape, lut_phase, lut_gray, args), mode="L"
+                ).save(phase_path)
                 phase_files.append(str(phase_path.relative_to(output_root)).replace("\\", "/"))
 
             record = {
@@ -181,7 +187,12 @@ def main():
         "dataset_yaml": str(args.data.resolve()),
         "split": args.split,
         "exported_images": len(manifest),
-        "resolution_hw": list(Config.RESOLUTION),
+        "simulation_resolution_hw": list(Config.RESOLUTION),
+        "dmd_pixel_pitch_m": Config.DMD_PIXEL_PITCH,
+        "slm_profiles": list(Config.TEACHER_V2_SLM_PROFILES),
+        "slm_hardware_pixel_pitches_m": list(Config.TEACHER_V2_HARDWARE_PIXEL_PITCHES),
+        "slm_effective_sampling_pitches_m": list(Config.TEACHER_V2_SAMPLING_PITCHES),
+        "slm_active_shapes_hw": [list(shape) for shape in Config.TEACHER_V2_ACTIVE_PIXEL_SHAPES],
         "input_intensity_mode": Config.INPUT_INTENSITY_MODE,
         "phase_export_offset_rad": args.export_phase_offset_rad,
         "phase_levels": args.phase_levels,

@@ -14,15 +14,15 @@ class ConfigSLM(OpticalConfig):
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    # Random-init 10 cm + 10 cm run using the v5 primary schedule.
-    OUTPUT_DIR = r"output/SLM_Tv2_light_10cm_roi_v10_scratch_v5_schedule"
+    # New hardware-aware 640x640 experiment; old single-pitch checkpoints are incompatible.
+    OUTPUT_DIR = r"output/SLM_Tv2_dmd640_scratch"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_light_20cm/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_dmd640_scratch/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -77,12 +77,20 @@ class ConfigSLM(OpticalConfig):
     TEACHER_V2_C2F_BLOCKS = 3
     TEACHER_V2_FOURIER_BANDS = 8
     TEACHER_V2_FOURIER_LOW_PASS_SIGMA = 0.5
-    # These remain fixed to the loaded V2 teacher checkpoint. Student distance
-    # is intentionally different in this 20 cm optical-geometry ablation.
+    # These must match the newly trained hardware-aware 640x640 physical teacher.
     TEACHER_V2_NUM_SLM_LAYERS = 2
     TEACHER_V2_WAVELENGTH = 532e-9
-    TEACHER_V2_PIXEL_SIZE = 6.4e-6
-    TEACHER_V2_PROP_DISTANCES = (0.20, 0.20)
+    TEACHER_V2_SLM_PROFILES = tuple(OpticalConfig.SLM_LAYER_PROFILES[index] for index in range(1, 3))
+    TEACHER_V2_HARDWARE_PIXEL_PITCHES = tuple(
+        OpticalConfig.SLM_PROFILES[name]["hardware_pixel_pitch"] for name in TEACHER_V2_SLM_PROFILES
+    )
+    TEACHER_V2_SAMPLING_PITCHES = tuple(
+        OpticalConfig.SLM_PROFILES[name]["effective_sampling_pitch"] for name in TEACHER_V2_SLM_PROFILES
+    )
+    TEACHER_V2_PIXEL_SIZE = TEACHER_V2_SAMPLING_PITCHES[0]
+    TEACHER_V2_PROP_DISTANCES = tuple(
+        OpticalConfig.PROP_DISTANCE[index] for index in range(1, 3)
+    )
 
     # -------- TEACHER_ARCH = "convteacher_v3" --------
     TEACHER_V3_BASE_CHANNELS = 24
@@ -295,6 +303,10 @@ class ConfigSLM(OpticalConfig):
         cls.RESOLUTION = tuple(int(value) for value in cls.RESOLUTION)
         if min(cls.RESOLUTION) < 1:
             raise ValueError("RESOLUTION height and width must be positive.")
+        cls.validate_optical_geometry()
+        cls.TEACHER_V2_ACTIVE_PIXEL_SHAPES = tuple(
+            cls.slm_active_shape(index) for index in range(1, cls.TEACHER_V2_NUM_SLM_LAYERS + 1)
+        )
         cls.EPOCHS = (
             cls.PHASE_FOCUS_EPOCHS + cls.DETECTOR_FOCUS_EPOCHS
             + cls.PHASE_REFINE_EPOCHS + cls.JOINT_FIT_EPOCHS

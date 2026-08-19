@@ -11,19 +11,39 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from models.SLM.phase_parameterization import MultiScalePhaseField
 
 
 def apply_phase_modulation(field, phase):
     """Apply continuous phase-only modulation to a complex optical field."""
-    return field * torch.exp(1j * phase)
+    # Complex torch.exp uses CUDA's optional NVRTC jiterator on some PyTorch
+    # builds.  The explicit Euler form is identical and works without NVRTC.
+    modulation = torch.complex(torch.cos(phase), torch.sin(phase))
+    return field * modulation
+
+
+def complex_intensity(field):
+    """Return |field|^2 without CUDA's optional complex-abs JIT kernel."""
+    return field.real.square() + field.imag.square()
+
+
+def resample_phase_map(phase, target_shape):
+    """Resize a phase map by interpolating its unit phasor."""
+    target_shape = tuple(int(value) for value in target_shape)
+    if tuple(phase.shape[-2:]) == target_shape:
+        return phase
+    real = F.interpolate(torch.cos(phase), size=target_shape, mode="bilinear", align_corners=False)
+    imag = F.interpolate(torch.sin(phase), size=target_shape, mode="bilinear", align_corners=False)
+    return torch.atan2(imag, real)
 
 class SLMLayer(nn.Module):
     def __init__(self, config, resolution=None, mode=None, layer_index=1):
         super().__init__()
         self.config = config
         resolution = config.RESOLUTION if resolution is None else resolution
+        self.resolution = tuple(int(value) for value in resolution)
         mode = config.SLM_MODE if mode is None else mode
         assert mode in {"phase", "amp_phase"}
         self.mode = mode
@@ -207,10 +227,17 @@ class SLMLayer(nn.Module):
 
     def simulation_phase(self):
         """Return the phase used during propagation, without hardware quantization."""
+        raw_phase = self._raw_phase()
+        if bool(getattr(self.config, "SIMULATE_HARDWARE_PIXEL_GRID", False)) and hasattr(
+            self.config, "slm_active_shape"
+        ):
+            hardware_shape = self.config.slm_active_shape(self.layer_index)
+            raw_phase = resample_phase_map(raw_phase, hardware_shape)
+            raw_phase = resample_phase_map(raw_phase, self.resolution)
         if self._phase_param_mode in {"direct_sgd", "direct_sgd_pyramid"}:
-            return self._raw_phase()
+            return raw_phase
         # Preserve the legacy hardware-in-the-loop behavior for the pyramid path.
-        gray = self.phase_to_gray(self.wrapped_phase())
+        gray = self.phase_to_gray(torch.remainder(raw_phase, 2 * np.pi))
         if self.simulate_quantization:
             scaled = gray * (self.phase_levels - 1)
             rounded = torch.round(scaled)
@@ -218,9 +245,18 @@ class SLMLayer(nn.Module):
         return self.gray_to_phase(gray)
 
     def hardware_export_phase(self):
-        """Return the display phase using HolographSLM's +pi export origin."""
+        """Return the active hardware-aperture phase using the +pi origin.
+
+        Resampling is performed on the unit phasor, rather than wrapped radians,
+        so interpolation cannot create a false discontinuity at 0/2pi.
+        """
         offset = float(getattr(self.config, "SLM_EXPORT_PHASE_OFFSET_RAD", np.pi))
-        return torch.remainder(self._raw_phase() + offset, 2 * np.pi)
+        phase = self._raw_phase() + offset
+        if hasattr(self.config, "slm_active_shape"):
+            target_shape = tuple(self.config.slm_active_shape(self.layer_index))
+            if tuple(phase.shape[-2:]) != target_shape:
+                phase = resample_phase_map(phase, target_shape)
+        return torch.remainder(phase, 2 * np.pi)
 
     def phase_to_gray_uint8(self):
         """Return the actual finite-level drive image for SLM export."""

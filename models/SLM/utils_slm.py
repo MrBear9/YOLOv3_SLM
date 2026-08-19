@@ -358,6 +358,22 @@ def _save_wrapped_phases(payload, student):
     payload["direct_sgd_pyramid_scale"] = float(
         getattr(student.config, "SLM_DIRECT_SGD_PYRAMID_SCALE", 0.0)
     )
+    config = student.config
+    if hasattr(config, "dmd_aperture"):
+        payload["optical_geometry"] = {
+            "dmd_resolution": tuple(config.RESOLUTION),
+            "dmd_pixel_pitch_m": float(config.DMD_PIXEL_PITCH),
+            "dmd_aperture_m": tuple(config.dmd_aperture()),
+            "slm_layers": tuple(
+                {
+                    "profile": config.slm_profile_name(index),
+                    "hardware_pixel_pitch_m": config.hardware_pixel_pitch(index),
+                    "effective_sampling_pitch_m": config.sampling_pitch(index),
+                    "active_shape": tuple(config.slm_active_shape(index)),
+                }
+                for index in range(1, int(config.NUM_LAYERS) + 1)
+            ),
+        }
 
     def save_layer(layer_name, slm):
         raw = slm._raw_phase().detach().cpu()
