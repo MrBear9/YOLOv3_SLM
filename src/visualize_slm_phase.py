@@ -1,4 +1,4 @@
-"""Create paper-ready phase colormaps and spatial profile curves from SLM PNGs."""
+"""Create paper-ready phase maps, central profiles, and distributions from SLM PNGs."""
 
 import argparse
 import json
@@ -14,6 +14,9 @@ from PIL import Image
 
 
 TWO_PI = 2.0 * math.pi
+PROFILE_HORIZONTAL_COLOR = "#27384A"
+PROFILE_VERTICAL_COLOR = "#55A868"
+PHASE_DISTRIBUTION_COLORS = ("#3B83B5", "#F28E2B")
 
 
 def parse_args():
@@ -27,6 +30,10 @@ def parse_args():
     parser.add_argument(
         "--profile-index", type=int, default=None,
         help="Row/column index for the spatial phase profiles (default: image center).",
+    )
+    parser.add_argument(
+        "--hist-bins", type=int, default=64,
+        help="Number of bins used for each phase-distribution histogram (default: 64).",
     )
     return parser.parse_args()
 
@@ -87,6 +94,23 @@ def format_stats(phase):
     return f"range = {phase_range:.3f} rad, std = {phase_std:.3f} rad"
 
 
+def configure_journal_style():
+    """Apply the compact sans-serif style used by the exported journal figures."""
+    plt.rcParams.update({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "DejaVu Sans"],
+        "font.size": 10,
+        "axes.titlesize": 12,
+        "axes.labelsize": 11,
+        "axes.linewidth": 1.0,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "xtick.major.width": 0.9,
+        "ytick.major.width": 0.9,
+        "mathtext.fontset": "dejavusans",
+    })
+
+
 def save_colormap(phase, name, output_dir):
     fig, axis = plt.subplots(figsize=(7.0, 6.0), constrained_layout=True)
     image = axis.imshow(phase, cmap="viridis", vmin=0.0, vmax=TWO_PI, interpolation="nearest")
@@ -110,38 +134,59 @@ def save_spatial_profiles(phase, name, output_dir, profile_index):
     if not 0 <= row < height or not 0 <= col < width:
         raise ValueError(f"--profile-index must be in [0, {min(height, width) - 1}].")
 
-    plt.rcParams.update({
-        "font.family": "serif",
-        "font.serif": ["Times New Roman", "DejaVu Serif"],
-        "font.size": 10,
-        "axes.labelsize": 11,
-        "xtick.labelsize": 9,
-        "ytick.labelsize": 9,
-        "mathtext.fontset": "stix",
-    })
+    configure_journal_style()
+    fig, axis = plt.subplots(figsize=(3.45, 3.05), constrained_layout=True)
 
-    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.0), constrained_layout=True, sharey=True)
-
-    axes[0].plot(np.arange(width), phase[row, :], color="#2166ac", linewidth=0.5)
-    axes[0].axhline(y=phase[row, col], color="gray", linestyle="--", linewidth=0.4, alpha=0.5)
-    axes[0].set_xlabel("x (pixels)")
-    axes[0].set_ylabel("Phase (rad)")
-    axes[0].text(-0.20, 1.04, "(a)", transform=axes[0].transAxes, fontweight="bold", fontsize=11)
-
-    axes[1].plot(np.arange(height), phase[:, col], color="#b2182b", linewidth=0.5)
-    axes[1].axhline(y=phase[row, col], color="gray", linestyle="--", linewidth=0.4, alpha=0.5)
-    axes[1].set_xlabel("y (pixels)")
-    axes[1].text(-0.20, 1.04, "(b)", transform=axes[1].transAxes, fontweight="bold", fontsize=11)
-
-    for axis in axes:
-        axis.set_ylim(0.0, TWO_PI)
-        axis.set_yticks([0.0, math.pi, TWO_PI])
-        axis.set_yticklabels(["0", "$\\pi$", "$2\\pi$"])
-        axis.tick_params(direction="in", top=True, right=True)
-        axis.grid(alpha=0.3, linewidth=0.5, linestyle="--")
+    axis.plot(
+        np.arange(width), phase[row, :],
+        color=PROFILE_HORIZONTAL_COLOR, linewidth=0.65, label="horizontal",
+    )
+    axis.plot(
+        np.arange(height), phase[:, col],
+        color=PROFILE_VERTICAL_COLOR, linewidth=0.65, label="vertical",
+    )
+    axis.set_title("Central profiles", pad=7)
+    axis.set_xlabel("Pixel")
+    axis.set_ylabel("Phase (rad)")
+    axis.set_xlim(0, max(width, height) - 1)
+    axis.set_ylim(0.0, TWO_PI)
+    axis.set_yticks([0.0, 2.0, 4.0, 6.0])
+    axis.tick_params(direction="out", top=False, right=False, length=4)
+    axis.grid(color="#B7C0C8", alpha=0.28, linewidth=0.5)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    axis.legend(loc="lower left", frameon=False, handlelength=2.4)
 
     path = output_dir / f"{name}_phase_profiles.png"
     fig.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def save_phase_distribution(phase, name, output_dir, layer_index, bins):
+    if bins < 2:
+        raise ValueError("--hist-bins must be at least 2.")
+
+    configure_journal_style()
+    color = PHASE_DISTRIBUTION_COLORS[layer_index % len(PHASE_DISTRIBUTION_COLORS)]
+    fig, axis = plt.subplots(figsize=(3.45, 3.05), constrained_layout=True)
+    axis.hist(
+        phase.ravel(), bins=bins, range=(0.0, TWO_PI),
+        color=color, edgecolor=color, linewidth=0.2,
+    )
+    axis.set_title("Phase distribution", pad=7)
+    axis.set_xlabel("Phase (rad)")
+    axis.set_ylabel("Pixels")
+    axis.set_xlim(0.0, TWO_PI)
+    axis.set_xticks([0.0, 2.0, 4.0, 6.0])
+    axis.tick_params(direction="out", top=False, right=False, length=4)
+    axis.grid(color="#B7C0C8", alpha=0.25, linewidth=0.5)
+    axis.set_axisbelow(True)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+
+    path = output_dir / f"{name}_phase_distribution.png"
+    fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     return path
 
@@ -158,15 +203,19 @@ def main():
             lut_path = candidate
     lut_gray, lut_phase = load_lut(lut_path)
     gray_inverted = bool(args.gray_inverted or metadata.get("gray_inverted", False))
-    for path in find_phase_pngs(args.input):
+    for layer_index, path in enumerate(find_phase_pngs(args.input)):
         gray = np.asarray(Image.open(path).convert("L"), dtype=np.float32) / 255.0
         phase = gray_to_phase(gray, lut_gray, lut_phase, gray_inverted)
         name = path.stem
         colormap_path = save_colormap(phase, name, output_dir)
         profile_path = save_spatial_profiles(phase, name, output_dir, args.profile_index)
+        distribution_path = save_phase_distribution(
+            phase, name, output_dir, layer_index, args.hist_bins,
+        )
         print(f"{path.name}: {format_stats(phase)}")
         print(f"  colormap: {colormap_path}")
         print(f"  profiles: {profile_path}")
+        print(f"  distribution: {distribution_path}")
 
 
 if __name__ == "__main__":
@@ -174,8 +223,9 @@ if __name__ == "__main__":
 
 
 """
-*_phase_colormap.png:twilight 循环伪彩图，统一范围 0~2pi,标题标注 phase range 和 std。
-*_phase_profiles.png:相位空间横截面与纵截面曲线，默认取中心行与中心列，更符合光学论文展示相位起伏的形式
+*_phase_colormap.png: viridis 伪彩图，统一范围 0~2pi，标题标注 phase range 和 std。
+*_phase_profiles.png: 将中心行与中心列的相位曲线叠加到同一坐标轴，不添加子图字母。
+*_phase_distribution.png: 每个相位层单独输出相位直方图，逐层使用期刊蓝和期刊橙。
 
 若 phase_export_metadata.json 存在，新脚本会自动继承导出时的 LUT 和灰度反转设置，确保可视化相位与实际 SLM 加载相位一致。也可用 --profile-index 320 指定剖面位置。
 """
