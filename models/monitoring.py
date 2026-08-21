@@ -272,7 +272,10 @@ def compute_detection_confusion_matrix(
         for gt in targets:
             if len(gt) < 5 or gt[3] <= 0 or gt[4] <= 0:
                 continue
-            box = np.asarray(gt[1:5], dtype=np.float32)
+            # ``targets_list`` is reused afterwards by the review exporter.
+            # Keep its normalized coordinates intact while this matrix uses
+            # a pixel-coordinate working copy.
+            box = np.array(gt[1:5], dtype=np.float32, copy=True)
             if image_size is not None:
                 if isinstance(image_size, (tuple, list)):
                     image_h, image_w = image_size

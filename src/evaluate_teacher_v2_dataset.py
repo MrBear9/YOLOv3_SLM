@@ -17,13 +17,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from models.dataset import YOLODataset, identity_collate
+from models.dataset import YOLODataset, identity_collate, letterbox_content_bounds
+from models.geometry import bbox_iou_matrix_xywh
 from models.monitoring import (
     _render_confusion_matrix_image,
     _render_normalized_confusion_matrix_image,
     compute_detection_confusion_matrix,
 )
 from models.runtime import get_dataloader_kwargs, prepare_batch
+from models.review_candidates import write_review_lists as write_shared_review_lists
 from models.teacher import build_teacher
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 from models.yolov8.detection_protocol import build_detection_criterion, decode_detections
@@ -60,9 +62,11 @@ def load_checkpoint(path, teacher, detector, device):
 
 
 def collect_detections(config, model, dataloader, device):
-    """Collect detections and labels once for the two operating-point matrices."""
+    """Collect detections, labels, and their stable source image paths."""
     model.eval()
-    detections_all, targets_all = [], []
+    detections_all, targets_all, source_paths = [], [], []
+    dataset_paths = tuple(Path(path).resolve() for path in getattr(dataloader.dataset, "files", ()))
+    sample_offset = 0
     amp_enabled = bool(getattr(config, "ENABLE_AMP", True)) and device.type == "cuda"
     amp_dtype = torch.bfloat16 if str(getattr(config, "AMP_DTYPE", "float16")).lower() in {"bf16", "bfloat16"} else torch.float16
     amp_context = torch.amp.autocast("cuda", dtype=amp_dtype, enabled=amp_enabled) if device.type == "cuda" else nullcontext()
@@ -78,12 +82,195 @@ def collect_detections(config, model, dataloader, device):
                 nms_thresh=config.METRIC_NMS_THRESH,
                 max_det=config.METRIC_MAX_DET,
             )
+            batch_size = len(detections)
+            batch_paths = dataset_paths[sample_offset:sample_offset + batch_size]
+            if len(batch_paths) != batch_size:
+                raise RuntimeError("Detection collection lost alignment with dataset.files.")
             detections_all.extend(np.asarray(sample, dtype=np.float32).reshape(-1, 6) for sample in detections)
             targets_all.extend(target.cpu().numpy() for target in targets)
-    return detections_all, targets_all
+            source_paths.extend(batch_paths)
+            sample_offset += batch_size
+    if sample_offset != len(dataset_paths):
+        raise RuntimeError("Detection collection did not visit every dataset image exactly once.")
+    return detections_all, targets_all, source_paths
 
 
-def write_results(output_dir, confusion, metrics, checkpoint, args, dataset_size):
+def analyse_map_sample(config, detections, targets, device):
+    """Mirror the evaluator's class-wise IoU matching for one image.
+
+    The returned TP/FP/FN counts use ``METRIC_CONF_THRESH`` and
+    ``METRIC_IOU_THRESHOLD``, i.e. the same threshold regime used for mAP50.
+    """
+    ground_truths = []
+    gt_by_class = {}
+    image_h, image_w = config.RESOLUTION
+    for gt in targets:
+        if len(gt) < 5 or gt[3] <= 0 or gt[4] <= 0:
+            continue
+        cls_id = int(gt[0])
+        gt_box = [
+            float(gt[1] * image_w), float(gt[2] * image_h),
+            float(gt[3] * image_w), float(gt[4] * image_h),
+        ]
+        gt_index = len(ground_truths)
+        ground_truths.append({
+            "class_id": cls_id,
+            "class_name": config.CLASS_NAMES.get(cls_id, str(cls_id)),
+            "xywh_eval": gt_box,
+            "status": "fn",
+        })
+        gt_by_class.setdefault(cls_id, []).append(gt_index)
+
+    predictions = []
+    det_by_class = {}
+    for det in np.asarray(detections, dtype=np.float32).reshape(-1, 6):
+        cls_id = int(det[5])
+        prediction_index = len(predictions)
+        predictions.append({
+            "class_id": cls_id,
+            "class_name": config.CLASS_NAMES.get(cls_id, str(cls_id)),
+            "confidence": float(det[4]),
+            "xywh_eval": [float(value) for value in det[:4]],
+            "status": "fp",
+        })
+        det_by_class.setdefault(cls_id, []).append(prediction_index)
+
+    total_tp = total_fp = total_fn = 0
+    per_class = []
+    for cls_id in sorted(set(gt_by_class) | set(det_by_class)):
+        gt_indices = gt_by_class.get(cls_id, [])
+        detection_indices = sorted(
+            det_by_class.get(cls_id, []),
+            key=lambda index: predictions[index]["confidence"],
+            reverse=True,
+        )
+        gt_boxes_list = [ground_truths[index]["xywh_eval"] for index in gt_indices]
+        dets = [predictions[index] for index in detection_indices]
+        tp = fp = fn = 0
+        if not gt_boxes_list:
+            fp = len(dets)
+        elif not dets:
+            fn = len(gt_boxes_list)
+        else:
+            gt_boxes = torch.tensor(gt_boxes_list, dtype=torch.float32, device=device)
+            det_boxes = torch.tensor([det["xywh_eval"] for det in dets], dtype=torch.float32, device=device)
+            iou_matrix = bbox_iou_matrix_xywh(det_boxes, gt_boxes)
+            matched_gt = set()
+            for det_idx in range(len(dets)):
+                ious = iou_matrix[det_idx].clone()
+                for gt_idx in matched_gt:
+                    ious[gt_idx] = -1.0
+                best_iou, best_gt_idx = ious.max(dim=0)
+                if float(best_iou.item()) >= config.METRIC_IOU_THRESHOLD:
+                    tp += 1
+                    matched_gt_index = int(best_gt_idx.item())
+                    matched_gt.add(matched_gt_index)
+                    prediction = predictions[detection_indices[det_idx]]
+                    ground_truth = ground_truths[gt_indices[matched_gt_index]]
+                    prediction["status"] = "tp"
+                    prediction["matched_gt_index"] = gt_indices[matched_gt_index]
+                    prediction["matched_iou"] = float(best_iou.item())
+                    ground_truth["status"] = "tp"
+                    ground_truth["matched_prediction_index"] = detection_indices[det_idx]
+                    ground_truth["matched_iou"] = float(best_iou.item())
+                else:
+                    fp += 1
+            fn = len(gt_boxes_list) - len(matched_gt)
+
+        total_tp += tp
+        total_fp += fp
+        total_fn += fn
+        per_class.append({
+            "class_id": cls_id,
+            "class_name": config.CLASS_NAMES.get(cls_id, str(cls_id)),
+            "ground_truth": len(gt_boxes_list),
+            "detections": len(dets),
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+        })
+
+    return {
+        "ground_truth": sum(len(boxes) for boxes in gt_by_class.values()),
+        "detections": sum(len(dets) for dets in det_by_class.values()),
+        "tp": total_tp,
+        "fp": total_fp,
+        "fn": total_fn,
+        "per_class": per_class,
+        "ground_truth_boxes": ground_truths,
+        "prediction_boxes": predictions,
+    }
+
+
+def eval_xywh_to_source(xywh_eval, source_size, resolution):
+    """Map an evaluator-canvas box back onto its original image pixels."""
+    source_w, source_h = source_size
+    left, top, right, _ = letterbox_content_bounds(source_size, resolution)
+    scale = (right - left) / source_w
+    x, y, width, height = xywh_eval
+    x = min(max((x - left) / scale, 0.0), float(source_w))
+    y = min(max((y - top) / scale, 0.0), float(source_h))
+    width = min(max(width / scale, 0.0), float(source_w))
+    height = min(max(height / scale, 0.0), float(source_h))
+    return [round(value, 3) for value in (x, y, width, height)]
+
+
+def write_review_lists(output_dir, source_paths, detections, targets, config, device):
+    """Write direct-to-review image lists plus explainable per-image JSONL."""
+    records = []
+    for source_path, sample_detections, sample_targets in zip(source_paths, detections, targets):
+        summary = analyse_map_sample(config, sample_detections, sample_targets, device)
+        no_true_positive = summary["ground_truth"] > 0 and summary["tp"] == 0
+        affects_map = summary["fp"] > 0 or summary["fn"] > 0
+        if not (no_true_positive or affects_map):
+            continue
+        reasons = []
+        if no_true_positive:
+            reasons.append("no_true_positive")
+        if summary["fn"]:
+            reasons.append("false_negative")
+        if summary["fp"]:
+            reasons.append("false_positive")
+        with Image.open(source_path) as source_image:
+            source_size = source_image.size
+        for box_group in (summary["ground_truth_boxes"], summary["prediction_boxes"]):
+            for box in box_group:
+                box["xywh_original"] = eval_xywh_to_source(
+                    box["xywh_eval"], source_size, config.RESOLUTION,
+                )
+        records.append({
+            "source_image": str(source_path),
+            "source_image_size": list(source_size),
+            "reasons": reasons,
+            "metric_confidence_threshold": float(config.METRIC_CONF_THRESH),
+            "metric_iou_threshold": float(config.METRIC_IOU_THRESHOLD),
+            **summary,
+        })
+
+    unrecognized = [record for record in records if "no_true_positive" in record["reasons"]]
+    map_errors = [record for record in records if record["fp"] or record["fn"]]
+
+    def write_path_list(path, selected):
+        path.write_text(
+            "".join(f"{record['source_image']}\n" for record in selected),
+            encoding="utf-8",
+        )
+
+    write_path_list(output_dir / "review_unrecognized_images.txt", unrecognized)
+    write_path_list(output_dir / "review_map_error_images.txt", map_errors)
+    with (output_dir / "review_candidates.jsonl").open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return {
+        "unrecognized_images": len(unrecognized),
+        "map_error_images": len(map_errors),
+        "candidates_jsonl": "review_candidates.jsonl",
+        "unrecognized_list": "review_unrecognized_images.txt",
+        "map_error_list": "review_map_error_images.txt",
+    }
+
+
+def write_results(output_dir, confusion, metrics, checkpoint, args, dataset_size, review_summary):
     class_names = Config.CLASS_NAMES
     labels = [class_names[index] for index in range(Config.NUM_CLASSES)] + ["background"]
     normalized = confusion[:Config.NUM_CLASSES, :Config.NUM_CLASSES]
@@ -120,6 +307,7 @@ def write_results(output_dir, confusion, metrics, checkpoint, args, dataset_size
         "labels_counts_matrix": labels,
         "labels_normalized_matrix": labels[:-1],
         "metrics": metrics,
+        "review_summary": review_summary,
     }
     (output_dir / "evaluation_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
@@ -159,7 +347,7 @@ def main():
     model = TeacherWithDetector(Config, teacher=teacher, detector=detector).to(device).eval()
     criterion = build_detection_criterion(Config)
     _, metrics = evaluate_model_anchor_v8(Config, model, dataloader, criterion, device)
-    detections, targets = collect_detections(Config, model, dataloader, device)
+    detections, targets, source_paths = collect_detections(Config, model, dataloader, device)
     confusion, class_tp, class_fp, class_fn = compute_detection_confusion_matrix(
         detections, targets, Config.NUM_CLASSES,
         iou_threshold=args.iou_threshold,
@@ -169,7 +357,10 @@ def main():
 
     output_dir = args.output.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    write_results(output_dir, confusion, metrics, checkpoint, args, len(dataset))
+    review_summary = write_shared_review_lists(
+        output_dir, source_paths, detections, targets, Config, device
+    )
+    write_results(output_dir, confusion, metrics, checkpoint, args, len(dataset), review_summary)
     print(f"Evaluated {len(dataset)} {args.split} images on {device}.")
     print(f"mAP50: {metrics['map50']:.4f}")
     print(f"Count matrix (with background): {output_dir / 'confusion_matrix_counts_with_background.png'}")
@@ -177,6 +368,12 @@ def main():
     print("per-class TP:", class_tp.astype(int))
     print("per-class FP:", class_fp.astype(int))
     print("per-class FN:", class_fn.astype(int))
+    print(
+        f"Review lists: {review_summary['unrecognized_images']} unrecognized -> "
+        f"{output_dir / review_summary['unrecognized_list']}; "
+        f"{review_summary['map_error_images']} mAP-error images -> "
+        f"{output_dir / review_summary['map_error_list']}"
+    )
 
 
 if __name__ == "__main__":

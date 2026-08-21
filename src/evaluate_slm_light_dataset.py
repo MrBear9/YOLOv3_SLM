@@ -27,6 +27,7 @@ from models.monitoring import (
     _render_normalized_confusion_matrix_image,
     compute_detection_confusion_matrix,
 )
+from models.review_candidates import write_review_lists
 from models.runtime import get_dataloader_kwargs
 from models.yolov8.detection_protocol import decode_detections
 from models.yolov8.feature_adapter import prepare_slm_detector_feature
@@ -72,7 +73,7 @@ def evaluate_student(config, student, detector, dataloader, device):
     """Compute the same class-wise AP50 matching protocol used by SLM training."""
     student.eval()
     detector.eval()
-    all_detections, all_targets = [], []
+    all_detections, all_targets, source_paths = [], [], []
     storage = {class_id: [] for class_id in range(config.NUM_CLASSES)}
     gt_counts = {class_id: 0 for class_id in range(config.NUM_CLASSES)}
     amp_enabled = bool(getattr(config, "ENABLE_AMP", True)) and device.type == "cuda"
@@ -94,11 +95,14 @@ def evaluate_student(config, student, detector, dataloader, device):
                 nms_thresh=config.METRIC_NMS_THRESH,
                 max_det=config.METRIC_MAX_DET,
             )
-            for targets, sample_detections in zip(batch["targets"], detections):
+            for targets, sample_detections, source_path in zip(
+                batch["targets"], detections, batch["image_paths"],
+            ):
                 targets_np = targets.cpu().numpy()
                 detections_np = np.asarray(sample_detections, dtype=np.float32).reshape(-1, 6)
                 all_targets.append(targets_np)
                 all_detections.append(detections_np)
+                source_paths.append(Path(source_path).resolve())
                 gt_by_class = {}
                 for target in targets_np:
                     if target.shape[0] < 5 or target[3] <= 0 or target[4] <= 0:
@@ -140,13 +144,13 @@ def evaluate_student(config, student, detector, dataloader, device):
             "gt_count": int(gt_counts[class_id]),
             **compute_pr_summary(storage[class_id], gt_counts[class_id]),
         }
-    return all_detections, all_targets, {
+    return all_detections, all_targets, source_paths, {
         "map50": float(np.mean(ap_values)) if ap_values else 0.0,
         "per_class": per_class,
     }
 
 
-def save_outputs(output_dir, confusion, metrics, checkpoint, restore_info, args, dataset_size):
+def save_outputs(output_dir, confusion, metrics, checkpoint, restore_info, args, dataset_size, review_summary):
     class_names = Config.CLASS_NAMES
     labels = [class_names[index] for index in range(Config.NUM_CLASSES)] + ["background"]
     foreground = confusion[:Config.NUM_CLASSES, :Config.NUM_CLASSES]
@@ -168,7 +172,7 @@ def save_outputs(output_dir, confusion, metrics, checkpoint, restore_info, args,
         "resolution_hw": list(Config.RESOLUTION), "metric_iou_threshold": args.iou_threshold,
         "matrix_confidence_threshold": args.conf_threshold, "metric_decode_confidence_threshold": Config.METRIC_CONF_THRESH,
         "metric_decode_nms_threshold": Config.METRIC_NMS_THRESH, "labels_counts_matrix": labels,
-        "labels_normalized_matrix": labels[:-1], "metrics": metrics,
+        "labels_normalized_matrix": labels[:-1], "metrics": metrics, "review_summary": review_summary,
     }
     (output_dir / "evaluation_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
@@ -207,14 +211,17 @@ def main():
     if len(dataset) == 0:
         raise RuntimeError(f"Dataset split {args.split!r} is empty.")
     dataloader = DataLoader(dataset, batch_size=Config.BATCH_SIZE, collate_fn=slm_collate_fn, **get_dataloader_kwargs(Config))
-    detections, targets, metrics = evaluate_student(Config, student, detector, dataloader, device)
+    detections, targets, source_paths, metrics = evaluate_student(Config, student, detector, dataloader, device)
     confusion, class_tp, class_fp, class_fn = compute_detection_confusion_matrix(
         detections, targets, Config.NUM_CLASSES, iou_threshold=args.iou_threshold,
         conf_threshold=args.conf_threshold, image_size=Config.RESOLUTION,
     )
     output_dir = args.output.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    save_outputs(output_dir, confusion, metrics, checkpoint, restore_info, args, len(dataset))
+    review_summary = write_review_lists(
+        output_dir, source_paths, detections, targets, Config, device,
+    )
+    save_outputs(output_dir, confusion, metrics, checkpoint, restore_info, args, len(dataset), review_summary)
     print(f"Evaluated {len(dataset)} {args.split} images on {device}.")
     print(f"mAP50: {metrics['map50']:.4f}")
     print(f"Count matrix (with background): {output_dir / 'confusion_matrix_counts_with_background.png'}")
@@ -222,6 +229,12 @@ def main():
     print("per-class TP:", class_tp.astype(int))
     print("per-class FP:", class_fp.astype(int))
     print("per-class FN:", class_fn.astype(int))
+    print(
+        f"Review lists: {review_summary['unrecognized_images']} unrecognized -> "
+        f"{output_dir / review_summary['unrecognized_list']}; "
+        f"{review_summary['map_error_images']} mAP-error images -> "
+        f"{output_dir / review_summary['map_error_list']}"
+    )
 
 
 if __name__ == "__main__":
