@@ -6,7 +6,12 @@ from PIL import Image
 from torch.utils.data import Dataset
 import yaml
 
-from models.dataset import image_to_intensity_tensor, letterbox_image_targets
+from models.dataset import (
+    image_to_intensity_tensor,
+    letterbox_image_targets,
+    random_canvas_scale_image_targets,
+    resolve_train_canvas_scale,
+)
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -41,6 +46,7 @@ class SLMFeatureDataset(Dataset):
         self.config = config
         with open(config.YAML_PATH, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
+        self.canvas_scale_range = resolve_train_canvas_scale(cfg) if split == "train" else None
         if bool(getattr(config, "SINGLE_IMAGE_TRAINING", False)):
             image_path = resolve_data_path(getattr(config, "SINGLE_IMAGE_PATH", ""))
             if not image_path:
@@ -98,6 +104,7 @@ class SLMFeatureDataset(Dataset):
                         targets.append([int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])])
         targets = torch.tensor(targets, dtype=torch.float32) if targets else torch.zeros((0, 5), dtype=torch.float32)
         img, targets = letterbox_image_targets(img, targets, self.config.RESOLUTION)
+        img, targets = random_canvas_scale_image_targets(img, targets, self.canvas_scale_range)
         gray_tensor = image_to_intensity_tensor(
             img,
             mode=getattr(self.config, "INPUT_INTENSITY_MODE", "srgb"),

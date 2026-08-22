@@ -43,10 +43,10 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Common — paths, device, I/O
     # =========================================================================
-    YAML_PATH = r"data/military/data.yaml"
+    YAML_PATH = r"data/fashion/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/Tv2_dmd640_scratch"
+    TEACHER_OUTPUT_DIR = r"output/Fashion_Tv2_dmd640_scratch"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
