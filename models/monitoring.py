@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from models.class_display import class_name_for_id
 from models.training_utils import add_tensorboard_scalar
 
 
@@ -332,7 +333,7 @@ def _render_confusion_matrix_image(confusion, class_names, title="Detection Conf
     """Render confusion matrix as a matplotlib figure, return numpy array."""
     n = confusion.shape[0]
     num_classes = n - 1
-    labels = [class_names.get(i, f"class_{i}") for i in range(num_classes)] + ["background"]
+    labels = [class_name_for_id(class_names, i) for i in range(num_classes)] + ["background"]
 
     fig, ax = plt.subplots(figsize=(max(8, n * 0.8), max(6, n * 0.6)))
     im = ax.imshow(confusion, interpolation="nearest", cmap="Blues")
@@ -375,7 +376,7 @@ def _render_normalized_confusion_matrix_image(confusion, class_names, title="Nor
     num_classes = confusion.shape[0] - 1
     # Exclude the background row/column from both the display and normalization.
     foreground_confusion = confusion[:num_classes, :num_classes]
-    labels = [class_names.get(i, f"class_{i}") for i in range(num_classes)]
+    labels = [class_name_for_id(class_names, i) for i in range(num_classes)]
     row_totals = foreground_confusion.sum(axis=1, keepdims=True)
     percentages = np.divide(
         foreground_confusion * 100.0,
@@ -465,7 +466,7 @@ def write_confusion_matrix(
 
     # Write per-class TP/FP/FN as scalars
     for cls_id in range(num_classes):
-        cls_name = class_names.get(cls_id, f"class_{cls_id}")
+        cls_name = class_name_for_id(class_names, cls_id)
         add_tensorboard_scalar(writer, f"{prefix}/TP/{cls_name}", float(class_tp[cls_id]), step)
         add_tensorboard_scalar(writer, f"{prefix}/FP/{cls_name}", float(class_fp[cls_id]), step)
         add_tensorboard_scalar(writer, f"{prefix}/FN/{cls_name}", float(class_fn[cls_id]), step)

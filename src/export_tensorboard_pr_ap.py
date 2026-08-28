@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -27,6 +28,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tensorboard.backend.event_processing import event_accumulator
 from tensorboard.util import tensor_util
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from models.class_display import display_class_name
 
 
 EVENT_GLOB = "events.out.tfevents.*"
@@ -167,7 +175,7 @@ def parse_aliases(items: Sequence[str]) -> dict[str, str]:
 def display_name(class_name: str, aliases: dict[str, str]) -> str:
     if class_name in aliases:
         return aliases[class_name]
-    return class_name.replace("_", " ").strip().title()
+    return display_class_name(class_name).replace("_", " ").strip().title()
 
 
 def discover_pr_tags(

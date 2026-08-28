@@ -9,6 +9,7 @@ import os
 
 import torch
 
+from models.class_display import class_name_for_id
 from models.runtime import init_log_file, log_to_file
 from models.teacher import build_teacher
 from models.training_utils import add_tensorboard_scalar
@@ -128,7 +129,7 @@ def write_teacher_tensorboard_scalars(writer, step, train_losses, val_losses=Non
             assignment_name = key.removeprefix("positive_")
             if assignment_name.startswith("class_"):
                 cls_id = int(assignment_name.removeprefix("class_"))
-                assignment_name = f"class/{Config.CLASS_NAMES.get(cls_id, f'class_{cls_id}')}"
+                assignment_name = f"class/{class_name_for_id(Config.CLASS_NAMES, cls_id)}"
             add_tensorboard_scalar(writer, f"Assignment/train_positive/{assignment_name}", value, step)
         else:
             add_tensorboard_scalar(writer, f"Loss/train_{key}", value, step)
@@ -143,7 +144,7 @@ def write_teacher_tensorboard_scalars(writer, step, train_losses, val_losses=Non
         for key in ("precision_op", "recall_op", "f1_op"):
             add_tensorboard_scalar(writer, f"MetricsOperating/{threshold_tag}/{key}", val_metrics.get(key), step)
         for cls_id, values in val_metrics.get("per_class", {}).items():
-            cls_name = Config.CLASS_NAMES.get(cls_id, f"class_{cls_id}")
+            cls_name = class_name_for_id(Config.CLASS_NAMES, cls_id)
             for key in ("ap50", "precision", "recall", "f1", "confidence"):
                 add_tensorboard_scalar(writer, f"MetricsPerClass/{cls_name}/{key}", values.get(key), step)
             add_tensorboard_scalar(writer, f"MetricsPerClass/{cls_name}/gt_count", values.get("gt_count"), step)

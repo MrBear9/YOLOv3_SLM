@@ -16,7 +16,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from models.dataset import YOLODataset
+from models.class_display import class_name_for_id
+from models.dataset import YOLODataset, letterbox_image_targets
 from models.SLM.slm_modulation import resample_phase_map
 from models.teacher import build_teacher
 from models.teacher_guidance import enhance_feature_for_display
@@ -86,14 +87,68 @@ def teacher_feature_to_image(feature):
     return Image.fromarray(np.rint(display * 255.0).astype(np.uint8), mode="L")
 
 
-def draw_prediction_boxes(image, detections):
-    """Render one red box and a class-confidence label for every prediction."""
+def load_letterboxed_ground_truth(source_path, label_path, resolution):
+    """Load YOLO labels and apply the exact letterbox transform used for inference."""
+    targets = []
+    if label_path.is_file():
+        for line_number, line in enumerate(label_path.read_text(encoding="utf-8").splitlines(), start=1):
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            try:
+                class_id = int(parts[0])
+                box = [float(value) for value in parts[1:5]]
+            except ValueError as exc:
+                raise ValueError(f"Invalid YOLO label in {label_path} at line {line_number}.") from exc
+            if not 0 <= class_id < len(Config.CLASS_NAMES):
+                raise ValueError(f"Class ID {class_id} in {label_path} is outside the configured class range.")
+            targets.append([class_id, *box])
+
+    target_tensor = torch.tensor(targets, dtype=torch.float32) if targets else torch.zeros((0, 5), dtype=torch.float32)
+    with Image.open(source_path) as source:
+        _, target_tensor = letterbox_image_targets(source.convert("RGB"), target_tensor, resolution)
+    return target_tensor
+
+
+def ground_truth_to_records(targets, image_size):
+    """Convert letterboxed normalized YOLO targets to the exported pixel convention."""
+    height, width = image_size
+    return [
+        {
+            "class_id": int(class_id),
+            "class_name": Config.CLASS_NAMES[int(class_id)],
+            "xywh_pixels": [
+                float(cx * width), float(cy * height), float(box_width * width), float(box_height * height),
+            ],
+        }
+        for class_id, cx, cy, box_width, box_height in targets.tolist()
+    ]
+
+
+def draw_detection_boxes(image, detections, ground_truth):
+    """Render green ground-truth boxes and red prediction boxes on one letterboxed input."""
     canvas = image.convert("RGB").copy()
     draw = ImageDraw.Draw(canvas)
+    image_width, image_height = canvas.size
+
+    for class_id, cx, cy, width, height in ground_truth.tolist():
+        x1, y1 = (cx - width / 2) * image_width, (cy - height / 2) * image_height
+        x2, y2 = (cx + width / 2) * image_width, (cy + height / 2) * image_height
+        label = f"GT {class_name_for_id(Config.CLASS_NAMES, int(class_id))}"
+        draw.rectangle((x1, y1, x2, y2), outline="lime", width=3)
+        label_box = draw.textbbox((x1, y1), label)
+        label_height = label_box[3] - label_box[1]
+        text_y = max(0, y1 - label_height - 4)
+        draw.rectangle((x1, text_y, x1 + (label_box[2] - label_box[0]) + 4, text_y + label_height + 3), fill="lime")
+        draw.text((x1 + 2, text_y + 1), label, fill="black")
+
     for cx, cy, width, height, confidence, class_id in detections:
         x1, y1 = cx - width / 2, cy - height / 2
         x2, y2 = cx + width / 2, cy + height / 2
-        label = f"{Config.CLASS_NAMES[int(class_id)]} {confidence:.2f}"
+        label = (
+            f"{class_name_for_id(Config.CLASS_NAMES, int(class_id))} "
+            f"{confidence:.2f}"
+        )
         draw.rectangle((x1, y1, x2, y2), outline="red", width=3)
         label_box = draw.textbbox((x1, y1), label)
         label_height = label_box[3] - label_box[1]
@@ -155,9 +210,14 @@ def main():
             feature_path = directories["teacher_feature"] / f"{file_id}.png"
             detection_path = directories["detection"] / f"{file_id}.png"
             json_path = directories["json"] / f"{file_id}.json"
+            ground_truth = load_letterboxed_ground_truth(
+                source_path,
+                Path(dataset.get_label_path(source_path)),
+                Config.RESOLUTION,
+            )
             input_image.save(input_path)
             teacher_feature_to_image(teacher_aux["det_feature"]).save(feature_path)
-            draw_prediction_boxes(input_image, detections).save(detection_path)
+            draw_detection_boxes(input_image, detections, ground_truth).save(detection_path)
             phase_files = []
             for layer_index, phase_map in enumerate(phase_maps, start=1):
                 phase_path = directories[f"slm{layer_index}"] / f"{file_id}.png"
@@ -175,6 +235,7 @@ def main():
                 "slm_gray_drives": phase_files,
                 "detection_visualization": str(detection_path.relative_to(output_root)).replace("\\", "/"),
                 "detections": detections_to_records(detections),
+                "ground_truth": ground_truth_to_records(ground_truth, input_image.size[::-1]),
             }
             json_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
             manifest.append(record)

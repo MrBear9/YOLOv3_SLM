@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from models.class_display import class_name_for_id
 from models.geometry import bbox_iou_xywh
 from models.SLM.losses_slm import detection_response_loss, phase_regularization_loss
 from models.runtime import unwrap_module
@@ -327,7 +328,7 @@ def save_slm_detection_visualization(config, epoch, teacher, student, detector, 
                 axes[row, 3].text(
                     x1,
                     y1 + 10,
-                    str(config.CLASS_NAMES[int(cls_id)]),
+                    class_name_for_id(config.CLASS_NAMES, int(cls_id)),
                     color="lime",
                     fontsize=8,
                     bbox=dict(boxstyle="round,pad=0.20", facecolor="black", alpha=0.35, edgecolor="none"),
@@ -342,7 +343,7 @@ def save_slm_detection_visualization(config, epoch, teacher, student, detector, 
                 axes[row, 3].text(
                     x1,
                     y1 + 10,
-                    f"{config.CLASS_NAMES[int(cls_id)]} {conf:.2f}",
+                    f"{class_name_for_id(config.CLASS_NAMES, int(cls_id))} {conf:.2f}",
                     color=color,
                     fontsize=8,
                     bbox=dict(boxstyle="round,pad=0.20", facecolor="black", alpha=0.35, edgecolor="none"),

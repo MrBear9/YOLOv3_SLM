@@ -21,6 +21,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from models.class_display import class_name_for_id
 from models.compact_detect.factory import build_compact_criterion, build_compact_decode_fn, get_compact_loss_keys
 from models.compact_detect.metrics import _distributed_merge_metrics, compute_average_precision
 from models.yolov8.head_v8 import build_detector_head
@@ -215,7 +216,7 @@ def _write_compact_tensorboard_predictions(writer, step, teacher, detector, data
                 x2 = int((cx + w / 2) * canvas.width)
                 y2 = int((cy + h / 2) * canvas.height)
                 draw.rectangle([x1, y1, x2, y2], outline=(0, 200, 0), width=2)
-                cls_name = Config.CLASS_NAMES.get(cls_id, str(cls_id)) if Config.CLASS_NAMES else str(cls_id)
+                cls_name = class_name_for_id(Config.CLASS_NAMES, cls_id, str(cls_id))
                 draw.text((x1, max(y1 - 10, 0)), cls_name, fill=(0, 180, 0))
 
             # Draw predictions (red)
@@ -230,7 +231,7 @@ def _write_compact_tensorboard_predictions(writer, step, teacher, detector, data
                 if x2 <= x1 or y2 <= y1:
                     continue
                 draw.rectangle([x1, y1, x2, y2], outline=(220, 40, 40), width=2)
-                cls_name = Config.CLASS_NAMES.get(cls_id, str(cls_id)) if Config.CLASS_NAMES else str(cls_id)
+                cls_name = class_name_for_id(Config.CLASS_NAMES, cls_id, str(cls_id))
                 draw.text((x1, y2 + 2), f"{cls_name} {score:.2f}", fill=(220, 40, 40))
 
             canvas = canvas.resize((640, 640), Image.LANCZOS)

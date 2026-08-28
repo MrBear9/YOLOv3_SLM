@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from models.class_display import class_name_for_id
 from models.dataset import image_to_intensity_tensor, letterbox_image_targets
 from models.SLM.physical_defaults import aperture_size
 from models.SLM.slm_modulation import resample_phase_map
@@ -131,7 +132,10 @@ def draw_detections(image, detections):
     for cx, cy, width, height, confidence, class_id in detections:
         x1, y1 = cx - width / 2, cy - height / 2
         x2, y2 = cx + width / 2, cy + height / 2
-        label = f"{Config.CLASS_NAMES[int(class_id)]}: {confidence:.2f}"
+        label = (
+            f"{class_name_for_id(Config.CLASS_NAMES, int(class_id))}: "
+            f"{confidence:.2f}"
+        )
         draw.rectangle((x1, y1, x2, y2), outline="red", width=3)
         draw.text((x1, max(0, y1 - 14)), label, fill="red", stroke_width=1, stroke_fill="black")
     return canvas

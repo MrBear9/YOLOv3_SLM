@@ -6,6 +6,11 @@ import sys
 from contextlib import nullcontext
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize, hsv_to_rgb
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from PIL import Image
@@ -46,6 +51,10 @@ def parse_args():
     parser.add_argument("--conf-threshold", type=float, default=None, help="Confidence for the count confusion matrix.")
     parser.add_argument("--nms-threshold", type=float, default=None, help="NMS IoU threshold for decoding.")
     parser.add_argument("--iou-threshold", type=float, default=None, help="IoU threshold for mAP and confusion matching.")
+    parser.add_argument(
+        "--optical-field-samples", type=int, default=0,
+        help="Save raw final optical intensity plus complex-field real/imaginary parts for the first N split images (0 disables).",
+    )
     return parser.parse_args()
 
 
@@ -150,7 +159,151 @@ def evaluate_student(config, student, detector, dataloader, device):
     }
 
 
-def save_outputs(output_dir, confusion, metrics, checkpoint, restore_info, args, dataset_size, review_summary):
+def _display_range(values, lower=2.0, upper=98.0):
+    """Return a robust display range without modifying the saved raw array."""
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return 0.0, 1.0
+    low, high = np.percentile(finite, (lower, upper))
+    if high <= low + 1e-12:
+        low, high = float(finite.min()), float(finite.max())
+    if high <= low + 1e-12:
+        high = low + 1.0
+    return float(low), float(high)
+
+
+def _complex_field_to_rgb(real, imag, magnitude_scale):
+    """Encode the 2-D (Re(U), Im(U)) direction as hue and |U| as brightness."""
+    magnitude = np.hypot(real, imag)
+    phase = np.arctan2(imag, real)
+    hue = np.mod(phase, 2.0 * np.pi) / (2.0 * np.pi)
+    value = np.clip(magnitude / max(float(magnitude_scale), 1e-12), 0.0, 1.0)
+    hsv = np.stack((hue, np.ones_like(hue), value), axis=-1)
+    return hsv_to_rgb(hsv)
+
+
+def _draw_complex_mapping_legend(axis):
+    """Draw a compact 2-D Re(U)/Im(U) colour key for the complex RGB panel."""
+    coords = np.linspace(-1.0, 1.0, 161)
+    real, imag = np.meshgrid(coords, coords)
+    rgb = _complex_field_to_rgb(real, imag, magnitude_scale=1.0)
+    outside = np.hypot(real, imag) > 1.0
+    rgb[outside] = 1.0
+    axis.imshow(rgb, origin="lower", extent=(-1.0, 1.0, -1.0, 1.0))
+    axis.axhline(0.0, color="black", linewidth=0.35, alpha=0.45)
+    axis.axvline(0.0, color="black", linewidth=0.35, alpha=0.45)
+    axis.set_xlabel(r"Re$(U)$", fontsize=6, labelpad=1)
+    axis.set_ylabel(r"Im$(U)$", fontsize=6, labelpad=1)
+    axis.tick_params(axis="both", labelsize=5, length=1)
+
+
+def _save_mapping_legend(path):
+    """Save the two scalar colourbars and the complex Re/Im colour key separately."""
+    figure, axes = plt.subplots(
+        1, 3, figsize=(9.0, 2.7),
+        gridspec_kw={"width_ratios": (1.25, 1.25, 1.0)},
+        constrained_layout=True,
+    )
+    axes[0].set_title("DMD input intensity", fontsize=10)
+    figure.colorbar(
+        ScalarMappable(norm=Normalize(0.0, 1.0), cmap="gray"),
+        cax=axes[0], orientation="horizontal",
+    )
+    axes[0].set_xlabel("Intensity", fontsize=8)
+
+    axes[1].set_title(r"Raw optical intensity $|U|^2$", fontsize=10)
+    figure.colorbar(
+        ScalarMappable(norm=Normalize(0.0, 1.0), cmap="magma"),
+        cax=axes[1], orientation="horizontal",
+    )
+    axes[1].set_xlabel("Preview-normalised display value", fontsize=8)
+
+    axes[2].set_title("2-D complex mapping", fontsize=10)
+    _draw_complex_mapping_legend(axes[2])
+    figure.savefig(path, dpi=160)
+    plt.close(figure)
+
+
+def save_optical_field_samples(config, student, dataset, device, output_dir, sample_count):
+    """Save labelled optical-field previews and raw-intensity statistics."""
+    if sample_count <= 0:
+        return None
+    if not hasattr(student, "forward_with_optical_field"):
+        raise ValueError(
+            "--optical-field-samples currently requires a single-head OpticalStudent checkpoint. "
+            "A multi-head model has multiple final complex fields, so it has no unique Re(U)/Im(U) image."
+        )
+
+    output_dir = output_dir / "optical_fields"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sample_count = min(int(sample_count), len(dataset))
+    was_training = student.training
+    student.eval()
+    summary = {
+        "definition": "raw_intensity = |U_final|^2 before blur, normalisation, clamping, detector conversion, or display stretch",
+        "display_note": "PNG previews use robust display ranges; raw arrays are not saved.",
+        "raw_numeric_arrays_saved": False,
+        "mapping_legend": "mapping_legend.png",
+        "student_output_normalised": bool(getattr(student, "enable_norm", False)),
+        "student_norm_mode": str(getattr(config, "STUDENT_NORM_MODE", "none")),
+        "output_blur_kernel": int(getattr(config, "STUDENT_OUTPUT_BLUR_KERNEL", 1)),
+        "samples": [],
+    }
+    _save_mapping_legend(output_dir / summary["mapping_legend"])
+
+    with torch.inference_mode():
+        for sample_index in range(sample_count):
+            sample = dataset[sample_index]
+            gray = sample["gray_tensor"].unsqueeze(0).to(device, non_blocking=config.PIN_MEMORY)
+            if config.ENABLE_CHANNELS_LAST and device.type == "cuda":
+                gray = gray.contiguous(memory_format=torch.channels_last)
+            _, optical = student.forward_with_optical_field(gray)
+            raw_intensity = optical["raw_intensity"][0, 0].detach().float().cpu().numpy()
+            field = optical["field"][0, 0].detach().cpu()
+            real = field.real.float().numpy()
+            imag = field.imag.float().numpy()
+            input_intensity = sample["gray_tensor"][0].detach().float().cpu().numpy()
+
+            stem = f"sample_{sample_index:02d}_{Path(sample['image_path']).stem}"
+            raw_low, raw_high = _display_range(raw_intensity)
+            magnitude = np.hypot(real, imag)
+            complex_display_scale = max(float(np.percentile(magnitude, 99)), 1e-12)
+            complex_rgb = _complex_field_to_rgb(real, imag, complex_display_scale)
+            figure, axes = plt.subplots(1, 3, figsize=(12.5, 4.2), constrained_layout=True)
+            panels = (
+                (input_intensity, "DMD input intensity", "gray", 0.0, 1.0),
+                (raw_intensity, r"Raw optical intensity $|U|^2$", "magma", raw_low, raw_high),
+                (complex_rgb, r"Complex field: 2-D Re$(U)$/Im$(U)$ mapping", None, None, None),
+            )
+            for axis, (array, title, cmap, vmin, vmax) in zip(axes, panels):
+                axis.imshow(array, cmap=cmap, vmin=vmin, vmax=vmax)
+                axis.set_title(title)
+                axis.axis("off")
+            figure.savefig(output_dir / f"{stem}_optical_fields.png", dpi=160)
+            plt.close(figure)
+
+            summary["samples"].append({
+                "sample_index": sample_index,
+                "source_image": str(sample["image_path"]),
+                "preview": f"{stem}_optical_fields.png",
+                "raw_intensity_stats": {
+                    "min": float(raw_intensity.min()), "max": float(raw_intensity.max()),
+                    "mean": float(raw_intensity.mean()), "p01": float(np.percentile(raw_intensity, 1)),
+                    "p50": float(np.percentile(raw_intensity, 50)), "p99": float(np.percentile(raw_intensity, 99)),
+                    "preview_vmin": raw_low, "preview_vmax": raw_high,
+                },
+                "complex_mapping": {
+                    "encoding": "hue=atan2(Im(U), Re(U)); brightness=clip(|U| / p99(|U|), 0, 1)",
+                    "magnitude_p99": complex_display_scale,
+                },
+            })
+    if was_training:
+        student.train()
+    (output_dir / "optical_field_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return {"directory": str(output_dir), "samples": sample_count}
+
+
+def save_outputs(output_dir, confusion, metrics, checkpoint, restore_info, args, dataset_size, review_summary, optical_field_summary):
     class_names = Config.CLASS_NAMES
     labels = [class_names[index] for index in range(Config.NUM_CLASSES)] + ["background"]
     foreground = confusion[:Config.NUM_CLASSES, :Config.NUM_CLASSES]
@@ -173,6 +326,7 @@ def save_outputs(output_dir, confusion, metrics, checkpoint, restore_info, args,
         "matrix_confidence_threshold": args.conf_threshold, "metric_decode_confidence_threshold": Config.METRIC_CONF_THRESH,
         "metric_decode_nms_threshold": Config.METRIC_NMS_THRESH, "labels_counts_matrix": labels,
         "labels_normalized_matrix": labels[:-1], "metrics": metrics, "review_summary": review_summary,
+        "optical_field_summary": optical_field_summary,
     }
     (output_dir / "evaluation_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
@@ -185,6 +339,8 @@ def main():
         raise FileNotFoundError(f"Dataset YAML not found: {args.data}")
     if args.batch_size is not None and args.batch_size < 1:
         raise ValueError("--batch-size must be at least 1.")
+    if args.optical_field_samples < 0:
+        raise ValueError("--optical-field-samples must be non-negative.")
     for name in ("conf_threshold", "nms_threshold", "iou_threshold"):
         if (value := getattr(args, name)) is not None and not 0.0 <= value <= 1.0:
             raise ValueError(f"--{name.replace('_', '-')} must be between 0 and 1.")
@@ -210,18 +366,24 @@ def main():
     dataset = SLMFeatureDataset(Config, split=args.split)
     if len(dataset) == 0:
         raise RuntimeError(f"Dataset split {args.split!r} is empty.")
+    output_dir = args.output.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    optical_field_summary = save_optical_field_samples(
+        Config, student, dataset, device, output_dir, args.optical_field_samples,
+    )
     dataloader = DataLoader(dataset, batch_size=Config.BATCH_SIZE, collate_fn=slm_collate_fn, **get_dataloader_kwargs(Config))
     detections, targets, source_paths, metrics = evaluate_student(Config, student, detector, dataloader, device)
     confusion, class_tp, class_fp, class_fn = compute_detection_confusion_matrix(
         detections, targets, Config.NUM_CLASSES, iou_threshold=args.iou_threshold,
         conf_threshold=args.conf_threshold, image_size=Config.RESOLUTION,
     )
-    output_dir = args.output.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
     review_summary = write_review_lists(
         output_dir, source_paths, detections, targets, Config, device,
     )
-    save_outputs(output_dir, confusion, metrics, checkpoint, restore_info, args, len(dataset), review_summary)
+    save_outputs(
+        output_dir, confusion, metrics, checkpoint, restore_info, args, len(dataset), review_summary,
+        optical_field_summary,
+    )
     print(f"Evaluated {len(dataset)} {args.split} images on {device}.")
     print(f"mAP50: {metrics['map50']:.4f}")
     print(f"Count matrix (with background): {output_dir / 'confusion_matrix_counts_with_background.png'}")
@@ -235,6 +397,11 @@ def main():
         f"{review_summary['map_error_images']} mAP-error images -> "
         f"{output_dir / review_summary['map_error_list']}"
     )
+    if optical_field_summary is not None:
+        print(
+            f"Optical fields: {optical_field_summary['samples']} sample(s) -> "
+            f"{optical_field_summary['directory']}"
+        )
 
 
 if __name__ == "__main__":

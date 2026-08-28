@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 
+from models.class_display import class_name_for_id
 from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.utils_slm import save_student_best, _layer_names_from_student
 from models.runtime import log_to_file
@@ -187,7 +188,7 @@ def write_slm_tensorboard_scalars(
             ap = val_metrics.get(f"ap_class_{cls_id}")
             if ap is None:
                 continue
-            class_name = class_names[cls_id] if cls_id < len(class_names) else f"class_{cls_id}"
+            class_name = class_name_for_id(class_names, cls_id)
             class_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(class_name)).strip("_") or f"class_{cls_id}"
             add_tensorboard_scalar(writer, f"Metrics/{stage_name}/AP/{class_name}", ap, step)
             add_tensorboard_scalar(writer, f"Metrics/All_Stages/AP/{class_name}", ap, step)

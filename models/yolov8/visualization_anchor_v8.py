@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from models.class_display import class_name_for_id
 from models.runtime import unwrap_module
 from models.teacher_guidance import enhance_feature_for_display
 from .detection_protocol import decode_detections
@@ -58,7 +59,11 @@ def save_detection_visualization_anchor_v8(config, epoch, model, dataset, save_d
                 x1 = cx_px - w_px / 2
                 y1 = cy_px - h_px / 2
                 axes[row, 2].add_patch(plt.Rectangle((x1, y1), w_px, h_px, fill=False, edgecolor="lime", linewidth=1.8))
-                axes[row, 2].text(x1, y1 - 4, config.CLASS_NAMES[int(cls_id)], color="lime", fontsize=8)
+                axes[row, 2].text(
+                    x1, y1 - 4,
+                    class_name_for_id(config.CLASS_NAMES, int(cls_id)),
+                    color="lime", fontsize=8,
+                )
 
             for det in detections:
                 cx, cy, w, h, conf, cls_id = det
@@ -69,7 +74,7 @@ def save_detection_visualization_anchor_v8(config, epoch, model, dataset, save_d
                 axes[row, 3].text(
                     x1,
                     y1 - 5,
-                    f"{config.CLASS_NAMES[int(cls_id)]}: {conf:.2f}",
+                    f"{class_name_for_id(config.CLASS_NAMES, int(cls_id))}: {conf:.2f}",
                     color=color,
                     fontsize=8,
                     fontweight="bold",

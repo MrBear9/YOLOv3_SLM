@@ -16,6 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import colormaps
 
+from models.class_display import class_name_for_id
 from models.compact_detect.compact_utils import _slm_layer_names
 from models.runtime import log_to_file, unwrap_module
 from models.teacher_guidance import enhance_feature_for_display
@@ -146,10 +147,16 @@ def add_tensorboard_visualization(writer, step, dataset, student, detector, devi
                 gt[3].item() * image_w,
                 gt[4].item() * image_h,
             ]
-            draw_box(draw, box, (60, 220, 80), f"GT {Config.CLASS_NAMES.get(cls_id, cls_id)}")
+            draw_box(
+                draw, box, (60, 220, 80),
+                f"GT {class_name_for_id(Config.CLASS_NAMES, cls_id, str(cls_id))}",
+            )
         for det in detections[idx]:
             cls_id = int(det[5])
-            label = f"{Config.CLASS_NAMES.get(cls_id, cls_id)} {float(det[4]):.2f}"
+            label = (
+                f"{class_name_for_id(Config.CLASS_NAMES, cls_id, str(cls_id))} "
+                f"{float(det[4]):.2f}"
+            )
             draw_box(draw, det[:4], (255, 70, 70), label)
         rendered.append(torch.from_numpy(np.asarray(canvas).copy()).permute(2, 0, 1).float() / 255.0)
     grid = torch.cat(rendered, dim=2)
@@ -286,7 +293,7 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, te
                 axes[row, col].text(
                     x1,
                     y1 + 10,
-                    str(Config.CLASS_NAMES.get(int(cls_id), int(cls_id))),
+                    class_name_for_id(Config.CLASS_NAMES, int(cls_id), str(int(cls_id))),
                     color="lime",
                     fontsize=8,
                     bbox=dict(boxstyle="round,pad=0.20", facecolor="black", alpha=0.35, edgecolor="none"),
@@ -302,7 +309,7 @@ def save_compact_visualization_png(epoch, dataset, student, detector, device, te
                 axes[row, col].text(
                     x1,
                     y1 + 10,
-                    f"{Config.CLASS_NAMES.get(int(cls_id), int(cls_id))} {conf:.2f}",
+                    f"{class_name_for_id(Config.CLASS_NAMES, int(cls_id), str(int(cls_id)))} {conf:.2f}",
                     color="red",
                     fontsize=8,
                     bbox=dict(boxstyle="round,pad=0.20", facecolor="black", alpha=0.35, edgecolor="none"),
