@@ -132,23 +132,18 @@ def save_slm_component_curves(history, output_dir):
     axes[2].set_title("Response distillation loss")
     axes[2].legend()
 
-    for key in ("train_task_guidance", "val_task_guidance"):
-        xs, ys = valid_history_points(history.get(key, []))
-        axes[3].plot(xs, ys, label=key)
-    axes[3].set_title("Four-scale task guidance")
-    axes[3].legend()
-
     for key in ("train_phase_regularization", "val_phase_regularization"):
         xs, ys = valid_history_points(history.get(key, []))
-        axes[4].plot(xs, ys, label=key)
-    axes[4].set_title("Phase regularization loss")
-    axes[4].legend()
+        axes[3].plot(xs, ys, label=key)
+    axes[3].set_title("Phase regularization loss")
+    axes[3].legend()
 
     for key in ("train_total", "val_total"):
         xs, ys = valid_history_points(history.get(key, []))
-        axes[5].plot(xs, ys, label=key)
-    axes[5].set_title("Total loss")
-    axes[5].legend()
+        axes[4].plot(xs, ys, label=key)
+    axes[4].set_title("Total loss")
+    axes[4].legend()
+    axes[5].axis("off")
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "training_curves_components.png"), dpi=130)
@@ -372,8 +367,8 @@ def log_config():
     log_to_file(Config, f"Teacher: {Config.TEACHER_ARCH}  |  Detector: {Config.DETECTOR_HEAD_TYPE} (anchor_free_tal)")
     log_to_file(
         Config,
-        f"Shared light head: base={Config.YOLO_LIGHT_BASE_CH}, identical guide/student architecture; "
-        f"task_guidance={Config.ENABLE_TASK_GUIDANCE}, scales={Config.TASK_GUIDANCE_SCALE_WEIGHTS}",
+        f"Shared global/local DW head: base={Config.YOLO_LIGHT_BASE_CH}, "
+        f"depths={Config.GLOBAL_LOCAL_DETECTOR_DEPTHS}, context_grid={Config.GLOBAL_LOCAL_CONTEXT_GRID}",
     )
     num_layers = int(getattr(Config, "NUM_LAYERS", 2))
     multi = bool(getattr(Config, "SLM_MULTI_HEAD_ENABLED", False))
@@ -422,7 +417,7 @@ def log_config():
     log_to_file(
         Config,
         f"Norm: {Config.STUDENT_NORM_MODE} p={Config.STUDENT_NORM_PERCENTILE} clamp={Config.STUDENT_OUTPUT_CLAMP_MAX}  "
-        f"Align: {Config.FEATURE_DOMAIN_ALIGN_MODE}  "
+        f"Feature transfer: GT-local amplitude-invariant  "
         f"Loss: f={Config.FEATURE_LOSS_WEIGHT_PHASE_FOCUS}/{Config.DETECTION_LOSS_WEIGHT_PHASE_FOCUS}  "
         f"d={Config.FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS}/{Config.DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS}  "
         f"j={Config.FEATURE_LOSS_WEIGHT_JOINT}/{Config.DETECTION_LOSS_WEIGHT_JOINT}  "
@@ -430,8 +425,9 @@ def log_config():
     )
     log_to_file(
         Config,
-        f"Target ROI feature loss: enabled={Config.ENABLE_TARGET_ROI_FEATURE_LOSS}, "
-        f"weight={Config.LOSS_TARGET_ROI_WEIGHT}, context={Config.TARGET_ROI_CONTEXT_SCALE}, "
+        f"Target-local structure weights: structure={Config.LOCAL_FEATURE_STRUCTURE_WEIGHT}, "
+        f"gradient={Config.LOCAL_FEATURE_GRADIENT_WEIGHT}, pyramid={Config.LOCAL_FEATURE_PYRAMID_WEIGHT}, "
+        f"correlation={Config.LOCAL_FEATURE_CORRELATION_WEIGHT}, context={Config.TARGET_ROI_CONTEXT_SCALE}, "
         f"feather={Config.TARGET_ROI_FEATHER_KERNEL}, class_weights={Config.TARGET_ROI_CLASS_WEIGHTS}",
     )
     log_to_file(

@@ -11,9 +11,8 @@ from torch.utils.data import DataLoader
 
 from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.dataset_slm import SLMFeatureDataset, slm_collate_fn
-from models.SLM.losses_slm import CompositeOpticalFeatureLoss
+from models.SLM.losses_slm import RegionInvariantOpticalLoss
 from models.SLM.optical_layers import OpticalStudent
-from models.SLM.task_guidance import MultiScaleTaskGuidance
 from models.SLM.slm_utils import configure_backends, log_config
 from models.SLM.utils_slm import (
     load_student_checkpoint,
@@ -47,19 +46,29 @@ def setup_training(is_main, use_ddp):
     log_config()
     device = get_runtime_device(Config)
 
-    # Teacher + full-width task guide (frozen)
+    # Teacher + matching frozen reference detector
     teacher = build_teacher(Config).to(device)
-    guide_detector = build_detector_head(Config, in_channels=1).to(device)
+    reference_detector = build_detector_head(Config, in_channels=1).to(device)
     checkpoint_info = load_teacher_detector_checkpoint(
-        teacher, guide_detector, Config.TEACHER_DETECTOR_CHECKPOINT, device
+        teacher, reference_detector, Config.TEACHER_DETECTOR_CHECKPOINT, device
     )
+    if (
+        checkpoint_info.get("teacher_loaded") != checkpoint_info.get("teacher_total")
+        or checkpoint_info.get("detector_loaded") != checkpoint_info.get("detector_total")
+    ):
+        raise RuntimeError(
+            "Teacher checkpoint does not exactly match the global/local DW architecture: "
+            f"teacher={checkpoint_info.get('teacher_loaded')}/{checkpoint_info.get('teacher_total')}, "
+            f"detector={checkpoint_info.get('detector_loaded')}/{checkpoint_info.get('detector_total')}. "
+            "Train optical_teacher_yolov8_head.py with the current code before SLM training."
+        )
     teacher_checkpoint_sha256 = file_sha256(Config.TEACHER_DETECTOR_CHECKPOINT)
     log_to_file(Config, f"Loaded teacher/detector checkpoint: {checkpoint_info}")
-    log_to_file(Config, f"Frozen teacher/guide checkpoint SHA256: {teacher_checkpoint_sha256}")
+    log_to_file(Config, f"Frozen teacher/reference checkpoint SHA256: {teacher_checkpoint_sha256}")
     set_trainable(teacher, False)
-    set_trainable(guide_detector, False)
+    set_trainable(reference_detector, False)
     teacher.eval()
-    guide_detector.eval()
+    reference_detector.eval()
 
     # Student + trainable detector
     multi_head_enabled = bool(getattr(Config, "SLM_MULTI_HEAD_ENABLED", False))
@@ -82,11 +91,11 @@ def setup_training(is_main, use_ddp):
     else:
         log_to_file(Config, f"Initialized SLM student with mode={init_mode}")
     detector = build_detector_head(Config, in_channels=1).to(device)
-    detector.load_state_dict(guide_detector.state_dict(), strict=True)
+    detector.load_state_dict(reference_detector.state_dict(), strict=True)
     log_to_file(
         Config,
-        f"Initialized shared optical detector from the frozen guide: "
-        f"base={Config.YOLO_LIGHT_BASE_CH}, loaded={len(detector.state_dict())}/{len(guide_detector.state_dict())} tensors, "
+        f"Initialized shared optical detector from the frozen reference: "
+        f"base={Config.YOLO_LIGHT_BASE_CH}, loaded={len(detector.state_dict())}/{len(reference_detector.state_dict())} tensors, "
         f"params={sum(parameter.numel() for parameter in detector.parameters()):,}",
     )
     restore_paired_detector = bool(
@@ -99,7 +108,7 @@ def setup_training(is_main, use_ddp):
         joint_info = {"student_only": True, **student_info}
         log_to_file(
             Config,
-            "Restored optical student only; detector remains the exact frozen-guide initialization.",
+            "Restored optical student only; detector remains the exact frozen-reference initialization.",
         )
     else:
         joint_info = None
@@ -182,22 +191,19 @@ def setup_training(is_main, use_ddp):
     vis_dataset = val_dataset if Config.VIS_DATASET_SPLIT == "val" and val_dataset is not None and len(val_dataset) > 0 else train_dataset
     vis_prefix = "val" if vis_dataset is val_dataset else "train"
 
-    feature_criterion = CompositeOpticalFeatureLoss(Config)
+    feature_criterion = RegionInvariantOpticalLoss(Config)
     detection_criterion = build_detection_criterion(Config)
-    task_guidance_criterion = MultiScaleTaskGuidance(Config).to(device)
 
     history = {
         "train_total": [],
         "train_feature": [],
         "train_detection": [],
         "train_response": [],
-        "train_task_guidance": [],
         "train_phase_regularization": [],
         "val_total": [],
         "val_feature": [],
         "val_detection": [],
         "val_response": [],
-        "val_task_guidance": [],
         "val_phase_regularization": [],
         "precision": [],
         "recall": [],
@@ -217,7 +223,7 @@ def setup_training(is_main, use_ddp):
     return {
         "device": device,
         "teacher": teacher,
-        "guide_detector": guide_detector,
+        "reference_detector": reference_detector,
         "teacher_checkpoint_sha256": teacher_checkpoint_sha256,
         "student": student,
         "detector": detector,
@@ -229,7 +235,6 @@ def setup_training(is_main, use_ddp):
         "vis_prefix": vis_prefix,
         "feature_criterion": feature_criterion,
         "detection_criterion": detection_criterion,
-        "task_guidance_criterion": task_guidance_criterion,
         "history": history,
         "tensorboard_writer": tensorboard_writer,
         "resume_info": joint_info,

@@ -6,7 +6,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 import yaml
 
-from models.dataset import image_to_intensity_tensor, letterbox_content_bounds, letterbox_image_targets
+from models.dataset import image_to_intensity_tensor, letterbox_image_targets
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -97,11 +97,7 @@ class SLMFeatureDataset(Dataset):
                     if len(parts) >= 5:
                         targets.append([int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])])
         targets = torch.tensor(targets, dtype=torch.float32) if targets else torch.zeros((0, 5), dtype=torch.float32)
-        left, top, right, bottom = letterbox_content_bounds(img.size, self.config.RESOLUTION)
         img, targets = letterbox_image_targets(img, targets, self.config.RESOLUTION)
-        canvas_h, canvas_w = (int(value) for value in self.config.RESOLUTION)
-        valid_mask = torch.zeros((1, canvas_h, canvas_w), dtype=torch.float32)
-        valid_mask[:, top:bottom, left:right] = 1.0
         gray_tensor = image_to_intensity_tensor(
             img,
             mode=getattr(self.config, "INPUT_INTENSITY_MODE", "srgb"),
@@ -111,7 +107,6 @@ class SLMFeatureDataset(Dataset):
             "gray_tensor": gray_tensor,
             "rgb_tensor": rgb_tensor,
             "targets": targets,
-            "valid_mask": valid_mask,
             "image_path": entry["image_path"],
         }
 
@@ -121,6 +116,5 @@ def slm_collate_fn(batch):
         "gray_tensor": torch.stack([item["gray_tensor"] for item in batch], dim=0),
         "rgb_tensor": torch.stack([item["rgb_tensor"] for item in batch], dim=0),
         "targets": [item["targets"] for item in batch],
-        "valid_mask": torch.stack([item["valid_mask"] for item in batch], dim=0),
         "image_paths": [item["image_path"] for item in batch],
     }

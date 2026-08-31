@@ -36,7 +36,8 @@ def log_all_parameters():
     log_to_file(
         Config,
         f"Head factory: type={Config.DETECTOR_HEAD_TYPE}, light_base_ch={Config.YOLO_LIGHT_BASE_CH}, "
-        f"yolov8_base_ch={Config.YOLOV8_BASE_CHANNELS}, c2f_blocks={Config.YOLOV8_C2F_BLOCKS}",
+        f"global_local_depths={Config.GLOBAL_LOCAL_DETECTOR_DEPTHS}, "
+        f"context_grid={Config.GLOBAL_LOCAL_CONTEXT_GRID}",
     )
     log_to_file(Config, f"Strides: {Config.ANCHOR_FREE_STRIDES}")
     log_to_file(
@@ -79,7 +80,7 @@ def log_all_parameters():
         log_to_file(
             Config,
             f"V2 physical teacher: base_channels={Config.TEACHER_V2_BASE_CHANNELS}, "
-            f"c2f_blocks={Config.TEACHER_V2_C2F_BLOCKS}, "
+            f"global_local_depths={Config.GLOBAL_LOCAL_TEACHER_DEPTHS}, "
             f"fourier_bands={Config.TEACHER_V2_FOURIER_BANDS}, "
             f"low_pass_sigma={Config.TEACHER_V2_FOURIER_LOW_PASS_SIGMA}, "
             f"slm_layers={Config.TEACHER_V2_NUM_SLM_LAYERS}, "

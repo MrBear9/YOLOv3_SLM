@@ -15,14 +15,14 @@ class ConfigSLM(OpticalConfig):
     CLASS_NAMES = None
     NUM_CLASSES = None
     # New hardware-aware 640x640 experiment; old single-pitch checkpoints are incompatible.
-    OUTPUT_DIR = r"output/SLM_Tv2_dmd640_samehead_p1"
+    OUTPUT_DIR = r"output/SLM_Tv2_dmd640_contextdw_v1"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_dmd640_scratch/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_dmd640_contextdw_v1/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -33,13 +33,12 @@ class ConfigSLM(OpticalConfig):
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
-    # The failed P0 run changed only the detector after phase-focus; its SLM
-    # stayed frozen throughout detector-focus.  Reuse that valid optical state
-    # without restoring the incompatible narrowed detector.
-    SLM_INIT_MODE = "checkpoint"
-    SLM_INIT_CHECKPOINT = r"output/SLM_Tv2_dmd640_taskguide_p0/optical_student_best.pth"
-    RESTORE_PAIRED_DETECTOR_FROM_SLM_CHECKPOINT = False
-    PHASE_FOCUS_EPOCHS = 0
+    # TeacherV2 and the detector are new architectures.  Their feature geometry
+    # must be learned by a fresh optical phase rather than partially loading an
+    # incompatible detector/teacher experiment.
+    SLM_INIT_MODE = "random"
+    SLM_INIT_CHECKPOINT = r""
+    PHASE_FOCUS_EPOCHS = 100
     DETECTOR_FOCUS_EPOCHS = 80
     # Keep optional SLM2-only refinement disabled in the primary scratch run.
     PHASE_REFINE_EPOCHS = 0
@@ -80,6 +79,8 @@ class ConfigSLM(OpticalConfig):
     TEACHER_V2_C2F_BLOCKS = 3
     TEACHER_V2_FOURIER_BANDS = 8
     TEACHER_V2_FOURIER_LOW_PASS_SIGMA = 0.5
+    GLOBAL_LOCAL_CONTEXT_GRID = 6
+    GLOBAL_LOCAL_TEACHER_DEPTHS = (2, 3, 3)
     # These must match the newly trained hardware-aware 640x640 physical teacher.
     TEACHER_V2_NUM_SLM_LAYERS = 2
     TEACHER_V2_WAVELENGTH = 532e-9
@@ -115,6 +116,7 @@ class ConfigSLM(OpticalConfig):
 
     # -------- DETECTOR_HEAD_TYPE = "light" --------
     YOLO_LIGHT_BASE_CH = 8  # A: halved from 16
+    GLOBAL_LOCAL_DETECTOR_DEPTHS = (1, 1, 2)
     DETECTOR_USE_COORDCONV = True
     DETECTOR_INVERT_FEATURE = False   # invert teacher feature (dark→bright) before detector
     # The SLM detector baseline was validated on the raw optical intensity.
@@ -135,23 +137,16 @@ class ConfigSLM(OpticalConfig):
     # =========================================================================
     # SLM feature loss (student teacher feature matching)
     # =========================================================================
-    LOSS_FULL_WEIGHT = 0.20
-    LOSS_LOW1_WEIGHT = 0.25
-    LOSS_LOW2_WEIGHT = 0.10
-    LOSS_SSIM_WEIGHT = 0.25
-    LOSS_GRAD_WEIGHT = 0.10
-    LOSS_FREQ_WEIGHT = 0.00
-    LOSS_PEARSON_WEIGHT = 0.10
+    # GT-local, modality-invariant structure transfer.  There is deliberately
+    # no full-frame pixel, SSIM, Fourier-amplitude or background matching.
+    LOCAL_FEATURE_STRUCTURE_WEIGHT = 0.45
+    LOCAL_FEATURE_GRADIENT_WEIGHT = 0.25
+    LOCAL_FEATURE_PYRAMID_WEIGHT = 0.15
+    LOCAL_FEATURE_CORRELATION_WEIGHT = 0.15
+    LOCAL_FEATURE_PYRAMID_SCALES = (2, 4)
     FEATURE_LOSS_PREFILTER_KERNEL = 1
-    ENABLE_FEATURE_DOMAIN_ALIGNMENT = True
-    # Options: "mean_std", "minmax"/"min_max", "none".
-    FEATURE_DOMAIN_ALIGN_MODE = "minmax"
-    # Preserve detection-relevant local structure rather than only matching
-    # full-frame feature statistics. Boxes are expanded slightly for context.
-    ENABLE_TARGET_ROI_FEATURE_LOSS = True
-    LOSS_TARGET_ROI_WEIGHT = 0.75
-    TARGET_ROI_CONTEXT_SCALE = 1.20
-    TARGET_ROI_FEATHER_KERNEL = 9
+    TARGET_ROI_CONTEXT_SCALE = 1.25
+    TARGET_ROI_FEATHER_KERNEL = 7
     # Macro mAP gives each class equal value. Aircraft and soldier are the
     # current weak classes; warship already has strong AP and large boxes.
     TARGET_ROI_CLASS_WEIGHTS = {0: 1.0, 1: 1.25, 2: 1.35, 3: 0.75}
@@ -184,32 +179,6 @@ class ConfigSLM(OpticalConfig):
     DETECTION_LOSS_WEIGHT_NORM_JOINT = 1.00
     RESPONSE_LOSS_WEIGHT_NORM_JOINT = 0.00
     PHASE_REGULARIZATION_WEIGHT_NORM_JOINT = 0.03
-
-    # =========================================================================
-    # Four-scale task guidance (training only, zero deployment parameters)
-    # =========================================================================
-    ENABLE_TASK_GUIDANCE = True
-    TASK_GUIDANCE_WEIGHT_PHASE_FOCUS = 0.00
-    # Recover the exact shared-head detector baseline first.  Guidance is
-    # introduced only after detector-focus has selected a validation-best pair.
-    TASK_GUIDANCE_WEIGHT_DETECTOR_FOCUS = 0.00
-    TASK_GUIDANCE_WEIGHT_PHASE_REFINE = 0.00
-    TASK_GUIDANCE_WEIGHT_JOINT = 0.05
-    TASK_GUIDANCE_WEIGHT_NORM_JOINT = 0.05
-    # Detector-focus currently disables guidance.  These values remain the
-    # safe schedule if that ablation is enabled again; joint uses the shorter
-    # refinement ramp below.
-    TASK_GUIDANCE_WARMUP_EPOCHS = 5
-    TASK_GUIDANCE_RAMP_EPOCHS = 15
-    TASK_GUIDANCE_REFINEMENT_RAMP_EPOCHS = 5
-    # Highest resolution receives the strongest weight for the soldier class.
-    TASK_GUIDANCE_SCALE_WEIGHTS = (1.40, 1.00, 0.70, 0.40)
-    TASK_GUIDANCE_TARGET_WEIGHT = 1.00
-    TASK_GUIDANCE_BACKGROUND_WEIGHT = 0.15
-    TASK_GUIDANCE_STRUCTURE_WEIGHT = 0.05
-    TASK_GUIDANCE_TARGET_CONTEXT = 1.15
-    TASK_GUIDANCE_TRANSITION_CONTEXT = 1.80
-    TASK_GUIDANCE_HARD_BACKGROUND_GAIN = 1.50
 
     # All phase constraints are evaluated on exp(j * phase), so 0 and 2pi
     # remain physically identical. Circular variance is a bounded modulation
@@ -334,6 +303,20 @@ class ConfigSLM(OpticalConfig):
             raise ValueError("RESOLUTION height and width must be positive.")
         if int(cls.YOLO_LIGHT_BASE_CH) < 1:
             raise ValueError("Light-head base width must be positive.")
+        if int(cls.GLOBAL_LOCAL_CONTEXT_GRID) < 1:
+            raise ValueError("GLOBAL_LOCAL_CONTEXT_GRID must be positive.")
+        if len(tuple(cls.GLOBAL_LOCAL_DETECTOR_DEPTHS)) != 3 or min(
+            int(value) for value in cls.GLOBAL_LOCAL_DETECTOR_DEPTHS
+        ) < 1:
+            raise ValueError(
+                "GLOBAL_LOCAL_DETECTOR_DEPTHS must contain three positive integers."
+            )
+        if len(tuple(cls.GLOBAL_LOCAL_TEACHER_DEPTHS)) != 3 or min(
+            int(value) for value in cls.GLOBAL_LOCAL_TEACHER_DEPTHS
+        ) < 1:
+            raise ValueError(
+                "GLOBAL_LOCAL_TEACHER_DEPTHS must contain three positive integers."
+            )
         cls.validate_optical_geometry()
         cls.TEACHER_V2_ACTIVE_PIXEL_SHAPES = tuple(
             cls.slm_active_shape(index) for index in range(1, cls.TEACHER_V2_NUM_SLM_LAYERS + 1)
@@ -368,7 +351,6 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_PHASE_FOCUS,
                 "detection": cls.DETECTION_LOSS_WEIGHT_PHASE_FOCUS,
                 "response": cls.RESPONSE_LOSS_WEIGHT_PHASE_FOCUS,
-                "task_guidance": cls.TASK_GUIDANCE_WEIGHT_PHASE_FOCUS,
                 "phase_regularization": 0.0,
             }
         if stage_name == "phase_refine":
@@ -376,7 +358,6 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_PHASE_REFINE,
                 "detection": cls.DETECTION_LOSS_WEIGHT_PHASE_REFINE,
                 "response": cls.RESPONSE_LOSS_WEIGHT_PHASE_REFINE,
-                "task_guidance": cls.TASK_GUIDANCE_WEIGHT_PHASE_REFINE,
                 "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE,
             }
         if stage_name == "detector_focus":
@@ -384,7 +365,6 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS,
                 "detection": cls.DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS,
                 "response": cls.RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS,
-                "task_guidance": cls.TASK_GUIDANCE_WEIGHT_DETECTOR_FOCUS,
                 "phase_regularization": 0.0,
             }
         if stage_name == "norm_joint":
@@ -392,35 +372,14 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_NORM_JOINT,
                 "detection": cls.DETECTION_LOSS_WEIGHT_NORM_JOINT,
                 "response": cls.RESPONSE_LOSS_WEIGHT_NORM_JOINT,
-                "task_guidance": cls.TASK_GUIDANCE_WEIGHT_NORM_JOINT,
                 "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_NORM_JOINT,
             }
         return {
             "feature": cls.FEATURE_LOSS_WEIGHT_JOINT,
             "detection": cls.DETECTION_LOSS_WEIGHT_JOINT,
             "response": cls.RESPONSE_LOSS_WEIGHT_JOINT,
-            "task_guidance": cls.TASK_GUIDANCE_WEIGHT_JOINT,
             "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_JOINT,
         }
-
-    @classmethod
-    def task_guidance_weight(cls, stage_name, stage_epoch):
-        """Return the stage-local warm-up/ramp weight for task guidance."""
-        if not cls.ENABLE_TASK_GUIDANCE:
-            return 0.0
-        base_weight = float(cls.get_stage_loss_weights(stage_name)["task_guidance"])
-        if base_weight <= 0.0:
-            return 0.0
-        is_initial_detector_fit = stage_name == "detector_focus"
-        warmup = max(int(cls.TASK_GUIDANCE_WARMUP_EPOCHS), 0) if is_initial_detector_fit else 0
-        ramp = max(
-            int(cls.TASK_GUIDANCE_RAMP_EPOCHS if is_initial_detector_fit else cls.TASK_GUIDANCE_REFINEMENT_RAMP_EPOCHS),
-            1,
-        )
-        if int(stage_epoch) < warmup:
-            return 0.0
-        progress = min((int(stage_epoch) - warmup + 1) / ramp, 1.0)
-        return base_weight * progress
 
     @classmethod
     def validation_interval(cls, stage_name):

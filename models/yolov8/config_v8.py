@@ -46,7 +46,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/Tv2_dmd640_scratch"
+    TEACHER_OUTPUT_DIR = r"output/Tv2_dmd640_contextdw_v1"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -85,6 +85,8 @@ class ConfigYOLOv8Anchor:
     TEACHER_V2_C2F_BLOCKS = 3
     TEACHER_V2_FOURIER_BANDS = 8
     TEACHER_V2_FOURIER_LOW_PASS_SIGMA = 0.5
+    GLOBAL_LOCAL_CONTEXT_GRID = 6
+    GLOBAL_LOCAL_TEACHER_DEPTHS = (2, 3, 3)
     # These must match the optical-student hardware/simulation settings.
     # V2 is always physical; no CNN residual-output fallback is retained.
     TEACHER_V2_NUM_SLM_LAYERS = 2
@@ -136,6 +138,7 @@ class ConfigYOLOv8Anchor:
 
     # -------- DETECTOR_HEAD_TYPE = "light" --------
     YOLO_LIGHT_BASE_CH = 8  # 方案A: halved from 16
+    GLOBAL_LOCAL_DETECTOR_DEPTHS = (1, 1, 2)
     DETECTOR_USE_COORDCONV = True
     ANCHOR_FREE_HEAD_CH = 24
     ANCHOR_FREE_P2_FUSION_CH = 16
@@ -325,6 +328,20 @@ class ConfigYOLOv8Anchor:
         cls.RESOLUTION = tuple(int(value) for value in cls.RESOLUTION)
         if min(cls.RESOLUTION) < 1:
             raise ValueError("RESOLUTION height and width must be positive.")
+        if int(cls.GLOBAL_LOCAL_CONTEXT_GRID) < 1:
+            raise ValueError("GLOBAL_LOCAL_CONTEXT_GRID must be positive.")
+        if len(tuple(cls.GLOBAL_LOCAL_DETECTOR_DEPTHS)) != 3 or min(
+            int(value) for value in cls.GLOBAL_LOCAL_DETECTOR_DEPTHS
+        ) < 1:
+            raise ValueError(
+                "GLOBAL_LOCAL_DETECTOR_DEPTHS must contain three positive integers."
+            )
+        if len(tuple(cls.GLOBAL_LOCAL_TEACHER_DEPTHS)) != 3 or min(
+            int(value) for value in cls.GLOBAL_LOCAL_TEACHER_DEPTHS
+        ) < 1:
+            raise ValueError(
+                "GLOBAL_LOCAL_TEACHER_DEPTHS must contain three positive integers."
+            )
         if cls.get_teacher_init_mode() == "scratch" and cls.FREEZE_TEACHER:
             raise ValueError("A scratch teacher cannot be frozen.")
         if len(cls.TEACHER_V2_SLM_PROFILES) != cls.TEACHER_V2_NUM_SLM_LAYERS:

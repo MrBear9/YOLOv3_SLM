@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from models.SLM.dataset_slm import SLMFeatureDataset, slm_collate_fn
-from models.SLM.losses_slm import CompositeOpticalFeatureLoss
+from models.SLM.losses_slm import RegionInvariantOpticalLoss
 from models.SLM.optical_layers import OpticalStudent
 from models.SLM.utils_slm import load_student_checkpoint, set_trainable
 from models.teacher import build_teacher
@@ -137,7 +137,7 @@ def train():
         teacher_info = load_teacher_feature_checkpoint(teacher, Config.TEACHER_DETECTOR_CHECKPOINT, device)
         set_trainable(teacher, False)
         teacher.eval()
-        feature_criterion = CompositeOpticalFeatureLoss(Config)
+        feature_criterion = RegionInvariantOpticalLoss(Config)
         log_to_file(Config, f"Loaded teacher for compact feature warmup: {teacher_info}")
         log_to_file(
             Config,
@@ -332,7 +332,13 @@ def train():
         set_trainable(detector, not in_teacher_warmup)
         epoch_loss_t = torch.zeros((), device=device)
         stat_keys = (
-            ("feature_total", "full", "low1", "low2", "ssim", "grad", "freq", "pearson")
+            (
+                "feature_total",
+                "roi_structure",
+                "roi_gradient",
+                "roi_pyramid",
+                "roi_correlation",
+            )
             if in_teacher_warmup
             else get_compact_loss_keys(Config)
         )
@@ -340,6 +346,10 @@ def train():
 
         for batch in tqdm(current_loader, desc=f"Epoch {epoch + 1}/{Config.EPOCHS} [{phase_name}]", leave=True, disable=not is_main):
             images = batch["gray_tensor"].to(device, non_blocking=Config.PIN_MEMORY)
+            targets = [
+                target.to(device, non_blocking=Config.PIN_MEMORY)
+                for target in batch["targets"]
+            ]
             optimizer.zero_grad(set_to_none=True)
             if in_teacher_warmup:
                 rgb = batch["rgb_tensor"].to(device, non_blocking=Config.PIN_MEMORY)
@@ -354,10 +364,15 @@ def train():
                         features = forward_student_with_norm(student, images.float(), enable_norm=False)
                     else:
                         features = student(images.float())
-                    feature_loss, stats = feature_criterion(features, teacher_feature.detach(), unwrap_module(student), stage_name="phase_focus")
+                    feature_loss, stats = feature_criterion(
+                        features,
+                        teacher_feature.detach(),
+                        unwrap_module(student),
+                        stage_name="phase_focus",
+                        targets=targets,
+                    )
                     loss = feature_loss * float(Config.COMPACT_TEACHER_WARMUP_WEIGHT)
             else:
-                targets = [target.to(device, non_blocking=Config.PIN_MEMORY) for target in batch["targets"]]
                 with amp_ctx:
                     features = student(images)
                     pred = detector(features)
@@ -371,7 +386,11 @@ def train():
                         with torch.no_grad():
                             teacher_feature = teacher(rgb.float())
                         compact_feature_loss, feature_stats = feature_criterion(
-                            features.float(), teacher_feature.detach(), unwrap_module(student), stage_name="phase_focus"
+                            features.float(),
+                            teacher_feature.detach(),
+                            unwrap_module(student),
+                            stage_name="phase_focus",
+                            targets=targets,
                         )
                     loss = loss + compact_teacher_weight * compact_feature_loss
                     stats["feature_total"] = feature_stats["feature_total"]

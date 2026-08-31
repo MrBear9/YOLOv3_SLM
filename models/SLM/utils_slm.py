@@ -8,7 +8,7 @@ import torch
 
 
 def file_sha256(path, chunk_size=1024 * 1024):
-    """Return a stable identity for the frozen teacher/guide checkpoint."""
+    """Return a stable identity for the frozen teacher/reference checkpoint."""
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
         while chunk := stream.read(chunk_size):

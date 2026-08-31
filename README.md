@@ -26,7 +26,7 @@ ASM 使用从 `HolographSLM` 硬件实验继承的经验采样值。两者不能
 ```
 
 教师完成后，学生默认从新教师检查点
-`output/Tv2_dmd640_scratch/teacher_detector_best.pth` 开始训练；学生相位本身仍为
+`output/Tv2_dmd640_contextdw_v1/teacher_detector_best.pth` 开始训练；学生相位本身仍为
 随机初始化：
 
 ```powershell
@@ -41,7 +41,7 @@ ASM 使用从 `HolographSLM` 硬件实验继承的经验采样值。两者不能
 
 ```powershell
 & 'E:\Minicoda3\envs\deeplearn\python.exe' src/export_slm_phase.py `
-  --checkpoint output/SLM_Tv2_dmd640_samehead_p1/optical_student_best.pth `
+  --checkpoint output/SLM_Tv2_dmd640_contextdw_v1/optical_student_best.pth `
   --output output/hardware_phase
 ```
 
@@ -54,7 +54,7 @@ ASM 使用从 `HolographSLM` 硬件实验继承的经验采样值。两者不能
 ```powershell
 & 'E:\Minicoda3\envs\deeplearn\python.exe' src/predict_teacher_v2_single_image.py `
   --image path/to/image.png `
-  --checkpoint output/Tv2_dmd640_scratch/teacher_detector_best.pth `
+  --checkpoint output/Tv2_dmd640_contextdw_v1/teacher_detector_best.pth `
   --output output/single_teacher_v2
 ```
 

@@ -125,15 +125,13 @@ def train():
             Config,
             f"Start stage={stage_name}, epochs={stage_epochs}, student_norm_mode={stage_norm_mode}, "
             f"student_enable_norm={ctx['student_raw'].enable_norm}, "
-            f"scheduler={Config.LR_SCHEDULER if scheduler is not None else 'none'}, "
-            f"task_guidance_max={stage_weights['task_guidance']}",
+            f"scheduler={Config.LR_SCHEDULER if scheduler is not None else 'none'}",
         )
         detector_no_improve = 0
 
-        for stage_epoch in range(stage_epochs):
+        for _ in range(stage_epochs):
             best_map50, best_student_map50, best_student_loss, best_detector_loss, no_improve_delta, new_best_path = run_epoch(
                 global_epoch,
-                stage_epoch,
                 stage_name,
                 stage_weights,
                 norm_is_deployment_ready,
@@ -240,7 +238,8 @@ def _save_fallback_checkpoints(ctx, global_epoch):
                 "detection_protocol": "anchor_free_tal",
                 "light_base_ch": Config.YOLO_LIGHT_BASE_CH,
                 "shared_detector_head": True,
-                "task_guidance_enabled": Config.ENABLE_TASK_GUIDANCE,
+                "architecture_revision": "contextdw_v1",
+                "feature_loss_revision": "gt_local_invariant_v1",
                 "teacher_detector_sha256": ctx["teacher_checkpoint_sha256"],
                 "student_norm_mode": Config.STUDENT_NORM_MODE,
                 "student_norm_schedule": Config.STUDENT_NORM_SCHEDULE,

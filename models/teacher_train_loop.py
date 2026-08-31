@@ -452,6 +452,10 @@ def train():
                         "teacher_arch": Config.TEACHER_ARCH,
                         "head_type": Config.DETECTOR_HEAD_TYPE,
                         "detection_protocol": "anchor_free_tal",
+                        "architecture_revision": "contextdw_v1",
+                        "global_local_context_grid": Config.GLOBAL_LOCAL_CONTEXT_GRID,
+                        "teacher_depths": Config.GLOBAL_LOCAL_TEACHER_DEPTHS,
+                        "detector_depths": Config.GLOBAL_LOCAL_DETECTOR_DEPTHS,
                     },
                     joint_best_path,
                 )
@@ -509,6 +513,10 @@ def train():
                 "teacher_arch": Config.TEACHER_ARCH,
                 "head_type": Config.DETECTOR_HEAD_TYPE,
                 "detection_protocol": "anchor_free_tal",
+                "architecture_revision": "contextdw_v1",
+                "global_local_context_grid": Config.GLOBAL_LOCAL_CONTEXT_GRID,
+                "teacher_depths": Config.GLOBAL_LOCAL_TEACHER_DEPTHS,
+                "detector_depths": Config.GLOBAL_LOCAL_DETECTOR_DEPTHS,
             },
             joint_final_path,
         )
