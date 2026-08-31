@@ -41,7 +41,7 @@ ASM 使用从 `HolographSLM` 硬件实验继承的经验采样值。两者不能
 
 ```powershell
 & 'E:\Minicoda3\envs\deeplearn\python.exe' src/export_slm_phase.py `
-  --checkpoint output/SLM_Tv2_dmd640_scratch/optical_student_best.pth `
+  --checkpoint output/SLM_Tv2_dmd640_samehead_p1/optical_student_best.pth `
   --output output/hardware_phase
 ```
 

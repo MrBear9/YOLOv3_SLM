@@ -1,9 +1,19 @@
+import hashlib
 import os
 import re
 from collections import defaultdict
 
 import numpy as np
 import torch
+
+
+def file_sha256(path, chunk_size=1024 * 1024):
+    """Return a stable identity for the frozen teacher/guide checkpoint."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while chunk := stream.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def extract_state_dict(checkpoint):

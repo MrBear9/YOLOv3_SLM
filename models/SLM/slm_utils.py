@@ -132,18 +132,23 @@ def save_slm_component_curves(history, output_dir):
     axes[2].set_title("Response distillation loss")
     axes[2].legend()
 
-    for key in ("train_phase_regularization", "val_phase_regularization"):
+    for key in ("train_task_guidance", "val_task_guidance"):
         xs, ys = valid_history_points(history.get(key, []))
         axes[3].plot(xs, ys, label=key)
-    axes[3].set_title("Phase regularization loss")
+    axes[3].set_title("Four-scale task guidance")
     axes[3].legend()
+
+    for key in ("train_phase_regularization", "val_phase_regularization"):
+        xs, ys = valid_history_points(history.get(key, []))
+        axes[4].plot(xs, ys, label=key)
+    axes[4].set_title("Phase regularization loss")
+    axes[4].legend()
 
     for key in ("train_total", "val_total"):
         xs, ys = valid_history_points(history.get(key, []))
-        axes[4].plot(xs, ys, label=key)
-    axes[4].set_title("Total loss")
-    axes[4].legend()
-    axes[5].axis("off")
+        axes[5].plot(xs, ys, label=key)
+    axes[5].set_title("Total loss")
+    axes[5].legend()
 
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "training_curves_components.png"), dpi=130)
@@ -365,6 +370,11 @@ def log_config():
     log_to_file(Config, "=" * 80)
     log_to_file(Config, f"Dataset: {Config.YAML_PATH}  |  Output: {Config.OUTPUT_DIR}")
     log_to_file(Config, f"Teacher: {Config.TEACHER_ARCH}  |  Detector: {Config.DETECTOR_HEAD_TYPE} (anchor_free_tal)")
+    log_to_file(
+        Config,
+        f"Shared light head: base={Config.YOLO_LIGHT_BASE_CH}, identical guide/student architecture; "
+        f"task_guidance={Config.ENABLE_TASK_GUIDANCE}, scales={Config.TASK_GUIDANCE_SCALE_WEIGHTS}",
+    )
     num_layers = int(getattr(Config, "NUM_LAYERS", 2))
     multi = bool(getattr(Config, "SLM_MULTI_HEAD_ENABLED", False))
     log_to_file(Config, f"Optical: {num_layers}-layer, multi_head={multi}, phase_mode={Config.SLM_PHASE_PARAM_MODE}, init={Config.SLM_INIT_MODE}")

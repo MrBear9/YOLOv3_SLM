@@ -44,18 +44,11 @@ class AnchorFreeDetectBranch(nn.Module):
 
 
 class YOLOLightHead(nn.Module):
-    """Lightweight FPGA-friendly detection head (方案 A — slimmed).
+    """Four-scale FPGA-oriented detector with decoupled depthwise task towers.
 
-    Compared to the original YOLOLightHead:
-      - Base channel halved: 16 → 8  (total params ~657K → ~166K, -75%)
-      - Stem: 1→8→16→32→64 (pure serial, no residual)
-      - Multi-scale P3 fusion preserved (s2/s4/s8 → fused)
-      - FPN + lightweight PAN with ECA
-      - Detection heads: direct 1×1 projections, NO shared 3×3 conv
-        (FPN features already carry sufficient spatial context)
-
-    Pure conv — no residual blocks, no skip connections, no shared
-    spatial mixing before task projections.
+    The configurable base width controls the stem and feature pyramid.  The P2
+    branch is intentionally retained because its small parameter cost is
+    disproportionately valuable for small targets.
     """
 
     def __init__(self, config, in_channels=1, base_ch=None):
@@ -157,12 +150,18 @@ class YOLOLightHead(nn.Module):
         # Detection heads — anchor-free TAL with DFL
         p3_up = F.interpolate(p3_fused, size=s4.shape[-2:], mode="nearest")
         p2_fused = self.p2_fuse(torch.cat([self.p2_from_s4(s4), self.p2_from_p3(p3_up)], dim=1))
-        prediction_features = (
-            self.head_dropout(p2_fused), self.head_dropout(p3_fused),
-            self.head_dropout(p4_pan), self.head_dropout(p5_pan),
-        )
+        prediction_scales = (p2_fused, p3_fused, p4_pan, p5_pan)
+        prediction_features = tuple(self.head_dropout(feature) for feature in prediction_scales)
         predictions = tuple(head(feat) for head, feat in zip(self.anchor_free_heads, prediction_features))
 
         if return_features:
-            return predictions, {"s8": p3_feat, "s16": p4_feat, "s32": p5_feat}
+            # Keep the original teacher-training taps and additionally expose
+            # the four tensors feeding the actual prediction branches.  The
+            # latter remain pre-dropout so guidance is deterministic.
+            return predictions, {
+                "s8": p3_feat,
+                "s16": p4_feat,
+                "s32": p5_feat,
+                "prediction_scales": prediction_scales,
+            }
         return predictions

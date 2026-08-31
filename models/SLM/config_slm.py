@@ -15,7 +15,7 @@ class ConfigSLM(OpticalConfig):
     CLASS_NAMES = None
     NUM_CLASSES = None
     # New hardware-aware 640x640 experiment; old single-pitch checkpoints are incompatible.
-    OUTPUT_DIR = r"output/SLM_Tv2_dmd640_scratch"
+    OUTPUT_DIR = r"output/SLM_Tv2_dmd640_samehead_p1"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
@@ -33,10 +33,13 @@ class ConfigSLM(OpticalConfig):
     BATCH_SIZE = 8
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
-    # SLM_INIT_MODE is inherited from OpticalConfig and remains ``random``.
-    # Fit the optical mapping and detector from zero before any task-aware
-    # phase update; no previous student or detector checkpoint is loaded.
-    PHASE_FOCUS_EPOCHS = 100
+    # The failed P0 run changed only the detector after phase-focus; its SLM
+    # stayed frozen throughout detector-focus.  Reuse that valid optical state
+    # without restoring the incompatible narrowed detector.
+    SLM_INIT_MODE = "checkpoint"
+    SLM_INIT_CHECKPOINT = r"output/SLM_Tv2_dmd640_taskguide_p0/optical_student_best.pth"
+    RESTORE_PAIRED_DETECTOR_FROM_SLM_CHECKPOINT = False
+    PHASE_FOCUS_EPOCHS = 0
     DETECTOR_FOCUS_EPOCHS = 80
     # Keep optional SLM2-only refinement disabled in the primary scratch run.
     PHASE_REFINE_EPOCHS = 0
@@ -182,6 +185,32 @@ class ConfigSLM(OpticalConfig):
     RESPONSE_LOSS_WEIGHT_NORM_JOINT = 0.00
     PHASE_REGULARIZATION_WEIGHT_NORM_JOINT = 0.03
 
+    # =========================================================================
+    # Four-scale task guidance (training only, zero deployment parameters)
+    # =========================================================================
+    ENABLE_TASK_GUIDANCE = True
+    TASK_GUIDANCE_WEIGHT_PHASE_FOCUS = 0.00
+    # Recover the exact shared-head detector baseline first.  Guidance is
+    # introduced only after detector-focus has selected a validation-best pair.
+    TASK_GUIDANCE_WEIGHT_DETECTOR_FOCUS = 0.00
+    TASK_GUIDANCE_WEIGHT_PHASE_REFINE = 0.00
+    TASK_GUIDANCE_WEIGHT_JOINT = 0.05
+    TASK_GUIDANCE_WEIGHT_NORM_JOINT = 0.05
+    # Detector-focus currently disables guidance.  These values remain the
+    # safe schedule if that ablation is enabled again; joint uses the shorter
+    # refinement ramp below.
+    TASK_GUIDANCE_WARMUP_EPOCHS = 5
+    TASK_GUIDANCE_RAMP_EPOCHS = 15
+    TASK_GUIDANCE_REFINEMENT_RAMP_EPOCHS = 5
+    # Highest resolution receives the strongest weight for the soldier class.
+    TASK_GUIDANCE_SCALE_WEIGHTS = (1.40, 1.00, 0.70, 0.40)
+    TASK_GUIDANCE_TARGET_WEIGHT = 1.00
+    TASK_GUIDANCE_BACKGROUND_WEIGHT = 0.15
+    TASK_GUIDANCE_STRUCTURE_WEIGHT = 0.05
+    TASK_GUIDANCE_TARGET_CONTEXT = 1.15
+    TASK_GUIDANCE_TRANSITION_CONTEXT = 1.80
+    TASK_GUIDANCE_HARD_BACKGROUND_GAIN = 1.50
+
     # All phase constraints are evaluated on exp(j * phase), so 0 and 2pi
     # remain physically identical. Circular variance is a bounded modulation
     # measure; TV/high-pass suppress non-deployable pixel noise.
@@ -303,6 +332,8 @@ class ConfigSLM(OpticalConfig):
         cls.RESOLUTION = tuple(int(value) for value in cls.RESOLUTION)
         if min(cls.RESOLUTION) < 1:
             raise ValueError("RESOLUTION height and width must be positive.")
+        if int(cls.YOLO_LIGHT_BASE_CH) < 1:
+            raise ValueError("Light-head base width must be positive.")
         cls.validate_optical_geometry()
         cls.TEACHER_V2_ACTIVE_PIXEL_SHAPES = tuple(
             cls.slm_active_shape(index) for index in range(1, cls.TEACHER_V2_NUM_SLM_LAYERS + 1)
@@ -337,6 +368,7 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_PHASE_FOCUS,
                 "detection": cls.DETECTION_LOSS_WEIGHT_PHASE_FOCUS,
                 "response": cls.RESPONSE_LOSS_WEIGHT_PHASE_FOCUS,
+                "task_guidance": cls.TASK_GUIDANCE_WEIGHT_PHASE_FOCUS,
                 "phase_regularization": 0.0,
             }
         if stage_name == "phase_refine":
@@ -344,6 +376,7 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_PHASE_REFINE,
                 "detection": cls.DETECTION_LOSS_WEIGHT_PHASE_REFINE,
                 "response": cls.RESPONSE_LOSS_WEIGHT_PHASE_REFINE,
+                "task_guidance": cls.TASK_GUIDANCE_WEIGHT_PHASE_REFINE,
                 "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_PHASE_REFINE,
             }
         if stage_name == "detector_focus":
@@ -351,6 +384,7 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_DETECTOR_FOCUS,
                 "detection": cls.DETECTION_LOSS_WEIGHT_DETECTOR_FOCUS,
                 "response": cls.RESPONSE_LOSS_WEIGHT_DETECTOR_FOCUS,
+                "task_guidance": cls.TASK_GUIDANCE_WEIGHT_DETECTOR_FOCUS,
                 "phase_regularization": 0.0,
             }
         if stage_name == "norm_joint":
@@ -358,14 +392,35 @@ class ConfigSLM(OpticalConfig):
                 "feature": cls.FEATURE_LOSS_WEIGHT_NORM_JOINT,
                 "detection": cls.DETECTION_LOSS_WEIGHT_NORM_JOINT,
                 "response": cls.RESPONSE_LOSS_WEIGHT_NORM_JOINT,
+                "task_guidance": cls.TASK_GUIDANCE_WEIGHT_NORM_JOINT,
                 "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_NORM_JOINT,
             }
         return {
             "feature": cls.FEATURE_LOSS_WEIGHT_JOINT,
             "detection": cls.DETECTION_LOSS_WEIGHT_JOINT,
             "response": cls.RESPONSE_LOSS_WEIGHT_JOINT,
+            "task_guidance": cls.TASK_GUIDANCE_WEIGHT_JOINT,
             "phase_regularization": cls.PHASE_REGULARIZATION_WEIGHT_JOINT,
         }
+
+    @classmethod
+    def task_guidance_weight(cls, stage_name, stage_epoch):
+        """Return the stage-local warm-up/ramp weight for task guidance."""
+        if not cls.ENABLE_TASK_GUIDANCE:
+            return 0.0
+        base_weight = float(cls.get_stage_loss_weights(stage_name)["task_guidance"])
+        if base_weight <= 0.0:
+            return 0.0
+        is_initial_detector_fit = stage_name == "detector_focus"
+        warmup = max(int(cls.TASK_GUIDANCE_WARMUP_EPOCHS), 0) if is_initial_detector_fit else 0
+        ramp = max(
+            int(cls.TASK_GUIDANCE_RAMP_EPOCHS if is_initial_detector_fit else cls.TASK_GUIDANCE_REFINEMENT_RAMP_EPOCHS),
+            1,
+        )
+        if int(stage_epoch) < warmup:
+            return 0.0
+        progress = min((int(stage_epoch) - warmup + 1) / ramp, 1.0)
+        return base_weight * progress
 
     @classmethod
     def validation_interval(cls, stage_name):

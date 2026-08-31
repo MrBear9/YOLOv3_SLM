@@ -13,6 +13,7 @@ from models.SLM.losses_slm import detection_response_loss, phase_regularization_
 from models.runtime import unwrap_module
 from models.teacher_guidance import enhance_feature_for_display
 from models.yolov8.feature_adapter import prepare_slm_detector_feature
+from models.yolov8.feature_adapter import prepare_detector_feature
 from models.yolov8.detection_protocol import decode_detections
 from models.yolov8.metrics_anchor_v8 import compute_average_precision
 
@@ -23,7 +24,10 @@ def _move_batch_to_device(config, batch, device):
     if config.ENABLE_CHANNELS_LAST and torch.cuda.is_available():
         gray = gray.contiguous(memory_format=torch.channels_last)
         teacher_input = teacher_input.contiguous(memory_format=torch.channels_last)
-    return gray, teacher_input, batch["targets"]
+    valid_canvas = batch.get("valid_mask")
+    if valid_canvas is not None:
+        valid_canvas = valid_canvas.to(device, non_blocking=config.PIN_MEMORY)
+    return gray, teacher_input, batch["targets"], valid_canvas
 
 
 def _canvas_hw(config):
@@ -42,12 +46,16 @@ def evaluate_slm_detector(
     device,
     stage_name,
     response_detector=None,
+    guide_detector=None,
+    task_guidance_criterion=None,
+    task_guidance_weight=0.0,
     collect_detections=False,
 ):
     teacher_core = unwrap_module(teacher)
     student_core = unwrap_module(student)
     detector_core = unwrap_module(detector)
     response_detector_core = unwrap_module(response_detector) if response_detector is not None else detector_core
+    guide_detector_core = unwrap_module(guide_detector) if guide_detector is not None else response_detector_core
     was_student_training = student_core.training
     was_detector_training = detector_core.training
     was_response_detector_training = response_detector_core.training
@@ -55,12 +63,13 @@ def evaluate_slm_detector(
     student_core.eval()
     detector_core.eval()
     response_detector_core.eval()
+    guide_detector_core.eval()
 
     metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
     gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
     totals = {key: 0.0 for key in (
         "total", "feature", "feature_global", "feature_roi", "feature_background",
-        "detection", "response", "phase_regularization", "box", "obj", "noobj", "cls", "dfl",
+        "detection", "response", "task_guidance", "phase_regularization", "box", "obj", "noobj", "cls", "dfl",
     )}
     total_tp = total_fp = total_fn = 0
     total_tp_op = total_fp_op = total_fn_op = 0
@@ -72,9 +81,10 @@ def evaluate_slm_detector(
         stage_weights = config.get_stage_loss_weights(stage_name)
         is_main = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
         for batch in tqdm(dataloader, desc="SLM validation", leave=False, disable=not is_main):
-            gray, teacher_input, targets = _move_batch_to_device(config, batch, device)
+            gray, teacher_input, targets, valid_canvas = _move_batch_to_device(config, batch, device)
             teacher_feature = None
-            if stage_weights["feature"] > 0 or stage_weights["response"] > 0:
+            use_task_guidance = task_guidance_criterion is not None and task_guidance_weight > 0.0
+            if stage_weights["feature"] > 0 or stage_weights["response"] > 0 or use_task_guidance:
                 teacher_feature = teacher_core(teacher_input)
             student_feature = student_core(gray)
             zero = torch.zeros((), device=device, dtype=student_feature.dtype)
@@ -99,18 +109,43 @@ def evaluate_slm_detector(
                 phase_regularization_loss_value = zero
 
             evaluate_detector = stage_weights["detection"] > 0
-            if evaluate_detector:
-                predictions = detector_core(prepare_slm_detector_feature(config, student_feature))
-                detection_loss, loss_stats = detection_criterion(predictions, targets)
+            if evaluate_detector or use_task_guidance:
+                detector_input = prepare_slm_detector_feature(config, student_feature)
+                if use_task_guidance:
+                    predictions, student_scale_bundle = detector_core(
+                        detector_input, return_features=True
+                    )
+                else:
+                    predictions = detector_core(detector_input)
+                    student_scale_bundle = None
+                if evaluate_detector:
+                    detection_loss, loss_stats = detection_criterion(predictions, targets)
+                else:
+                    detection_loss = zero
+                    loss_stats = {"box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0, "dfl": 0.0}
             else:
                 predictions = None
                 detection_loss = zero
                 loss_stats = {"box": 0.0, "obj": 0.0, "noobj": 0.0, "cls": 0.0, "dfl": 0.0}
+                student_scale_bundle = None
+            if use_task_guidance:
+                _, guide_scale_bundle = guide_detector_core(
+                    prepare_detector_feature(config, teacher_feature), return_features=True
+                )
+                task_guidance_loss, _ = task_guidance_criterion(
+                    student_scale_bundle,
+                    guide_scale_bundle,
+                    targets,
+                    valid_canvas=valid_canvas,
+                )
+            else:
+                task_guidance_loss = zero
 
             total_loss = (
                 feature_loss * stage_weights["feature"]
                 + detection_loss * stage_weights["detection"]
                 + response_loss * stage_weights["response"]
+                + task_guidance_loss * task_guidance_weight
                 + phase_regularization_loss_value * stage_weights["phase_regularization"]
             )
 
@@ -121,6 +156,7 @@ def evaluate_slm_detector(
             totals["feature_background"] += feature_stats["feature_background"]
             totals["detection"] += float(detection_loss.detach().item())
             totals["response"] += float(response_loss.detach().item())
+            totals["task_guidance"] += float(task_guidance_loss.detach().item())
             totals["phase_regularization"] += float(phase_regularization_loss_value.detach().item())
             for key in ("box", "obj", "noobj", "cls", "dfl"):
                 totals[key] += loss_stats.get(key, 0.0)

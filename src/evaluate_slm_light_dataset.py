@@ -363,6 +363,11 @@ def main():
     student = build_student(Config, checkpoint).to(device)
     detector = build_detector_head(Config, in_channels=1).to(device)
     restore_info = load_student_detector_checkpoint(student, detector, str(args.checkpoint), device)
+    if restore_info["detector_loaded"] != restore_info["detector_total"]:
+        raise RuntimeError(
+            "Detector checkpoint architecture does not match the current shared light head: "
+            f"loaded {restore_info['detector_loaded']}/{restore_info['detector_total']} tensors."
+        )
     dataset = SLMFeatureDataset(Config, split=args.split)
     if len(dataset) == 0:
         raise RuntimeError(f"Dataset split {args.split!r} is empty.")

@@ -4,6 +4,8 @@ Contains run_epoch() which executes one training epoch (with optional
 validation) and returns updated best-model tracking values.
 """
 
+from collections import defaultdict
+
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -29,10 +31,12 @@ from models.SLM.utils_slm import (
 from models.monitoring import write_confusion_matrix, write_gradient_monitoring, write_parameter_monitoring
 from models.runtime import gather_detection_results, log_epoch_table_row, log_to_file
 from models.yolov8.feature_adapter import prepare_slm_detector_feature
+from models.yolov8.feature_adapter import prepare_detector_feature
 
 
 def run_epoch(
     global_epoch,
+    stage_epoch,
     stage_name,
     stage_weights,
     norm_is_deployment_ready,
@@ -48,13 +52,14 @@ def run_epoch(
     detector = ctx["detector"]
     student_raw = ctx["student_raw"]
     teacher = ctx["teacher"]
-    reference_detector = ctx["reference_detector"]
+    guide_detector = ctx["guide_detector"]
     train_loader = ctx["train_loader"]
     val_loader = ctx["val_loader"]
     vis_dataset = ctx["vis_dataset"]
     vis_prefix = ctx["vis_prefix"]
     feature_criterion = ctx["feature_criterion"]
     detection_criterion = ctx["detection_criterion"]
+    task_guidance_criterion = ctx["task_guidance_criterion"]
     optimizer = ctx["optimizer"]
     scheduler = ctx["scheduler"]
     history = ctx["history"]
@@ -75,6 +80,7 @@ def run_epoch(
     epoch_feature_background_t = torch.zeros((), device=device)
     epoch_detection_t = torch.zeros((), device=device)
     epoch_response_t = torch.zeros((), device=device)
+    epoch_task_guidance_t = torch.zeros((), device=device)
     epoch_phase_regularization_t = torch.zeros((), device=device)
     phase_snapshot = collect_phase_snapshot(student_raw)
     epoch_phase_grad_norm = 0.0
@@ -83,12 +89,18 @@ def run_epoch(
     grad_monitor_interval = int(getattr(Config, "PHASE_GRAD_MONITOR_BATCH_INTERVAL", 0))
     # Use list to accumulate across batches 閳?dict built at epoch end
     _phase_grad_norms_accum = []
+    task_component_sums = defaultdict(float)
+    task_guidance_weight = Config.task_guidance_weight(stage_name, stage_epoch)
+    use_task_guidance = task_guidance_weight > 0.0
 
     for batch_index, batch in enumerate(tqdm(train_loader, desc=f"Epoch {global_epoch + 1}/{Config.EPOCHS} [{stage_name}]", leave=True, disable=not is_main)):
         gray, rgb, targets = prepare_batch(batch, device)
+        valid_canvas = batch.get("valid_mask")
+        if valid_canvas is not None:
+            valid_canvas = valid_canvas.to(device, non_blocking=Config.PIN_MEMORY)
         optimizer.zero_grad(set_to_none=True)
         teacher_feature = None
-        if stage_weights["feature"] > 0 or stage_weights["response"] > 0:
+        if stage_weights["feature"] > 0 or stage_weights["response"] > 0 or use_task_guidance:
             with torch.no_grad():
                 teacher_feature = teacher(rgb)
         if stage_name == "detector_focus":
@@ -110,23 +122,46 @@ def run_epoch(
             feature_loss = zero
             feature_stats = {"feature_global": 0.0, "feature_roi": 0.0, "feature_background": 0.0}
         if stage_weights["response"] > 0:
-            response_loss, _ = detection_response_loss(Config, reference_detector, student_feature, teacher_feature.detach())
+            response_loss, _ = detection_response_loss(Config, guide_detector, student_feature, teacher_feature.detach())
         else:
             response_loss = zero
         if stage_weights["phase_regularization"] > 0:
             phase_regularization_loss_value, _ = phase_regularization_loss(Config, student_raw)
         else:
             phase_regularization_loss_value = zero
+        predictions = None
+        student_scale_bundle = None
+        if stage_weights["detection"] > 0 or use_task_guidance:
+            detector_input = prepare_slm_detector_feature(Config, student_feature)
+            if use_task_guidance:
+                predictions, student_scale_bundle = detector(detector_input, return_features=True)
+            else:
+                predictions = detector(detector_input)
         if stage_weights["detection"] > 0:
-            predictions = detector(prepare_slm_detector_feature(Config, student_feature))
             detection_loss, _ = detection_criterion(predictions, targets)
         else:
             detection_loss = zero
+        if use_task_guidance:
+            with torch.no_grad():
+                _, guide_scale_bundle = guide_detector(
+                    prepare_detector_feature(Config, teacher_feature.detach()),
+                    return_features=True,
+                )
+            task_guidance_loss, task_guidance_stats = task_guidance_criterion(
+                student_scale_bundle,
+                guide_scale_bundle,
+                targets,
+                valid_canvas=valid_canvas,
+            )
+        else:
+            task_guidance_loss = zero
+            task_guidance_stats = {}
 
         total_loss = (
             feature_loss * stage_weights["feature"]
             + detection_loss * stage_weights["detection"]
             + response_loss * stage_weights["response"]
+            + task_guidance_loss * task_guidance_weight
             + phase_regularization_loss_value * stage_weights["phase_regularization"]
         )
 
@@ -156,6 +191,10 @@ def run_epoch(
         epoch_feature_background_t += feature_stats["feature_background"]
         epoch_detection_t += detection_loss.detach()
         epoch_response_t += response_loss.detach()
+        epoch_task_guidance_t += task_guidance_loss.detach()
+        for key, value in task_guidance_stats.items():
+            if key != "total":
+                task_component_sums[key] += float(value)
         epoch_phase_regularization_t += phase_regularization_loss_value.detach()
 
     if scheduler is not None:
@@ -169,11 +208,14 @@ def run_epoch(
     avg_feature_background = float(epoch_feature_background_t.item()) / num_batches
     avg_detection = float(epoch_detection_t.item()) / num_batches
     avg_response = float(epoch_response_t.item()) / num_batches
+    avg_task_guidance = float(epoch_task_guidance_t.item()) / num_batches
+    avg_task_components = {
+        f"task_{key}": value / num_batches for key, value in task_component_sums.items()
+    }
     avg_phase_regularization = float(epoch_phase_regularization_t.item()) / num_batches
     avg_phase_grad_norm = epoch_phase_grad_norm / max(phase_grad_samples, 1)
 
     # Merge per-batch grad norms into epoch-level stats
-    from collections import defaultdict
     epoch_phase_grad_norms = defaultdict(float)
     for batch_norms in _phase_grad_norms_accum:
         for k, v in batch_norms.items():
@@ -194,6 +236,7 @@ def run_epoch(
     history["train_feature"].append(avg_feature)
     history["train_detection"].append(avg_detection)
     history["train_response"].append(avg_response)
+    history["train_task_guidance"].append(avg_task_guidance)
     history["train_phase_regularization"].append(avg_phase_regularization)
     display_epoch = global_epoch + 1
     slm_stats = collect_slm_statistics(student_raw)
@@ -223,7 +266,10 @@ def run_epoch(
             feature_criterion,
             device,
             stage_name,
-            response_detector=reference_detector,
+            response_detector=guide_detector,
+            guide_detector=guide_detector,
+            task_guidance_criterion=task_guidance_criterion,
+            task_guidance_weight=task_guidance_weight,
             collect_detections=should_write_cm,
         )
         if should_write_cm:
@@ -235,6 +281,7 @@ def run_epoch(
         history["val_feature"].append(val_losses["feature"])
         history["val_detection"].append(val_losses["detection"])
         history["val_response"].append(val_losses["response"])
+        history["val_task_guidance"].append(val_losses["task_guidance"])
         history["val_phase_regularization"].append(val_losses["phase_regularization"])
         history["precision"].append(val_metrics["precision"])
         history["recall"].append(val_metrics["recall"])
@@ -244,7 +291,7 @@ def run_epoch(
         history["recall_op"].append(val_metrics["recall_op"])
         history["f1_op"].append(val_metrics["f1_op"])
     else:
-        for key in ("val_total", "val_feature", "val_detection", "val_response", "val_phase_regularization",
+        for key in ("val_total", "val_feature", "val_detection", "val_response", "val_task_guidance", "val_phase_regularization",
                      "precision", "recall", "f1", "map50",
                      "precision_op", "recall_op", "f1_op"):
             history[key].append(np.nan)
@@ -268,6 +315,9 @@ def run_epoch(
                 "feature_background": avg_feature_background,
                 "detection": avg_detection,
                 "response": avg_response,
+                "task_guidance": avg_task_guidance,
+                "task_guidance_weight": task_guidance_weight,
+                **avg_task_components,
                 "phase_regularization": avg_phase_regularization,
             },
             val_losses=val_losses,
@@ -379,6 +429,10 @@ def run_epoch(
                     "paired_student_stage": stage_name,
                     "detector_head_type": Config.DETECTOR_HEAD_TYPE,
                     "detection_protocol": "anchor_free_tal",
+                    "light_base_ch": Config.YOLO_LIGHT_BASE_CH,
+                    "shared_detector_head": True,
+                    "task_guidance_enabled": Config.ENABLE_TASK_GUIDANCE,
+                    "teacher_detector_sha256": ctx["teacher_checkpoint_sha256"],
                     "student_norm_mode": Config.STUDENT_NORM_MODE,
                     "student_norm_schedule": Config.STUDENT_NORM_SCHEDULE,
                     "slm_stats": slm_stats,
