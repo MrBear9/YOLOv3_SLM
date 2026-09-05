@@ -79,6 +79,46 @@ def letterbox_image_targets(img, targets, image_size, fill=114):
     return canvas, targets
 
 
+def resolve_train_canvas_scale(dataset_config):
+    """Read an optional dataset-local shrink range for training images."""
+    augmentation = dataset_config.get("augmentation", {}) if isinstance(dataset_config, dict) else {}
+    canvas_scale = augmentation.get("canvas_scale") if isinstance(augmentation, dict) else None
+    if canvas_scale is None:
+        return None
+    if not isinstance(canvas_scale, dict):
+        raise ValueError("augmentation.canvas_scale must be a mapping with min and max.")
+    minimum = float(canvas_scale.get("min", 1.0))
+    maximum = float(canvas_scale.get("max", 1.0))
+    if not 0.0 < minimum <= maximum <= 1.0:
+        raise ValueError("augmentation.canvas_scale must satisfy 0 < min <= max <= 1.")
+    return minimum, maximum
+
+
+def random_canvas_scale_image_targets(img, targets, scale_range, fill=114):
+    """Shrink a canvas and its labels by a random factor, without exceeding it."""
+    if scale_range is None:
+        return img, targets
+    minimum, maximum = scale_range
+    scale = random.uniform(minimum, maximum)
+    if scale >= 1.0 - 1e-8:
+        return img, targets
+
+    canvas_w, canvas_h = img.size
+    resized_w = max(1, round(canvas_w * scale))
+    resized_h = max(1, round(canvas_h * scale))
+    resized = img.resize((resized_w, resized_h), Image.Resampling.BILINEAR)
+    left = random.randint(0, canvas_w - resized_w)
+    top = random.randint(0, canvas_h - resized_h)
+    canvas = Image.new("RGB", (canvas_w, canvas_h), color=(fill, fill, fill))
+    canvas.paste(resized, (left, top))
+    if targets.numel():
+        targets = targets.clone()
+        targets[:, 1] = targets[:, 1] * scale + left / canvas_w
+        targets[:, 2] = targets[:, 2] * scale + top / canvas_h
+        targets[:, 3:5] *= scale
+    return canvas, targets
+
+
 class YOLODataset(Dataset):
     def __init__(self, config, yaml_path=None, split="train"):
         self.config = config
@@ -102,8 +142,19 @@ class YOLODataset(Dataset):
         self.num_classes = config.NUM_CLASSES
         self._sampling_metadata = None
         self.augment = split == "train" and bool(getattr(config, "TRAIN_AUGMENT", False))
-        self.copy_paste_enabled = self.augment and bool(getattr(config, "SOLDIER_COPY_PASTE", False))
+        self.canvas_scale_range = resolve_train_canvas_scale(cfg)
+        copy_paste_setting = cfg.get("copy_paste", getattr(config, "SOLDIER_COPY_PASTE", False))
+        self.copy_paste_enabled = self.augment and bool(copy_paste_setting)
         self.copy_paste_class = int(getattr(config, "SOLDIER_CLASS_ID", 1))
+        augmentation = cfg.get("augmentation", {}) if isinstance(cfg, dict) else {}
+        self.aug_scale_min = float(augmentation.get("affine_scale_min", getattr(config, "AUG_SCALE_MIN", 0.8)))
+        self.aug_scale_max = float(augmentation.get("affine_scale_max", getattr(config, "AUG_SCALE_MAX", 1.25)))
+        self.aug_rotate_deg = float(augmentation.get("affine_rotate_deg", getattr(config, "AUG_ROTATE_DEG", 5.0)))
+        self.aug_translate = float(augmentation.get("affine_translate", getattr(config, "AUG_TRANSLATE", 0.08)))
+        if not 0.0 < self.aug_scale_min <= self.aug_scale_max:
+            raise ValueError("augmentation affine scale must satisfy 0 < min <= max.")
+        if self.aug_rotate_deg < 0.0 or self.aug_translate < 0.0:
+            raise ValueError("augmentation affine rotation and translation must be non-negative.")
         self._copy_paste_donors = []
         self._copy_paste_attempted = mp.Value("q", 0)
         self._copy_paste_images = mp.Value("q", 0)
@@ -176,6 +227,7 @@ class YOLODataset(Dataset):
         img, targets = self._letterbox(img, targets)
         if self.augment:
             img, targets = self._copy_paste_small_soldiers(img, targets, content_bounds)
+            img, targets = random_canvas_scale_image_targets(img, targets, self.canvas_scale_range)
             img, targets = self._augment(img, targets)
         img_tensor = image_to_intensity_tensor(
             img,
@@ -283,9 +335,9 @@ class YOLODataset(Dataset):
             if targets.numel():
                 targets[:, 1] = 1.0 - targets[:, 1]
 
-        angle = random.uniform(-float(getattr(self.config, "AUG_ROTATE_DEG", 5.0)), float(getattr(self.config, "AUG_ROTATE_DEG", 5.0)))
-        scale = random.uniform(float(getattr(self.config, "AUG_SCALE_MIN", 0.8)), float(getattr(self.config, "AUG_SCALE_MAX", 1.25)))
-        translate_frac = float(getattr(self.config, "AUG_TRANSLATE", 0.08))
+        angle = random.uniform(-self.aug_rotate_deg, self.aug_rotate_deg)
+        scale = random.uniform(self.aug_scale_min, self.aug_scale_max)
+        translate_frac = self.aug_translate
         tx = random.uniform(-translate_frac, translate_frac) * self.image_w
         ty = random.uniform(-translate_frac, translate_frac) * self.image_h
         boxes = self._targets_to_xyxy(targets)
