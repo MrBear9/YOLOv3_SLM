@@ -44,10 +44,10 @@ class OpticalConfig:
     OPTICAL_FIELD_EPS = 1e-8
     OPTICAL_NORM_EPS = 1e-6
 
-    # Keep the full-resolution direct phase primary; the pyramid is a
-    # deliberately smaller multi-scale residual during static-phase fitting.
-    SLM_PHASE_PARAM_MODE = "direct_sgd_pyramid"
-    SLM_DIRECT_SGD_PYRAMID_SCALE = 0.5
+    # Active phase optimization: one independent trainable value per SLM pixel.
+    # The phase starts randomly and receives gradients directly; no pyramid or
+    # neural-field residual participates in the current experiment.
+    SLM_PHASE_PARAM_MODE = "direct_sgd"
     # Optional virtual multi-head optical path.
     SLM_MULTI_HEAD_ENABLED = False
     SLM_MULTI_HEAD_NUM_HEADS = 2
@@ -64,7 +64,8 @@ class OpticalConfig:
     # SLM phase initialization and hardware export.
     # A validated paired checkpoint can be used as a non-regression starting
     # point for a short optical refinement.  ``ConfigSLM`` selects the actual
-    # checkpoint for the 10 cm experiment; keep random as the general default.
+    # checkpoint for a matching optical geometry; keep random as the general
+    # default for direct SGD.
     SLM_INIT_MODE = "random"
     SLM_DIRECT_SGD_INIT_RANGE_RAD = 0.5
     SLM_INIT_NOISE_STD = 0.02
@@ -77,8 +78,11 @@ class OpticalConfig:
     SLM_GRAY_TO_PHASE_LUT = r""
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 共享默认值（所有层共用，除非 per-layer dict 覆盖）
+    # 可选相位金字塔（当前隔离且不生效）
+    # 仅当 SLM_PHASE_PARAM_MODE 显式改为 "direct_sgd_pyramid" 或
+    # "multiscale_mlp" 时，下面参数才会进入模型；保留供未来实验使用。
     # ═══════════════════════════════════════════════════════════════════════
+    SLM_DIRECT_SGD_PYRAMID_SCALE = 0.5
     PHASE_NUM_SCALES = 5
     PHASE_USE_BLOCKWISE = True
     PHASE_MLP_HIDDEN = 32
@@ -87,7 +91,7 @@ class OpticalConfig:
     # ═══════════════════════════════════════════════════════════════════════
     # Per-layer 配置  {layer_idx (1-based): value}
     # ═══════════════════════════════════════════════════════════════════════
-    # Student geometry: SLM1 -> 10 cm -> SLM2 -> 10 cm -> sensor plane.
+    # Student geometry: SLM1 -> 20 cm -> SLM2 -> 10 cm -> sensor plane.
     PROP_DISTANCE = {
         1: DEFAULT_PROPAGATION_DISTANCES[0],
         2: DEFAULT_PROPAGATION_DISTANCES[1],

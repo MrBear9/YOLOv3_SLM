@@ -9,8 +9,8 @@ many physical pixels to illuminate or export.
 DEFAULT_WAVELENGTH = 532e-9
 DEFAULT_DMD_RESOLUTION = (640, 640)
 DEFAULT_DMD_PIXEL_PITCH = 5.4e-6
-# Current cascaded bench: SLM1 -> 10 cm -> SLM2 -> 10 cm -> sensor plane.
-DEFAULT_PROPAGATION_DISTANCES = (0.10, 0.10)
+# Current cascaded bench: SLM1 -> 20 cm -> SLM2 -> 10 cm -> sensor plane.
+DEFAULT_PROPAGATION_DISTANCES = (0.20, 0.10)
 
 SLM_PROFILES = {
     "zk_weixing_8p0": {
