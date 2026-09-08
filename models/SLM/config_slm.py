@@ -15,14 +15,14 @@ class ConfigSLM(OpticalConfig):
     CLASS_NAMES = None
     NUM_CLASSES = None
     # New hardware-aware 640x640 experiment; old single-pitch checkpoints are incompatible.
-    OUTPUT_DIR = r"output/SLM_Tv2_dmd640_scratch"
+    OUTPUT_DIR = r"output/SLM_Tv2_dmd640_sgd"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_dmd640_scratch/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_dmd640_sgd/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -30,7 +30,7 @@ class ConfigSLM(OpticalConfig):
     # =========================================================================
     # Training scale
     # =========================================================================
-    BATCH_SIZE = 8
+    BATCH_SIZE = 4
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
 
     # SLM_INIT_MODE is inherited from OpticalConfig and remains ``random``.

@@ -46,7 +46,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/Tv2_dmd640_scratch"
+    TEACHER_OUTPUT_DIR = r"output/Tv2_dmd640_sgd"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -61,14 +61,14 @@ class ConfigYOLOv8Anchor:
     # Shared image/feature canvas as (height, width). Example: (1080, 1920).
     RESOLUTION = DEFAULT_DMD_RESOLUTION
     DMD_PIXEL_PITCH = DEFAULT_DMD_PIXEL_PITCH
-    BATCH_SIZE = 8
+    BATCH_SIZE = 4
     ANCHOR_FREE_STRIDES = [4, 8, 16, 32]
     # DMD gray code is treated as incident intensity; use "srgb_linear" only
     # after calibrating and applying the corresponding DMD drive transform.
     INPUT_INTENSITY_MODE = "srgb"
 
-    STAGE1_LOCATE_EPOCHS = 40
-    STAGE2_BALANCE_EPOCHS = 200
+    STAGE1_LOCATE_EPOCHS = 150
+    STAGE2_BALANCE_EPOCHS = 50
     EPOCHS = STAGE1_LOCATE_EPOCHS + STAGE2_BALANCE_EPOCHS
 
     # =========================================================================

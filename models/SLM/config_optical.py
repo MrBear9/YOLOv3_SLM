@@ -44,9 +44,11 @@ class OpticalConfig:
     OPTICAL_FIELD_EPS = 1e-8
     OPTICAL_NORM_EPS = 1e-6
 
-    # Keep the full-resolution direct phase primary; the pyramid is a
-    # deliberately smaller multi-scale residual during static-phase fitting.
-    SLM_PHASE_PARAM_MODE = "direct_sgd_pyramid"
+    # Optimize the full-resolution phase directly, without a pyramid/MLP.
+    # This selects the parameterization; build_stage_optimizer still uses Adam.
+    # 可选：direct_sgd（直接相位矩阵）、direct_sgd_pyramid（直接相位+金字塔残差）、multiscale_mlp（多尺度相位场）。
+    SLM_PHASE_PARAM_MODE = "direct_sgd"
+    # Used only when explicitly selecting direct_sgd_pyramid.
     SLM_DIRECT_SGD_PYRAMID_SCALE = 0.5
     # Optional virtual multi-head optical path.
     SLM_MULTI_HEAD_ENABLED = False
@@ -64,7 +66,7 @@ class OpticalConfig:
     # SLM phase initialization and hardware export.
     # A validated paired checkpoint can be used as a non-regression starting
     # point for a short optical refinement.  ``ConfigSLM`` selects the actual
-    # checkpoint for the 10 cm experiment; keep random as the general default.
+    # checkpoint for a calibrated experiment; keep random as the general default.
     SLM_INIT_MODE = "random"
     SLM_DIRECT_SGD_INIT_RANGE_RAD = 0.5
     SLM_INIT_NOISE_STD = 0.02
@@ -87,7 +89,7 @@ class OpticalConfig:
     # ═══════════════════════════════════════════════════════════════════════
     # Per-layer 配置  {layer_idx (1-based): value}
     # ═══════════════════════════════════════════════════════════════════════
-    # Student geometry: SLM1 -> 10 cm -> SLM2 -> 10 cm -> sensor plane.
+    # Student geometry: SLM1 -> 20 cm -> SLM2 -> 10 cm -> sensor plane.
     PROP_DISTANCE = {
         1: DEFAULT_PROPAGATION_DISTANCES[0],
         2: DEFAULT_PROPAGATION_DISTANCES[1],
