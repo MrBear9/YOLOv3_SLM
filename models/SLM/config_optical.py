@@ -44,7 +44,7 @@ class OpticalConfig:
     OPTICAL_FIELD_EPS = 1e-8
     OPTICAL_NORM_EPS = 1e-6
 
-    # Active phase optimization: one independent trainable value per SLM pixel.
+    # Direct phase optimization on the simulation grid; Adam is the optimizer.
     # The phase starts randomly and receives gradients directly; no pyramid or
     # neural-field residual participates in the current experiment.
     SLM_PHASE_PARAM_MODE = "direct_sgd"
@@ -65,7 +65,7 @@ class OpticalConfig:
     # A validated paired checkpoint can be used as a non-regression starting
     # point for a short optical refinement.  ``ConfigSLM`` selects the actual
     # checkpoint for a matching optical geometry; keep random as the general
-    # default for direct SGD.
+    # default for direct phase optimization.
     SLM_INIT_MODE = "random"
     SLM_DIRECT_SGD_INIT_RANGE_RAD = 0.5
     SLM_INIT_NOISE_STD = 0.02

@@ -46,7 +46,7 @@ class ConfigYOLOv8Anchor:
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/Tv2_dmd640_contextdw_d20d10_v1"
+    TEACHER_OUTPUT_DIR = r"output/Tv2_dmd640_contextdw_d20d10_p13_v2"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None

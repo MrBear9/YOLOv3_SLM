@@ -16,7 +16,7 @@ SLM_PROFILES = {
     "zk_weixing_8p0": {
         "model": "中科微兴",
         "hardware_pixel_pitch": 8.0e-6,
-        "effective_sampling_pitch": 11.0e-6,
+        "effective_sampling_pitch": 13.0e-6,
     },
     "magicholo_4p5": {
         "model": "MagicHolo",

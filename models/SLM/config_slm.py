@@ -15,14 +15,14 @@ class ConfigSLM(OpticalConfig):
     CLASS_NAMES = None
     NUM_CLASSES = None
     # New hardware-aware 640x640 experiment; old single-pitch checkpoints are incompatible.
-    OUTPUT_DIR = r"output/SLM_Tv2_dmd640_contextdw_d20d10_v1"
+    OUTPUT_DIR = r"output/SLM_Tv2_dmd640_contextdw_d20d10_p13_v2"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_dmd640_contextdw_d20d10_v1/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_dmd640_contextdw_d20d10_p13_v2/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
