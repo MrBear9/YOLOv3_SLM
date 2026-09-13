@@ -33,9 +33,56 @@ PowerShell 多行命令使用反引号 `` ` `` 续行；Linux 服务器可改用
 
 - `--conf-threshold`：设置固定工作点，用于计数混淆矩阵、TP、FP、FN 和审查信息。它通常不会直接提高由整条置信度排序曲线计算的 mAP。
 - `--nms-threshold`：非极大值抑制的 IoU 阈值，决定重叠预测框的保留方式，可能影响最终 mAP。
-- `--iou-threshold`：预测框与真值框判定匹配的 IoU 阈值。计算 `mAP50` 时应保持为 `0.5`，提高或降低该值等于改变评价标准，不代表模型本身变好。
+- `--iou-threshold`：在 `evaluate_teacher_v2_dataset.py` 和 `evaluate_slm_light_dataset.py` 中仅控制混淆矩阵和审查清单的匹配阈值。AP50 固定为 IoU=0.5，多阈值 AP 固定为 0.50:0.05:0.95，不随此参数改变。
 
 若不传这些参数，脚本使用对应训练配置中的默认值。为了公平比较不同 checkpoint，建议固定数据集、split 和三个阈值。
+
+### 离线 mAP@0.5:0.95
+
+### 官方 COCO 评估（默认开启）
+
+教师 V2 和 SLM Light 两个离线脚本现在默认调用官方 `pycocotools.COCOeval`。在运行评估的环境中安装：
+
+```powershell
+python -m pip install pycocotools
+```
+
+随后运行原来的评估命令即可。缺少依赖会在模型运行前报错；若只需要旧指标，可显式传入 `--skip-coco`。无需修改训练或重新训练。
+
+官方结果位于 `evaluation_report.json` 的 `metrics.coco`，同时输出独立的 `coco_evaluation_report.json`。主要字段：`AP`（官方 mAP50:95）、`AP50`、`AP75`、`AP_small`、`AP_medium`、`AP_large`、`AR1`、`AR10`、`AR100`、分尺寸 AR 和 `per_class`。某分组无有效真实目标时报告为 `null`，对应官方控制台的 -1。
+
+输出目录还包含 `coco_annotations.json`、`coco_predictions.json`，可直接交由 pycocotools 复核。框按数据集真实 letterbox 的缩放与填充逆变换回原图像素坐标，面积按原图框宽×高计算；预测框不额外裁剪。官方阈值、101 点采样、面积分组与 `maxDets=[1,10,100]` 使用原生默认值。
+
+当前标签源是 YOLO 普通框，导出均设 `iscrowd=0`，不能恢复源数据未提供的 crowd 或 ignore 标注。若数据包含需要忽略的人群区域，应先补全原始标注。解码仍采用项目的置信度阈值、NMS 和最大候选数量，具体设置记录在 `protocol` 中；官方评估器不负责重新生成被提前过滤的框。`--iou-threshold` 只影响混淆矩阵与审查匹配，不改变官方 AP 阈值。
+
+以下 `metrics.map50_95` 等字段继续保留为历史自定义指标；论文使用官方协议结果时，应读取 `metrics.coco.AP`，不要混用两个字段。此次不扩展旧 compact 入口。
+
+### 保留的自定义多阈值指标
+
+`evaluate_teacher_v2_dataset.py` 和 `evaluate_slm_light_dataset.py` 默认同时输出 mAP50、mAP50:95 和 mAP75，不需要增加命令行开关，也不需要重新训练。多阈值计算复用已收集的预测框，不对每个 IoU 阈值重复运行模型。旧 compact 评估入口本次未扩展。
+
+结果写入 `--output` 目录中的 `evaluation_report.json`：
+
+| JSON 字段（位于 `metrics`） | 含义 |
+| --- | --- |
+| `map50` | 保留原有全点 PR 面积积分的 AP50，方便比较历史记录 |
+| `map50_95` | 10 个 IoU 阈值 0.50、0.55、…、0.95 下的 101 点插值 AP 均值 |
+| `map50_101` | 与新多阈值指标同积分口径的 AP50 |
+| `map75` | 101 点插值 AP75 |
+| `map_by_iou` | 各 IoU 阈值的宏平均 AP |
+| `per_class.<类别>.ap50_95` | 对应类别的多阈值 AP；没有真实目标的类别为 null |
+| `multi_iou_protocol` | 阈值、积分方式、解码设置和有效类别数 |
+
+新指标按图像、类别和置信度排序，在每个 IoU 阈值独立完成一对一匹配。没有真实目标的类别不参与宏平均。采用当前解码的置信度、NMS 和最大检测数设置，统计全部目标面积，不处理 COCO crowd/ignore 标注，因此不是完整 COCO 官方评估协议；与其他论文比较时需对齐这些设置。旧 `map50` 与 `map50_101` 因积分方式不同可能有小幅差异。
+
+示例（在项目根目录、具备项目依赖的 Python 环境中运行；检查点必须与当前光学配置和网络结构匹配）：
+
+```powershell
+python src/evaluate_slm_light_dataset.py --checkpoint output/SLM_Tv2_dmd640_contextdw_d20d10_p13_v2/detector_best.pth --data data/military/data.yaml --split val --output output/slm_eval_multi_iou
+python src/evaluate_teacher_v2_dataset.py --checkpoint output/Tv2_dmd640_contextdw_d20d10_p13_v2/teacher_detector_best.pth --data data/military/data.yaml --split val --output output/teacher_eval_multi_iou
+```
+
+训练日志与最佳检查点选择仍使用原有 mAP50，本次未增加训练期开销。若后续需要按 mAP50:95 选模型，应对多个候选检查点在同一验证集离线重评，或者单独加入周期性训练验证；只评估 mAP50 最佳检查点，不保证找到 mAP50:95 最佳检查点。测试集不用于选择模型。
 
 ## `detect_ccd_light_dataset.py`
 

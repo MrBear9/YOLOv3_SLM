@@ -290,40 +290,6 @@ class MultiScalePhaseField(nn.Module):
 
         return phase / (weight + 1e-8)
 
-    def set_base_phase(self, phase):
-        """Seed the finest-scale parameters with the initial phase pattern.
-
-        In blockwise mode only the finest inner scale receives the spatial
-        crop. Coarser scales start at zero so summing the pyramid preserves
-        the requested initial phase instead of multiplying it by the number
-        of inner scales.
-        """
-        target_h, target_w = self.resolution
-        with torch.no_grad():
-            if self.use_blockwise and self.blocks is not None:
-                n_inner = self._block_inner_scales
-                base = F.interpolate(phase, size=(target_h, target_w),
-                                      mode="bilinear", align_corners=False)
-                for block_idx in range(self._n_blocks):
-                    y_start, y_end, x_start, x_end, _, _ = self._feather_slices[block_idx]
-                    crop = base[:, :, y_start:y_end, x_start:x_end]
-                    inner_resolutions = self._block_inner_resolutions[block_idx]
-                    # Keep the seed in one scale; the other scales remain free residuals.
-                    for k in range(n_inner):
-                        param = self.blocks[self._block_offsets[block_idx] + k]
-                        if k == n_inner - 1:
-                            param.copy_(
-                                F.interpolate(crop, size=inner_resolutions[k],
-                                              mode="bilinear", align_corners=False)
-                            )
-                        else:
-                            param.zero_()
-            else:
-                self.scale_params[-1].copy_(
-                    F.interpolate(phase, size=(target_h, target_w),
-                                  mode="bilinear", align_corners=False)
-                )
-
     def zero_residual(self):
         """Make the initial residual zero without disabling MLP gradients."""
         with torch.no_grad():

@@ -61,21 +61,15 @@ class SLMLayer(nn.Module):
         param_mode = str(getattr(config, "SLM_PHASE_PARAM_MODE", "direct_sgd")).strip().lower()
         if param_mode in {"direct", "direct_sgd", "direct_sgb"}:
             param_mode = "direct_sgd"
-        elif param_mode not in {"direct_sgd_pyramid", "multiscale_mlp"}:
+        elif param_mode != "direct_sgd_pyramid":
             raise ValueError(
                 "SLM_PHASE_PARAM_MODE must be direct_sgd (or direct_sgb), "
-                "direct_sgd_pyramid, or multiscale_mlp; "
+                "or direct_sgd_pyramid; "
                 f"got {param_mode!r}."
             )
         self._phase_param_mode = param_mode
 
-        if param_mode == "multiscale_mlp":
-            self.phase_field = MultiScalePhaseField(config, resolution, layer_index=layer_index)
-            # Seed the finest scale with the chosen init pattern
-            init_phase = self._initial_phase(resolution)
-            self.phase_field.set_base_phase(init_phase)
-            self.register_parameter("phase_raw", None)
-        elif param_mode == "direct_sgd_pyramid":
+        if param_mode == "direct_sgd_pyramid":
             # Keep the HolographSLM direct variable as the primary phase. The
             # zero-start pyramid is a residual, so a loaded direct checkpoint
             # begins from exactly its previously validated modulation.
@@ -171,8 +165,6 @@ class SLMLayer(nn.Module):
 
     def _raw_phase(self):
         """Return the continuous phase used by direct-SGD or the pyramid mode."""
-        if self._phase_param_mode == "multiscale_mlp" and self.phase_field is not None:
-            return self.phase_field()
         if self._phase_param_mode == "direct_sgd_pyramid":
             scale = float(getattr(self.config, "SLM_DIRECT_SGD_PYRAMID_SCALE", 0.25))
             return self.phase_raw + scale * self.phase_field()

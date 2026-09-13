@@ -79,8 +79,8 @@ class OpticalConfig:
 
     # ═══════════════════════════════════════════════════════════════════════
     # 可选相位金字塔（当前隔离且不生效）
-    # 仅当 SLM_PHASE_PARAM_MODE 显式改为 "direct_sgd_pyramid" 或
-    # "multiscale_mlp" 时，下面参数才会进入模型；保留供未来实验使用。
+    # 仅当 SLM_PHASE_PARAM_MODE 显式改为 "direct_sgd_pyramid" 时，
+    # 下面参数才会进入模型；保留供未来实验使用。
     # ═══════════════════════════════════════════════════════════════════════
     SLM_DIRECT_SGD_PYRAMID_SCALE = 0.5
     PHASE_NUM_SCALES = 5

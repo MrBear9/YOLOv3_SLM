@@ -19,6 +19,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from models.dataset import YOLODataset, identity_collate, letterbox_content_bounds
 from models.geometry import bbox_iou_matrix_xywh
+from models.detection_metrics_offline import add_multi_iou_metrics
+from models.coco_offline import evaluate_coco, require_coco
 from models.monitoring import (
     _render_confusion_matrix_image,
     _render_normalized_confusion_matrix_image,
@@ -43,7 +45,8 @@ def parse_args():
     parser.add_argument("--device", default=None, help="cuda, cuda:0, or cpu (default: training config).")
     parser.add_argument("--conf-threshold", type=float, default=None, help="Confidence for the confusion matrices.")
     parser.add_argument("--nms-threshold", type=float, default=None, help="NMS IoU threshold for all metrics.")
-    parser.add_argument("--iou-threshold", type=float, default=None, help="IoU threshold for mAP and confusion matching.")
+    parser.add_argument("--iou-threshold", type=float, default=None, help="IoU for confusion/review matching only; AP50 and AP50:95 use fixed thresholds.")
+    parser.add_argument("--skip-coco", action="store_true", help="Skip official COCO evaluation (enabled by default).")
     return parser.parse_args()
 
 
@@ -314,6 +317,8 @@ def write_results(output_dir, confusion, metrics, checkpoint, args, dataset_size
 
 def main():
     args = parse_args()
+    if not args.skip_coco:
+        require_coco()
     if not args.checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
     if not args.data.is_file():
@@ -346,8 +351,16 @@ def main():
     checkpoint = load_checkpoint(args.checkpoint, teacher, detector, device)
     model = TeacherWithDetector(Config, teacher=teacher, detector=detector).to(device).eval()
     criterion = build_detection_criterion(Config)
-    _, metrics = evaluate_model_anchor_v8(Config, model, dataloader, criterion, device)
+    # Preserve historical AP50 and PR fields at their actual IoU=0.5.
+    # The command-line IoU remains available for confusion/review analysis.
+    review_iou = Config.METRIC_IOU_THRESHOLD
+    try:
+        Config.METRIC_IOU_THRESHOLD = 0.5
+        _, metrics = evaluate_model_anchor_v8(Config, model, dataloader, criterion, device)
+    finally:
+        Config.METRIC_IOU_THRESHOLD = review_iou
     detections, targets, source_paths = collect_detections(Config, model, dataloader, device)
+    add_multi_iou_metrics(metrics, detections, targets, Config)
     confusion, class_tp, class_fp, class_fn = compute_detection_confusion_matrix(
         detections, targets, Config.NUM_CLASSES,
         iou_threshold=args.iou_threshold,
@@ -357,12 +370,16 @@ def main():
 
     output_dir = args.output.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    if not args.skip_coco:
+        metrics["coco"] = evaluate_coco(detections, targets, source_paths, Config, output_dir)
     review_summary = write_shared_review_lists(
         output_dir, source_paths, detections, targets, Config, device
     )
     write_results(output_dir, confusion, metrics, checkpoint, args, len(dataset), review_summary)
     print(f"Evaluated {len(dataset)} {args.split} images on {device}.")
     print(f"mAP50: {metrics['map50']:.4f}")
+    print(f"mAP50:95 (101-point): {metrics['map50_95']:.4f}")
+    print(f"mAP75 (101-point): {metrics['map75']:.4f}")
     print(f"Count matrix (with background): {output_dir / 'confusion_matrix_counts_with_background.png'}")
     print(f"Normalized foreground matrix: {output_dir / 'confusion_matrix_normalized_foreground_percent.png'}")
     print("per-class TP:", class_tp.astype(int))

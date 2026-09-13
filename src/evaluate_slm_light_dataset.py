@@ -27,6 +27,8 @@ from models.SLM.dataset_slm import SLMFeatureDataset, slm_collate_fn
 from models.SLM.optical_layers import OpticalStudent
 from models.SLM.utils_slm import load_student_detector_checkpoint
 from models.geometry import bbox_iou_xywh
+from models.detection_metrics_offline import add_multi_iou_metrics
+from models.coco_offline import evaluate_coco, require_coco
 from models.monitoring import (
     _render_confusion_matrix_image,
     _render_normalized_confusion_matrix_image,
@@ -50,11 +52,12 @@ def parse_args():
     parser.add_argument("--device", default=None, help="cuda, cuda:0, or cpu (default: student config).")
     parser.add_argument("--conf-threshold", type=float, default=None, help="Confidence for the count confusion matrix.")
     parser.add_argument("--nms-threshold", type=float, default=None, help="NMS IoU threshold for decoding.")
-    parser.add_argument("--iou-threshold", type=float, default=None, help="IoU threshold for mAP and confusion matching.")
+    parser.add_argument("--iou-threshold", type=float, default=None, help="IoU for confusion/review matching only; AP50 and AP50:95 use fixed thresholds.")
     parser.add_argument(
         "--optical-field-samples", type=int, default=0,
         help="Save raw final optical intensity plus complex-field real/imaginary parts for the first N split images (0 disables).",
     )
+    parser.add_argument("--skip-coco", action="store_true", help="Skip official COCO evaluation (enabled by default).")
     return parser.parse_args()
 
 
@@ -137,7 +140,7 @@ def evaluate_student(config, student, detector, dataloader, device):
                             ).item())
                             if iou > best_iou:
                                 best_iou, best_index = iou, index
-                        is_tp = best_iou >= config.METRIC_IOU_THRESHOLD
+                        is_tp = best_index >= 0 and best_iou >= 0.5
                         storage[class_id].append((float(detection[4]), float(is_tp)))
                         if is_tp:
                             matched_gt.add(best_index)
@@ -153,10 +156,12 @@ def evaluate_student(config, student, detector, dataloader, device):
             "gt_count": int(gt_counts[class_id]),
             **compute_pr_summary(storage[class_id], gt_counts[class_id]),
         }
-    return all_detections, all_targets, source_paths, {
+    metrics = {
         "map50": float(np.mean(ap_values)) if ap_values else 0.0,
         "per_class": per_class,
     }
+    add_multi_iou_metrics(metrics, all_detections, all_targets, config)
+    return all_detections, all_targets, source_paths, metrics
 
 
 def _display_range(values, lower=2.0, upper=98.0):
@@ -333,6 +338,8 @@ def save_outputs(output_dir, confusion, metrics, checkpoint, restore_info, args,
 
 def main():
     args = parse_args()
+    if not args.skip_coco:
+        require_coco()
     if not args.checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
     if not args.data.is_file():
@@ -378,6 +385,8 @@ def main():
     )
     dataloader = DataLoader(dataset, batch_size=Config.BATCH_SIZE, collate_fn=slm_collate_fn, **get_dataloader_kwargs(Config))
     detections, targets, source_paths, metrics = evaluate_student(Config, student, detector, dataloader, device)
+    if not args.skip_coco:
+        metrics["coco"] = evaluate_coco(detections, targets, source_paths, Config, output_dir)
     confusion, class_tp, class_fp, class_fn = compute_detection_confusion_matrix(
         detections, targets, Config.NUM_CLASSES, iou_threshold=args.iou_threshold,
         conf_threshold=args.conf_threshold, image_size=Config.RESOLUTION,
@@ -391,6 +400,8 @@ def main():
     )
     print(f"Evaluated {len(dataset)} {args.split} images on {device}.")
     print(f"mAP50: {metrics['map50']:.4f}")
+    print(f"mAP50:95 (101-point): {metrics['map50_95']:.4f}")
+    print(f"mAP75 (101-point): {metrics['map75']:.4f}")
     print(f"Count matrix (with background): {output_dir / 'confusion_matrix_counts_with_background.png'}")
     print(f"Normalized foreground matrix: {output_dir / 'confusion_matrix_normalized_foreground_percent.png'}")
     print("per-class TP:", class_tp.astype(int))
