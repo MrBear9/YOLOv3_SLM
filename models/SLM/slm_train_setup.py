@@ -36,15 +36,20 @@ from models.yolov8.head_v8 import build_detector_head
 from models.yolov8.detection_protocol import build_detection_criterion
 
 
-def setup_training(is_main, use_ddp):
+def setup_training(is_main, use_ddp, *, forward_only=False, detector_from_teacher=True):
     """Initialize everything and return a context dict for training."""
     Config.initialize()
+    if forward_only:
+        # Keep both activations and weights NCHW. Canonicalizing only weights
+        # is insufficient: CUDA convolutions with NHWC inputs can still emit
+        # NHWC gradients for singleton 1x1 kernels.
+        Config.ENABLE_CHANNELS_LAST = False
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     seed_training(Config.TRAIN_SEED, deterministic=Config.DETERMINISTIC_TRAINING)
     init_log_file(Config)
     configure_backends()
     log_config()
-    device = get_runtime_device(Config)
+    device = torch.device(Config.DEVICE) if forward_only else get_runtime_device(Config)
 
     # Teacher + matching frozen reference detector
     teacher = build_teacher(Config).to(device)
@@ -91,11 +96,12 @@ def setup_training(is_main, use_ddp):
     else:
         log_to_file(Config, f"Initialized SLM student with mode={init_mode}")
     detector = build_detector_head(Config, in_channels=1).to(device)
-    detector.load_state_dict(reference_detector.state_dict(), strict=True)
+    if detector_from_teacher:
+        detector.load_state_dict(reference_detector.state_dict(), strict=True)
     log_to_file(
         Config,
-        f"Initialized shared optical detector from the frozen reference: "
-        f"base={Config.YOLO_LIGHT_BASE_CH}, loaded={len(detector.state_dict())}/{len(reference_detector.state_dict())} tensors, "
+        f"Initialized optical detector: {'frozen reference' if detector_from_teacher else 'random weights'}; "
+        f"base={Config.YOLO_LIGHT_BASE_CH}, loaded={len(detector.state_dict()) if detector_from_teacher else 0}/{len(reference_detector.state_dict())} tensors, "
         f"params={sum(parameter.numel() for parameter in detector.parameters()):,}",
     )
     restore_paired_detector = bool(
@@ -121,13 +127,27 @@ def setup_training(is_main, use_ddp):
     # The primary v5 route either trains all SLM parameters or keeps them
     # active in the graph, so DDP unused-parameter traversal is unnecessary.
     student_find_unused = False
-    student = wrap_data_parallel(
-        Config,
-        student,
-        module_name="OpticalStudent",
-        find_unused_parameters=student_find_unused,
-    )
-    detector = wrap_data_parallel(Config, detector, module_name="Detector", find_unused_parameters=False)
+    if forward_only:
+        # Shared phases are synchronized by the forward-search controller.
+        # Optical FFT buffers need no DDP wrapper or gradient communication.
+        student.requires_grad_(False)
+        # Canonical weight strides BEFORE DDP builds its gradient buckets.
+        # In particular [1,C,1,1] convolutions otherwise retain ambiguous
+        # channels-last strides that differ from their computed gradients.
+        detector = detector.to(memory_format=torch.contiguous_format)
+        if use_ddp:
+            detector = torch.nn.parallel.DistributedDataParallel(
+                detector, device_ids=[device.index] if device.type == "cuda" else None,
+                broadcast_buffers=True, gradient_as_bucket_view=True,
+            )
+    else:
+        student = wrap_data_parallel(
+            Config,
+            student,
+            module_name="OpticalStudent",
+            find_unused_parameters=student_find_unused,
+        )
+        detector = wrap_data_parallel(Config, detector, module_name="Detector", find_unused_parameters=False)
     if student_find_unused:
         log_to_file(
             Config,

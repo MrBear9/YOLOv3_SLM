@@ -201,6 +201,7 @@ class RegionInvariantOpticalLoss(nn.Module):
         student,
         stage_name=None,
         targets=None,
+        return_components=False,
     ):
         del student, stage_name
         if targets is None:
@@ -225,6 +226,9 @@ class RegionInvariantOpticalLoss(nn.Module):
         gradient = self._gradient_loss(student_local, teacher_local, mask)
         pyramid = self._pyramid_loss(student_local, teacher_local, mask)
         correlation = self._correlation_loss(student_local, teacher_local, mask)
+        if return_components:
+            # Keep tensors for forward directional measurements and differentiable controls.
+            return torch.stack((structure, gradient, pyramid, correlation))
         total = (
             self.structure_weight * structure
             + self.gradient_weight * gradient

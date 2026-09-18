@@ -118,6 +118,10 @@ def load_student_detector_checkpoint(student, detector, checkpoint_path, device)
     detector_loaded, detector_total = load_matching_state(detector, checkpoint["detector_state_dict"], prefixes=("detector.",))
     if student_loaded == 0 or detector_loaded == 0:
         raise RuntimeError("Joint refinement checkpoint has no compatible student or detector tensors.")
+    if "student_enable_norm" in checkpoint:
+        student.enable_norm = bool(checkpoint["student_enable_norm"])
+    if "student_norm_mode" in checkpoint:
+        student.config.STUDENT_NORM_MODE = checkpoint["student_norm_mode"]
     return {
         "student_loaded": student_loaded,
         "student_total": student_total,
