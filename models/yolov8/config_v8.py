@@ -12,6 +12,7 @@ from datetime import datetime
 import torch
 import yaml
 
+from models.SLM.config_optical import OpticalConfig
 from models.SLM.physical_defaults import (
     DEFAULT_DMD_PIXEL_PITCH,
     DEFAULT_DMD_RESOLUTION,
@@ -39,14 +40,14 @@ def load_class_names(yaml_path):
     return {i: name for i, name in enumerate(names)}, len(names)
 
 
-class ConfigYOLOv8Anchor:
+class ConfigYOLOv8Anchor(OpticalConfig):
     # =========================================================================
     # Common — paths, device, I/O
     # =========================================================================
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/Tv2_dmd640_contextdw_d20d10_p13_v2"
+    TEACHER_OUTPUT_DIR = r"output/Tv4_multiscale_scratch_2gpu_seed42"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -54,6 +55,8 @@ class ConfigYOLOv8Anchor:
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+    TRAIN_SEED = 42
+    DETERMINISTIC_TRAINING = True
 
     # =========================================================================
     # Training scale
@@ -67,6 +70,7 @@ class ConfigYOLOv8Anchor:
     # after calibrating and applying the corresponding DMD drive transform.
     INPUT_INTENSITY_MODE = "srgb"
 
+    # Full CNN teacher training from scratch.
     STAGE1_LOCATE_EPOCHS = 150
     STAGE2_BALANCE_EPOCHS = 50
     EPOCHS = STAGE1_LOCATE_EPOCHS + STAGE2_BALANCE_EPOCHS
@@ -80,7 +84,7 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v2" | "v2"  (phase prediction + SLM/ASM)
     # =========================================================================
-    TEACHER_ARCH = "convteacher_v2"
+    TEACHER_ARCH = "physical_teacher_v4"
     TEACHER_V2_BASE_CHANNELS = 32
     TEACHER_V2_C2F_BLOCKS = 3
     TEACHER_V2_FOURIER_BANDS = 8
@@ -104,6 +108,9 @@ class ConfigYOLOv8Anchor:
     TEACHER_V2_PIXEL_SIZE = TEACHER_V2_SAMPLING_PITCHES[0]
     TEACHER_V2_PROP_DISTANCES = DEFAULT_PROPAGATION_DISTANCES
     SIMULATE_HARDWARE_PIXEL_GRID = True
+
+    TEACHER_V4_BASE_CHANNELS = 32
+    TEACHER_V4_DEPTHS = (3, 5, 5, 3)
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v3" | "v3"  (residual + gate)
@@ -185,7 +192,10 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Feature distillation (teacher → detector)
     # =========================================================================
-    ENABLE_FEATURE_DISTILL = True
+    ENABLE_FEATURE_DISTILL = False
+    # The old auxiliary CNN->detector projections were outside the optimizer
+    # and DDP. Keep this unrelated objective off in both controlled runs;
+    # CNN phase prediction still receives the full detection gradient.
     FEATURE_DISTILL_WEIGHT = 0.5
 
     # =========================================================================
@@ -214,9 +224,9 @@ class ConfigYOLOv8Anchor:
     # =========================================================================
     # Optimizer & LR schedule
     # =========================================================================
-    PHASE1_TEACHER_LR = 4e-4
+    PHASE1_TEACHER_LR = 3e-4
     PHASE1_DETECTOR_LR = 3e-4
-    PHASE2_TEACHER_LR = 1.5e-4
+    PHASE2_TEACHER_LR = 1e-4
     PHASE2_DETECTOR_LR = 1e-4
     # Short low-LR refinement from the protected 0.8398 joint checkpoint.
     JOINT_RESUME_TEACHER_LR = 3e-5
@@ -302,8 +312,8 @@ class ConfigYOLOv8Anchor:
     PERSISTENT_WORKERS = False
     PREFETCH_FACTOR = (0 if _IS_WINDOWS else 2)
     DATALOADER_TIMEOUT = (0 if _IS_WINDOWS else 300)
-    ENABLE_CUDNN_BENCHMARK = True
-    ENABLE_CHANNELS_LAST = True
+    ENABLE_CUDNN_BENCHMARK = False
+    ENABLE_CHANNELS_LAST = False
     ENABLE_TF32 = True
     ENABLE_AMP = True
     AMP_DTYPE = "float16"
@@ -367,7 +377,9 @@ class ConfigYOLOv8Anchor:
     @classmethod
     def get_teacher_init_mode(cls):
         mode = str(cls.TEACHER_INIT_MODE).strip().lower()
-        return mode if mode in {"scratch", "checkpoint", "joint_checkpoint"} else "scratch"
+        return mode if mode in {
+            "scratch", "checkpoint", "joint_checkpoint"
+        } else "scratch"
 
     @classmethod
     def get_teacher_init_checkpoint(cls):

@@ -30,14 +30,16 @@ from models.runtime import (
     seed_training,
     wrap_data_parallel,
 )
-from models.teacher import build_teacher
+from models.teacher import build_teacher, configure_teacher_checkpoint
 from models.training_utils import create_tensorboard_writer
 from models.yolov8.head_v8 import build_detector_head
 from models.yolov8.detection_protocol import build_detection_criterion
+from models.yolov8.config_v8 import resolve_project_path
 
 
 def setup_training(is_main, use_ddp, *, forward_only=False, detector_from_teacher=True):
     """Initialize everything and return a context dict for training."""
+    configure_teacher_checkpoint(Config, resolve_project_path(Config.TEACHER_DETECTOR_CHECKPOINT))
     Config.initialize()
     if forward_only:
         # Keep both activations and weights NCHW. Canonicalizing only weights

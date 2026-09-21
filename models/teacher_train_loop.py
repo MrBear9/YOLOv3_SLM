@@ -26,6 +26,7 @@ from models.runtime import (
     log_epoch_table_row,
     log_to_file,
     prepare_batch,
+    seed_training,
     unwrap_module,
     wrap_data_parallel,
 )
@@ -58,6 +59,29 @@ from models.yolov8.visualization_anchor_v8 import save_detection_visualization_a
 
 # 过滤 DDP 梯度 stride 警告（DDP 内部桶布局与梯度布局的已知差异，不影响正确性和性能）
 warnings.filterwarnings("ignore", message="Grad strides do not match bucket view strides")
+
+
+def _checkpoint_payload(model, epoch, loss_value, val_map50):
+    """Build a checkpoint that remains consumable by every downstream stage."""
+    model_core = unwrap_module(model)
+    teacher = model_core.teacher
+    payload = {
+        "teacher_state_dict": teacher.state_dict(),
+        "detector_state_dict": model_core.detector.state_dict(),
+        "epoch": int(epoch),
+        "loss": None if loss_value is None else float(loss_value),
+        "val_map50": None if val_map50 is None else float(val_map50),
+        "teacher_arch": Config.TEACHER_ARCH,
+        "head_type": Config.DETECTOR_HEAD_TYPE,
+        "detection_protocol": "anchor_free_tal",
+        "architecture_revision": getattr(teacher, "architecture_revision", "contextdw_v1"),
+        "teacher_v4_base_channels": getattr(Config, "TEACHER_V4_BASE_CHANNELS", 32),
+        "teacher_v4_depths": getattr(Config, "TEACHER_V4_DEPTHS", (3, 5, 5, 3)),
+        "global_local_context_grid": Config.GLOBAL_LOCAL_CONTEXT_GRID,
+        "teacher_depths": Config.GLOBAL_LOCAL_TEACHER_DEPTHS,
+        "detector_depths": Config.GLOBAL_LOCAL_DETECTOR_DEPTHS,
+    }
+    return payload
 
 
 def _module_param_count(module, trainable_only=False):
@@ -161,6 +185,16 @@ def train():
 
     bootstrap_runtime()
     log_all_parameters()
+    seed_training(
+        int(getattr(Config, "TRAIN_SEED", 42)) + int(local_rank),
+        deterministic=bool(getattr(Config, "DETERMINISTIC_TRAINING", False)),
+    )
+    log_to_file(
+        Config,
+        f"Reproducibility: seed={int(getattr(Config, 'TRAIN_SEED', 42))}, "
+        f"deterministic={bool(getattr(Config, 'DETERMINISTIC_TRAINING', False))}, "
+        f"rank={local_rank}",
+    )
     device = get_runtime_device(Config)
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = Config.ENABLE_CUDNN_BENCHMARK
@@ -189,7 +223,7 @@ def train():
 
     arch_lower = str(Config.TEACHER_ARCH).strip().lower()
     is_v3 = arch_lower in {"convteacher_v3", "v3"}
-    is_physical_v2 = arch_lower in {"convteacher_v2", "v2"}
+    is_physical_v2 = arch_lower in {"convteacher_v2", "v2", "physical_teacher_v4", "v4"}
 
     detector = build_detector_head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
     resume_checkpoint = None
@@ -343,7 +377,9 @@ def train():
                     teacher_aux = None
 
                 if is_physical_v2 and is_main:
-                    last_teacher_aux = teacher_aux
+                    last_teacher_aux = {"phase_maps": tuple(
+                        p[:1].detach() for p in teacher_aux.get("phase_maps", ())
+                    )}
 
                 loss, loss_stats = criterion(predictions, batch_targets)
 
@@ -357,6 +393,7 @@ def train():
                     for key in ("slm_cipher", "slm_tv", "slm_hf", "slm_range", "slm_mean", "slm_peak", "slm_edge"):
                         train_component_sums[key] += slm_cipher_stats[key]
 
+
                 if is_v3 and teacher_aux is not None:
                     gate_sparsity = teacher_aux["gate"].mean()
                     residual_l1 = teacher_aux["residual"].abs().mean()
@@ -369,6 +406,8 @@ def train():
                     )
 
             amp_scaler.scale(loss).backward()
+            amp_scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             amp_scaler.step(optimizer)
             amp_scaler.update()
             train_component_sums["total"] += float(loss.detach().item())
@@ -441,22 +480,13 @@ def train():
             if val_metrics is None:
                 best_loss = avg_train["total"]
             if is_main:
-                model_core = unwrap_module(model)
                 torch.save(
-                    {
-                        "teacher_state_dict": model_core.teacher.state_dict(),
-                        "detector_state_dict": model_core.detector.state_dict(),
-                        "epoch": epoch,
-                        "loss": avg_train["total"],
-                        "val_map50": best_map50 if val_metrics is not None else None,
-                        "teacher_arch": Config.TEACHER_ARCH,
-                        "head_type": Config.DETECTOR_HEAD_TYPE,
-                        "detection_protocol": "anchor_free_tal",
-                        "architecture_revision": "contextdw_v1",
-                        "global_local_context_grid": Config.GLOBAL_LOCAL_CONTEXT_GRID,
-                        "teacher_depths": Config.GLOBAL_LOCAL_TEACHER_DEPTHS,
-                        "detector_depths": Config.GLOBAL_LOCAL_DETECTOR_DEPTHS,
-                    },
+                    _checkpoint_payload(
+                        model,
+                        epoch=epoch,
+                        loss_value=avg_train["total"],
+                        val_map50=best_map50 if val_metrics is not None else None,
+                    ),
                     joint_best_path,
                 )
         if significant_improvement:
@@ -485,6 +515,7 @@ def train():
         # Rank 0 owns early-stopping state; all ranks must take the same exit path.
         should_stop = bool(
             val_metrics is not None
+            and epoch + 1 >= int(getattr(Config, "TEACHER_MIN_EPOCHS", 50))
             and Config.TEACHER_EARLY_STOP_PATIENCE > 0
             and no_improve_epochs >= Config.TEACHER_EARLY_STOP_PATIENCE
         ) if is_main else False
@@ -502,22 +533,13 @@ def train():
             break
 
     if is_main:
-        model_core = unwrap_module(model)
         torch.save(
-            {
-                "teacher_state_dict": model_core.teacher.state_dict(),
-                "detector_state_dict": model_core.detector.state_dict(),
-                "epoch": last_epoch,
-                "loss": history["train_total"][-1] if history["train_total"] else None,
-                "val_map50": best_map50 if best_map50 >= 0 else None,
-                "teacher_arch": Config.TEACHER_ARCH,
-                "head_type": Config.DETECTOR_HEAD_TYPE,
-                "detection_protocol": "anchor_free_tal",
-                "architecture_revision": "contextdw_v1",
-                "global_local_context_grid": Config.GLOBAL_LOCAL_CONTEXT_GRID,
-                "teacher_depths": Config.GLOBAL_LOCAL_TEACHER_DEPTHS,
-                "detector_depths": Config.GLOBAL_LOCAL_DETECTOR_DEPTHS,
-            },
+            _checkpoint_payload(
+                model,
+                epoch=last_epoch,
+                loss_value=history["train_total"][-1] if history["train_total"] else None,
+                val_map50=best_map50 if best_map50 >= 0 else None,
+            ),
             joint_final_path,
         )
 

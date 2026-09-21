@@ -28,7 +28,7 @@ from models.monitoring import (
 )
 from models.runtime import get_dataloader_kwargs, prepare_batch
 from models.review_candidates import write_review_lists as write_shared_review_lists
-from models.teacher import build_teacher
+from models.teacher import build_teacher, configure_teacher_checkpoint
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 from models.yolov8.detection_protocol import build_detection_criterion, decode_detections
 from models.yolov8.head_v8 import TeacherWithDetector, build_detector_head
@@ -331,6 +331,7 @@ def main():
             raise ValueError(f"--{name.replace('_', '-')} must be between 0 and 1.")
 
     Config.YAML_PATH = str(args.data.resolve())
+    configure_teacher_checkpoint(Config, args.checkpoint)
     Config.initialize()
     if args.batch_size is not None:
         Config.BATCH_SIZE = args.batch_size

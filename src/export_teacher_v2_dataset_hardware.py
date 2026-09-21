@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from models.class_display import class_name_for_id
 from models.dataset import YOLODataset, letterbox_image_targets
 from models.SLM.slm_modulation import resample_phase_map
-from models.teacher import build_teacher
+from models.teacher import build_teacher, configure_teacher_checkpoint
 from models.teacher_guidance import enhance_feature_for_display
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 from models.yolov8.detection_protocol import decode_detections
@@ -126,8 +126,8 @@ def ground_truth_to_records(targets, image_size):
 
 
 def draw_detection_boxes(image, detections, ground_truth):
-    """Render green ground-truth boxes and red prediction boxes on one letterboxed input."""
-    canvas = image.convert("RGB").copy()
+    """Render colored GT/prediction annotations on a grayscale scene."""
+    canvas = image.convert("L").convert("RGB")
     draw = ImageDraw.Draw(canvas)
     image_width, image_height = canvas.size
 
@@ -146,7 +146,7 @@ def draw_detection_boxes(image, detections, ground_truth):
         x1, y1 = cx - width / 2, cy - height / 2
         x2, y2 = cx + width / 2, cy + height / 2
         label = (
-            f"{class_name_for_id(Config.CLASS_NAMES, int(class_id))} "
+            f"Pred {class_name_for_id(Config.CLASS_NAMES, int(class_id))} "
             f"{confidence:.2f}"
         )
         draw.rectangle((x1, y1, x2, y2), outline="red", width=3)
@@ -176,6 +176,7 @@ def main():
             raise ValueError(f"--{name.replace('_', '-')} must be between 0 and 1.")
 
     Config.YAML_PATH = str(args.data.resolve())
+    configure_teacher_checkpoint(Config, args.checkpoint)
     Config.initialize()
     dataset = YOLODataset(Config, yaml_path=Config.YAML_PATH, split=args.split)
     source_paths = dataset.files[:args.limit]
@@ -196,6 +197,12 @@ def main():
         for position, source_path in enumerate(tqdm(source_paths, desc=f"Exporting {args.split}"), start=1):
             file_id = f"{position:04d}"
             input_image, input_tensor = prepare_scene(source_path, Config.RESOLUTION)
+            # Export the actual optical input, using the teacher's channel mean
+            # rather than PIL's different RGB luminance conversion. No contrast stretch.
+            gray_input = input_tensor.mean(dim=1)[0].clamp(0.0, 1.0)
+            input_image = Image.fromarray(
+                np.rint(gray_input.cpu().numpy() * 255.0).astype(np.uint8)
+            )
             # Keep phase prediction and complex ASM propagation in float32.
             teacher_aux = teacher(input_tensor.to(device), return_aux=True)
             predictions = detector(prepare_detector_feature(Config, teacher_aux["det_feature"]))
@@ -255,6 +262,10 @@ def main():
         "slm_effective_sampling_pitches_m": list(Config.TEACHER_V2_SAMPLING_PITCHES),
         "slm_active_shapes_hw": [list(shape) for shape in Config.TEACHER_V2_ACTIVE_PIXEL_SHAPES],
         "input_intensity_mode": Config.INPUT_INTENSITY_MODE,
+        "input_png_mode": "L",
+        "input_gray_conversion": "teacher input tensor channel mean, clamped to [0,1], rounded to uint8",
+        "detection_png_mode": "RGB",
+        "detection_annotations": "Grayscale scene; GT: green boxes; Pred: red boxes; visualization only",
         "phase_export_offset_rad": args.export_phase_offset_rad,
         "phase_levels": args.phase_levels,
         "gray_inverted": args.gray_inverted,

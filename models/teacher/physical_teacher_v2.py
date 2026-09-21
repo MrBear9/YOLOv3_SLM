@@ -46,6 +46,7 @@ class PhysicallyConstrainedTeacherV2(nn.Module):
         c2f_blocks=3,
         fourier_bands=8,
         fourier_low_pass_sigma=0.5,
+        stage_depths=None,
     ):
         super().__init__()
         c1 = int(base_channels)
@@ -59,7 +60,7 @@ class PhysicallyConstrainedTeacherV2(nn.Module):
         )
         depths = tuple(
             int(value)
-            for value in getattr(config, "GLOBAL_LOCAL_TEACHER_DEPTHS", default_depths)
+            for value in (stage_depths if stage_depths is not None else getattr(config, "GLOBAL_LOCAL_TEACHER_DEPTHS", default_depths))
         )
         if len(depths) != 3 or min(depths) < 1:
             raise ValueError(
@@ -121,6 +122,13 @@ class PhysicallyConstrainedTeacherV2(nn.Module):
             for _ in range(self.simulator.num_layers)
         )
 
+    def refine_multiscale(self, x1, x2, x3):
+        return x1, x2, x3
+
+    def fuse_phase_features(self, coarse, detail, gray):
+        return _interpolate_preserve_layout(coarse, size=gray.shape[-2:],
+                                            mode="bilinear", align_corners=False)
+
     def forward(self, x, return_aux=False):
         if x.shape[1] > 1:
             x = x.mean(dim=1, keepdim=True)
@@ -129,6 +137,7 @@ class PhysicallyConstrainedTeacherV2(nn.Module):
         x1 = self.stage1(self.stem(gray))
         x2 = self.stage2(x1)
         x3 = self.stage3(x2)
+        x1, x2, x3 = self.refine_multiscale(x1, x2, x3)
         p3 = self.sppf(x3)
         skip1 = _interpolate_preserve_layout(
             self.skip1(x1),
@@ -155,12 +164,7 @@ class PhysicallyConstrainedTeacherV2(nn.Module):
         phase_features = self.fuse_bridge_s8(
             torch.cat((feat_scale8, bridge_s8), dim=1)
         )
-        phase_features = _interpolate_preserve_layout(
-            phase_features,
-            size=gray.shape[-2:],
-            mode="bilinear",
-            align_corners=False,
-        )
+        phase_features = self.fuse_phase_features(phase_features, x1, gray)
         phase_features = self.phase_refine(phase_features)
         phase_maps = tuple(head(phase_features) for head in self.phase_heads)
         det_feature = self.simulator(gray, phase_maps)

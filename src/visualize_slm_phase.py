@@ -17,6 +17,7 @@ TWO_PI = 2.0 * math.pi
 PROFILE_HORIZONTAL_COLOR = "#27384A"
 PROFILE_VERTICAL_COLOR = "#55A868"
 PHASE_DISTRIBUTION_COLORS = ("#3B83B5", "#F28E2B")
+PHASE_FIT_COLOR = "#D62728"
 
 
 def parse_args():
@@ -32,8 +33,8 @@ def parse_args():
         help="Row/column index for the spatial phase profiles (default: image center).",
     )
     parser.add_argument(
-        "--hist-bins", type=int, default=64,
-        help="Number of bins used for each phase-distribution histogram (default: 64).",
+        "--hist-bins", type=int, default=125,
+        help="Number of bins used for each phase-distribution histogram (default: 125).",
     )
     return parser.parse_args()
 
@@ -163,6 +164,23 @@ def save_spatial_profiles(phase, name, output_dir, profile_index):
     return path
 
 
+def wrapped_gaussian_density(phase, points=768):
+    """Fit a wrapped Gaussian so the 0/2pi phase boundary stays continuous."""
+    values = phase.ravel()
+    mean_sin = float(np.mean(np.sin(values)))
+    mean_cos = float(np.mean(np.cos(values)))
+    mean_phase = math.atan2(mean_sin, mean_cos) % TWO_PI
+    resultant = min(max(math.hypot(mean_sin, mean_cos), 1e-12), 1.0)
+    circular_std = max(math.sqrt(max(-2.0 * math.log(resultant), 0.0)), 1e-6)
+    phase_grid = np.linspace(0.0, TWO_PI, points)
+    density = np.zeros_like(phase_grid)
+    normalizer = circular_std * math.sqrt(2.0 * math.pi)
+    for wrap in range(-2, 3):
+        offset = phase_grid - (mean_phase + wrap * TWO_PI)
+        density += np.exp(-0.5 * (offset / circular_std) ** 2) / normalizer
+    return phase_grid, density
+
+
 def save_phase_distribution(phase, name, output_dir, layer_index, bins):
     if bins < 2:
         raise ValueError("--hist-bins must be at least 2.")
@@ -170,13 +188,24 @@ def save_phase_distribution(phase, name, output_dir, layer_index, bins):
     configure_journal_style()
     color = PHASE_DISTRIBUTION_COLORS[layer_index % len(PHASE_DISTRIBUTION_COLORS)]
     fig, axis = plt.subplots(figsize=(3.45, 3.05), constrained_layout=True)
-    axis.hist(
-        phase.ravel(), bins=bins, range=(0.0, TWO_PI),
-        color=color, edgecolor=color, linewidth=0.2,
+    counts, edges = np.histogram(phase.ravel(), bins=bins, range=(0.0, TWO_PI))
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    bin_widths = np.diff(edges)
+    count_scale = 1000.0
+    bars = axis.bar(
+        centers, counts / count_scale, width=bin_widths, align="center",
+        color=color, edgecolor=color, linewidth=0.25, alpha=0.72,
+        label="Counts",
+    )
+    phase_grid, fitted_density = wrapped_gaussian_density(phase)
+    fitted_counts = fitted_density * phase.size * bin_widths[0] / count_scale
+    fit_line, = axis.plot(
+        phase_grid, fitted_counts, color=PHASE_FIT_COLOR,
+        linewidth=1.7, label="Gaussian fit", zorder=3,
     )
     axis.set_title("Phase distribution", pad=7)
     axis.set_xlabel("Phase (rad)")
-    axis.set_ylabel("Pixels")
+    axis.set_ylabel(r"Count ($\times 10^3$)")
     axis.set_xlim(0.0, TWO_PI)
     axis.set_xticks([0.0, 2.0, 4.0, 6.0])
     axis.tick_params(direction="out", top=False, right=False, length=4)
@@ -184,6 +213,10 @@ def save_phase_distribution(phase, name, output_dir, layer_index, bins):
     axis.set_axisbelow(True)
     axis.spines["top"].set_visible(False)
     axis.spines["right"].set_visible(False)
+    axis.legend(
+        [bars, fit_line], ["Counts", "Gaussian fit"],
+        loc="upper right", frameon=False, handlelength=2.0,
+    )
 
     path = output_dir / f"{name}_phase_distribution.png"
     fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
@@ -225,7 +258,7 @@ if __name__ == "__main__":
 """
 *_phase_colormap.png: viridis 伪彩图，统一范围 0~2pi，标题标注 phase range 和 std。
 *_phase_profiles.png: 将中心行与中心列的相位曲线叠加到同一坐标轴，不添加子图字母。
-*_phase_distribution.png: 每个相位层单独输出相位直方图，逐层使用期刊蓝和期刊橙。
+*_phase_distribution.png: 每个相位层单独输出概率密度直方图与周期高斯拟合曲线，逐层使用期刊蓝和期刊橙。
 
 若 phase_export_metadata.json 存在，新脚本会自动继承导出时的 LUT 和灰度反转设置，确保可视化相位与实际 SLM 加载相位一致。也可用 --profile-index 320 指定剖面位置。
 """

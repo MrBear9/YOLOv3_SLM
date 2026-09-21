@@ -30,7 +30,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 DEFAULT_DATASETS = ["Fashion", "Military"]
 DEFAULT_DIGITAL_MAP50 = [0.970, 0.839]
-DEFAULT_STATIC_SLM_MAP50 = [0.929, 0.537]
+DEFAULT_STATIC_SLM_MAP50 = [0.929, 0.631]
 
 
 DIGITAL_COLOR = "#4A4A4A"

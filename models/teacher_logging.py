@@ -91,6 +91,8 @@ def log_all_parameters():
             f"active_shapes={Config.TEACHER_V2_ACTIVE_PIXEL_SHAPES}, "
             f"distances={Config.TEACHER_V2_PROP_DISTANCES}",
         )
+    if arch_lower in {"physical_teacher_v4", "v4"}:
+        log_to_file(Config, f"V4 CNN: depths={Config.TEACHER_V4_DEPTHS}, base={Config.TEACHER_V4_BASE_CHANNELS}; scratch training")
     log_to_file(Config, f"Teacher parameters: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
     log_to_file(Config, f"Detector head type: {Config.DETECTOR_HEAD_TYPE}")
     log_to_file(Config, f"Detector parameters: {sum(p.numel() for p in detector.parameters() if p.requires_grad):,}")

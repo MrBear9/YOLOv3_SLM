@@ -85,9 +85,9 @@ def build_optimizer_from_model(config, model, teacher_lr=None, detector_lr=None)
     teacher_params = [p for p in model_core.teacher.parameters() if p.requires_grad]
     detector_params = [p for p in model_core.detector.parameters() if p.requires_grad]
     if teacher_params:
-        param_groups.append({"params": teacher_params, "lr": teacher_lr})
+        param_groups.append({"params": teacher_params, "lr": teacher_lr, "role": "teacher"})
     if detector_params:
-        param_groups.append({"params": detector_params, "lr": detector_lr})
+        param_groups.append({"params": detector_params, "lr": detector_lr, "role": "detector"})
     if not param_groups:
         raise ValueError("No trainable parameters found when building optimizer.")
     optimizer_name = str(getattr(config, "OPTIMIZER", "Adam")).strip()

@@ -5,6 +5,7 @@ __version__ = "0.1.0"
 from .architectures import ConvTeacher, ConvTeacherV3
 from .physical_simulator import PhysicalSLMSimulator
 from .physical_teacher_v2 import PhysicallyConstrainedTeacherV2
+from .physical_teacher_v4 import PhysicallyConstrainedTeacherV4
 from .building_blocks import (
     C2fCIB,
     CIB,
@@ -19,6 +20,26 @@ from .building_blocks import (
     TeacherSPPF,
 )
 from .fourier_layers import FourierOpticalLayer
+
+
+def configure_teacher_checkpoint(config, path):
+    """Restore architecture metadata before constructing a frozen teacher."""
+    import torch
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    arch = checkpoint.get("teacher_arch", "convteacher_v2")
+    if arch not in {"convteacher", "v1", "convteacher_v2", "v2", "convteacher_v3", "v3", "physical_teacher_v4", "v4"}:
+        raise ValueError(f"Unsupported teacher checkpoint: {arch}. Old transfer V4 is a static pair, not the new CNN teacher.")
+    config.TEACHER_ARCH = arch
+    for key, attr in {
+        "teacher_v4_base_channels": "TEACHER_V4_BASE_CHANNELS",
+        "teacher_v4_depths": "TEACHER_V4_DEPTHS",
+        "global_local_context_grid": "GLOBAL_LOCAL_CONTEXT_GRID",
+        "teacher_depths": "GLOBAL_LOCAL_TEACHER_DEPTHS",
+        "detector_depths": "GLOBAL_LOCAL_DETECTOR_DEPTHS",
+    }.items():
+        if key in checkpoint:
+            setattr(config, attr, checkpoint[key])
+    return arch
 
 
 def build_teacher(config=None):
@@ -44,6 +65,8 @@ def build_teacher(config=None):
         b = int(getattr(config, "TEACHER_V3_C2F_BLOCKS", 2) if config is not None else 2)
         s = float(getattr(config, "TEACHER_V3_RESIDUAL_SCALE", 0.30) if config is not None else 0.30)
         return ConvTeacherV3(base_channels=c, c2f_blocks=b, residual_scale=s)
+    if arch in {"physical_teacher_v4", "v4"}:
+        return PhysicallyConstrainedTeacherV4(config)
     raise ValueError(f"Unsupported TEACHER_ARCH: {arch}")
 
 
@@ -52,6 +75,7 @@ __all__ = [
     "ConvTeacher",
     "ConvTeacherV3",
     "PhysicallyConstrainedTeacherV2",
+    "PhysicallyConstrainedTeacherV4",
     "PhysicalSLMSimulator",
     "C2fCIB",
     "CIB",

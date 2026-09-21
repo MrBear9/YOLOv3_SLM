@@ -23,7 +23,7 @@ from models.class_display import class_name_for_id
 from models.dataset import image_to_intensity_tensor, letterbox_image_targets
 from models.SLM.physical_defaults import aperture_size
 from models.SLM.slm_modulation import resample_phase_map
-from models.teacher import build_teacher
+from models.teacher import build_teacher, configure_teacher_checkpoint
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 from models.yolov8.detection_protocol import decode_detections
 from models.yolov8.feature_adapter import prepare_detector_feature
@@ -181,6 +181,7 @@ def main():
     if not 2 <= args.phase_levels <= 256:
         raise ValueError("--phase-levels must be between 2 and 256 because PNG output is 8-bit.")
 
+    configure_teacher_checkpoint(Config, args.checkpoint)
     Config.initialize()
     device = torch.device(args.device or Config.DEVICE)
     teacher = build_teacher(Config).to(device).eval()
