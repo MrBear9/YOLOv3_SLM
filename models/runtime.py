@@ -170,13 +170,19 @@ def prepare_conv_tensor(config, tensor):
     return tensor.contiguous() if tensor.is_floating_point() else tensor
 
 
-def _make_params_contiguous(module):
-    """确保所有参数在内存中连续排列，避免 DDP 的 Grad strides 警告。"""
+def _make_params_contiguous(module, channels_last=False):
+    """Canonicalize parameter strides before DDP constructs its buckets."""
     for name, param in module.named_parameters():
-        if not param.is_contiguous():
+        if channels_last and param.ndim == 4:
+            if not param.is_contiguous(memory_format=torch.channels_last):
+                param.data = param.data.contiguous(memory_format=torch.channels_last)
+        elif not param.is_contiguous():
             param.data = param.data.contiguous()
     for name, buf in module.named_buffers():
-        if buf.is_floating_point() and not buf.is_contiguous():
+        if channels_last and buf.is_floating_point() and buf.ndim == 4:
+            if not buf.is_contiguous(memory_format=torch.channels_last):
+                buf.data = buf.data.contiguous(memory_format=torch.channels_last)
+        elif buf.is_floating_point() and not buf.is_contiguous():
             buf.data = buf.data.contiguous()
 
 
@@ -186,7 +192,7 @@ def wrap_data_parallel(config, module, module_name="module", find_unused_paramet
     if should_use_channels_last(config):
         module = module.to(memory_format=torch.channels_last)
     if torch.distributed.is_initialized():
-        _make_params_contiguous(module)
+        _make_params_contiguous(module, channels_last=should_use_channels_last(config))
         module = nn.parallel.DistributedDataParallel(
             module, device_ids=[device.index], output_device=device.index,
             find_unused_parameters=find_unused_parameters,

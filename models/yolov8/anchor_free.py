@@ -176,15 +176,19 @@ class AnchorFreeTALLoss(nn.Module):
             + dfl_loss * float(getattr(self.config, "ANCHOR_FREE_DFL_WEIGHT", 1.5))
         )
         positive_area = ((target_boxes[..., 2] - target_boxes[..., 0]) * (target_boxes[..., 3] - target_boxes[..., 1])).clamp(min=0)
+        defer_sync = bool(getattr(self.config, "DEFER_LOSS_STAT_SYNC", False))
+        def stat(value):
+            value = value.detach()
+            return value if defer_sync else float(value)
         stats = {
-            "total": float(total.detach()), "box": float(box_loss.detach()), "obj": 0.0, "noobj": 0.0,
-            "cls": float(cls_loss.detach()), "dfl": float(dfl_loss.detach()),
-            "positive_total": float(foreground.sum().detach()),
-            "positive_small": float((foreground & (positive_area < float(getattr(self.config, "SMALL_OBJ_AREA", 32 ** 2)))).sum().detach()),
+            "total": stat(total), "box": stat(box_loss), "obj": 0.0, "noobj": 0.0,
+            "cls": stat(cls_loss), "dfl": stat(dfl_loss),
+            "positive_total": stat(foreground.sum()),
+            "positive_small": stat((foreground & (positive_area < float(getattr(self.config, "SMALL_OBJ_AREA", 32 ** 2)))).sum()),
         }
         positive_classes = target_scores.argmax(-1)
         for cls_id in range(int(getattr(self.config, "NUM_CLASSES", 0))):
-            stats[f"positive_class_{cls_id}"] = float((foreground & (positive_classes == cls_id)).sum().detach())
+            stats[f"positive_class_{cls_id}"] = stat((foreground & (positive_classes == cls_id)).sum())
         self.last_components = stats
         return total, stats
 

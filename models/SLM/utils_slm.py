@@ -102,6 +102,66 @@ def load_student_checkpoint(student, checkpoint_path, device):
     }
 
 
+def load_student_from_teacher_static_phase(student, checkpoint_path, device):
+    """Initialize direct student phases from a transferable V4 checkpoint."""
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Teacher checkpoint not found: {checkpoint_path}")
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError("Teacher static-phase initialization requires a checkpoint dictionary.")
+
+    phases = checkpoint.get("teacher_static_phase_maps")
+    if phases is None:
+        teacher_state = checkpoint.get("teacher_state_dict", {})
+        keys = checkpoint.get("teacher_static_phase_keys")
+        if keys is None:
+            keys = []
+            index = 0
+            while f"static_phases.{index}" in teacher_state:
+                keys.append(f"static_phases.{index}")
+                index += 1
+        phases = tuple(teacher_state[key] for key in keys if key in teacher_state)
+    if not phases:
+        raise KeyError(
+            "Checkpoint has no transferable V4 static phases. Train the current "
+            "physical_teacher_v4 before using SLM_INIT_MODE='teacher_static'."
+        )
+
+    from models.SLM.slm_modulation import resample_phase_map
+
+    layers = list(student.all_slm_layers())
+    if len(phases) != len(layers):
+        raise RuntimeError(
+            f"Teacher exports {len(phases)} phases but student has {len(layers)} SLM layers."
+        )
+    loaded = []
+    with torch.no_grad():
+        for (layer_name, slm), phase in zip(layers, phases):
+            if getattr(slm, "phase_raw", None) is None:
+                raise RuntimeError(f"{layer_name} has no direct phase_raw parameter.")
+            phase = phase.to(device=slm.phase_raw.device, dtype=slm.phase_raw.dtype)
+            phase = resample_phase_map(phase, slm.phase_raw.shape[-2:])
+            if phase.shape[0] != 1 or phase.shape[1] != 1:
+                raise ValueError(
+                    f"Transferable phase for {layer_name} must have shape [1,1,H,W], "
+                    f"got {tuple(phase.shape)}."
+                )
+            slm.phase_raw.copy_(phase)
+            if getattr(slm, "phase_field", None) is not None:
+                slm.phase_field.zero_residual()
+            loaded.append(layer_name)
+    return {
+        "loaded": len(loaded),
+        "total": len(layers),
+        "layers": loaded,
+        "path": checkpoint_path,
+        "convention": checkpoint.get("teacher_static_phase_convention"),
+    }
+
+
 def load_student_detector_checkpoint(student, detector, checkpoint_path, device):
     """Restore the paired fixed-SLM and light-detector snapshot for joint refinement."""
     if not checkpoint_path or not os.path.exists(checkpoint_path):

@@ -181,7 +181,68 @@ def evaluate_model_anchor_v8(config, model, dataloader, criterion, device):
                         class_size_totals[cls_id][size_name] += 1
                         class_size_matches[cls_id][size_name] += int(gt_idx in matched)
 
-    num_batches = max(len(dataloader), 1)
+    component_totals = {
+        key: float(value.detach().item()) if torch.is_tensor(value) else float(value)
+        for key, value in component_totals.items()
+    }
+    num_batches = len(dataloader)
+    if torch.distributed.is_initialized():
+        local_state = {
+            "metric_storage": metric_storage,
+            "gt_counts": gt_counts,
+            "component_totals": component_totals,
+            "total_tp": total_tp,
+            "total_fp": total_fp,
+            "total_fn": total_fn,
+            "total_tp_op": total_tp_op,
+            "total_fp_op": total_fp_op,
+            "total_fn_op": total_fn_op,
+            "size_totals": size_totals,
+            "size_matches": size_matches,
+            "class_size_totals": class_size_totals,
+            "class_size_matches": class_size_matches,
+            "num_batches": num_batches,
+        }
+        gathered = [None for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather_object(gathered, local_state)
+
+        metric_storage = {cls_id: [] for cls_id in range(config.NUM_CLASSES)}
+        gt_counts = {cls_id: 0 for cls_id in range(config.NUM_CLASSES)}
+        component_totals = {key: 0.0 for key in component_totals}
+        total_tp = total_fp = total_fn = 0
+        total_tp_op = total_fp_op = total_fn_op = 0
+        size_totals = {name: 0 for name in size_totals}
+        size_matches = {name: 0 for name in size_matches}
+        class_size_totals = {
+            cls_id: {name: 0 for name in size_totals}
+            for cls_id in range(config.NUM_CLASSES)
+        }
+        class_size_matches = {
+            cls_id: {name: 0 for name in size_totals}
+            for cls_id in range(config.NUM_CLASSES)
+        }
+        num_batches = 0
+        for state in gathered:
+            num_batches += int(state["num_batches"])
+            for key, value in state["component_totals"].items():
+                component_totals[key] += value
+            for cls_id in range(config.NUM_CLASSES):
+                metric_storage[cls_id].extend(state["metric_storage"][cls_id])
+                gt_counts[cls_id] += state["gt_counts"][cls_id]
+                for name in size_totals:
+                    class_size_totals[cls_id][name] += state["class_size_totals"][cls_id][name]
+                    class_size_matches[cls_id][name] += state["class_size_matches"][cls_id][name]
+            total_tp += state["total_tp"]
+            total_fp += state["total_fp"]
+            total_fn += state["total_fn"]
+            total_tp_op += state["total_tp_op"]
+            total_fp_op += state["total_fp_op"]
+            total_fn_op += state["total_fn_op"]
+            for name in size_totals:
+                size_totals[name] += state["size_totals"][name]
+                size_matches[name] += state["size_matches"][name]
+
+    num_batches = max(num_batches, 1)
     avg_losses = {key: value / num_batches for key, value in component_totals.items()}
     # COCO-style (conf_thresh=0.001) — used for mAP, precision_metric ≈ 0.004
     precision_metric = total_tp / (total_tp + total_fp + 1e-6)

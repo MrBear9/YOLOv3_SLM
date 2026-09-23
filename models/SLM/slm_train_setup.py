@@ -16,6 +16,7 @@ from models.SLM.optical_layers import OpticalStudent
 from models.SLM.slm_utils import configure_backends, log_config
 from models.SLM.utils_slm import (
     load_student_checkpoint,
+    load_student_from_teacher_static_phase,
     load_student_detector_checkpoint,
     load_teacher_detector_checkpoint,
     file_sha256,
@@ -95,6 +96,11 @@ def setup_training(is_main, use_ddp, *, forward_only=False, detector_from_teache
                 f"SLM_INIT_MODE={init_mode!r} requires a compatible SLM_INIT_CHECKPOINT; "
                 f"loaded no tensors from {Config.SLM_INIT_CHECKPOINT!r}."
             )
+    elif init_mode == "teacher_static":
+        student_info = load_student_from_teacher_static_phase(
+            student, Config.TEACHER_DETECTOR_CHECKPOINT, device
+        )
+        log_to_file(Config, f"Initialized SLM student from V4 shared static phases: {student_info}")
     else:
         log_to_file(Config, f"Initialized SLM student with mode={init_mode}")
     detector = build_detector_head(Config, in_channels=1).to(device)

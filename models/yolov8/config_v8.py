@@ -47,7 +47,7 @@ class ConfigYOLOv8Anchor(OpticalConfig):
     YAML_PATH = r"data/military/data.yaml"
     CLASS_NAMES = None
     NUM_CLASSES = None
-    TEACHER_OUTPUT_DIR = r"output/Tv4_multiscale_scratch_2gpu_seed42"
+    TEACHER_OUTPUT_DIR = r"output/Tv2_scratch_control_2gpu_seed42"
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
@@ -56,7 +56,10 @@ class ConfigYOLOv8Anchor(OpticalConfig):
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
     TRAIN_SEED = 42
-    DETERMINISTIC_TRAINING = True
+    # Deterministic CUDA kernels made the physical FFT/CNN route several times
+    # slower on A6000. Seeded stochastic training remains reproducible enough
+    # for model selection; enable strict determinism only for diagnostics.
+    DETERMINISTIC_TRAINING = False
 
     # =========================================================================
     # Training scale
@@ -84,7 +87,7 @@ class ConfigYOLOv8Anchor(OpticalConfig):
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v2" | "v2"  (phase prediction + SLM/ASM)
     # =========================================================================
-    TEACHER_ARCH = "physical_teacher_v4"
+    TEACHER_ARCH = "convteacher_v2"
     TEACHER_V2_BASE_CHANNELS = 32
     TEACHER_V2_C2F_BLOCKS = 3
     TEACHER_V2_FOURIER_BANDS = 8
@@ -110,7 +113,23 @@ class ConfigYOLOv8Anchor(OpticalConfig):
     SIMULATE_HARDWARE_PIXEL_GRID = True
 
     TEACHER_V4_BASE_CHANNELS = 32
-    TEACHER_V4_DEPTHS = (3, 5, 5, 3)
+    # Efficient top-down encoder. V4 retains its fourth scale and detail path,
+    # but removes repeated global/local blocks that dominated epoch time.
+    TEACHER_V4_DEPTHS = (2, 3, 3, 2)
+    TEACHER_V4_FUSION_DEPTH = 1
+    # Student-transferable phase: shared full-resolution base plus a bounded,
+    # cosine-annealed conditional residual. Static batches force the detector
+    # to remain useful when the dynamic branch is absent.
+    TEACHER_V4_STATIC_PHASE_INIT_RANGE_RAD = 0.5
+    TEACHER_V4_RESIDUAL_START_RAD = 0.35
+    TEACHER_V4_RESIDUAL_END_RAD = 0.08
+    TEACHER_V4_STATIC_BATCH_PROB = 0.50
+    # Validation/checkpoint selection follows the path that a fixed SLM can
+    # reproduce exactly. The bounded residual is training-time guidance only.
+    TEACHER_V4_STATIC_EVAL = True
+    TEACHER_V4_TRANSFER_LOSS_WEIGHT = 0.10
+    TEACHER_V4_RESIDUAL_TV_WEIGHT = 0.10
+    TEACHER_V4_STATIC_PHASE_LR_MULT = 3.0
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v3" | "v3"  (residual + gate)
@@ -190,15 +209,6 @@ class ConfigYOLOv8Anchor(OpticalConfig):
     COMPACT_METRIC_IOU_THRESHOLD = 0.5
 
     # =========================================================================
-    # Feature distillation (teacher → detector)
-    # =========================================================================
-    ENABLE_FEATURE_DISTILL = False
-    # The old auxiliary CNN->detector projections were outside the optimizer
-    # and DDP. Keep this unrelated objective off in both controlled runs;
-    # CNN phase prediction still receives the full detection gradient.
-    FEATURE_DISTILL_WEIGHT = 0.5
-
-    # =========================================================================
     # Teacher ciphertext regularization (weakened)
     #   TV/HF: relaxed to allow more texture detail for SLM modulation
     #   Range/Mean: kept as floor to prevent all-dark output
@@ -248,7 +258,7 @@ class ConfigYOLOv8Anchor(OpticalConfig):
     # =========================================================================
     # Validation
     # =========================================================================
-    VAL_INTERVAL = 2
+    VAL_INTERVAL = 5
     TEACHER_EARLY_STOP_PATIENCE = 20
     TEACHER_EARLY_STOP_MIN_DELTA = 0.002
     METRIC_IOU_THRESHOLD = 0.5
@@ -259,7 +269,12 @@ class ConfigYOLOv8Anchor(OpticalConfig):
     # =========================================================================
     # Visualization
     # =========================================================================
-    VIS_INTERVAL = 5
+    VIS_INTERVAL = 10
+    # A confusion matrix requires another complete validation pass. Keep it
+    # offline by default; set a positive interval only for a diagnostic run.
+    CONFUSION_MATRIX_INTERVAL = 0
+    # Full per-parameter gradient/CPU snapshot monitoring is diagnostic work.
+    MONITOR_INTERVAL = 10
     VIS_BATCH_SIZE = 4
     VIS_DPI = 130
     VIS_DATASET_SPLIT = "val"
@@ -307,16 +322,22 @@ class ConfigYOLOv8Anchor(OpticalConfig):
 
     # Windows 使用 spawn 创建多进程，开销远大于 Linux 的 fork，需要降低 worker 数量
     _IS_WINDOWS = os.name == "nt"
-    NUM_WORKERS = (0 if _IS_WINDOWS else min(4, os.cpu_count() or 0))
+    NUM_WORKERS = (0 if _IS_WINDOWS else min(8, os.cpu_count() or 0))
     PIN_MEMORY = torch.cuda.is_available()
-    PERSISTENT_WORKERS = False
-    PREFETCH_FACTOR = (0 if _IS_WINDOWS else 2)
+    PERSISTENT_WORKERS = not _IS_WINDOWS
+    PREFETCH_FACTOR = (0 if _IS_WINDOWS else 4)
     DATALOADER_TIMEOUT = (0 if _IS_WINDOWS else 300)
-    ENABLE_CUDNN_BENCHMARK = False
-    ENABLE_CHANNELS_LAST = False
+    ENABLE_CUDNN_BENCHMARK = True
+    ENABLE_CHANNELS_LAST = True
     ENABLE_TF32 = True
     ENABLE_AMP = True
     AMP_DTYPE = "float16"
+    # AdamW and GradScaler already reject invalid steps. Full-model clipping
+    # forced an unscale and a second pass over all parameters every batch.
+    TEACHER_GRAD_CLIP_NORM = 0.0
+    # Keep loss diagnostics on GPU throughout an epoch and synchronize once,
+    # instead of calling .item() repeatedly in every training batch.
+    DEFER_LOSS_STAT_SYNC = True
 
     # =========================================================================
     # Log / table formatting
@@ -352,6 +373,21 @@ class ConfigYOLOv8Anchor(OpticalConfig):
             raise ValueError(
                 "GLOBAL_LOCAL_TEACHER_DEPTHS must contain three positive integers."
             )
+        if len(tuple(cls.TEACHER_V4_DEPTHS)) != 4 or min(
+            int(value) for value in cls.TEACHER_V4_DEPTHS
+        ) < 1:
+            raise ValueError("TEACHER_V4_DEPTHS must contain four positive integers.")
+        if int(cls.TEACHER_V4_FUSION_DEPTH) < 1:
+            raise ValueError("TEACHER_V4_FUSION_DEPTH must be positive.")
+        if not 0.0 <= float(cls.TEACHER_V4_STATIC_BATCH_PROB) <= 1.0:
+            raise ValueError("TEACHER_V4_STATIC_BATCH_PROB must be in [0, 1].")
+        if min(
+            float(cls.TEACHER_V4_RESIDUAL_START_RAD),
+            float(cls.TEACHER_V4_RESIDUAL_END_RAD),
+        ) < 0:
+            raise ValueError("V4 residual phase limits must be non-negative.")
+        if float(cls.TEACHER_V4_STATIC_PHASE_LR_MULT) <= 0:
+            raise ValueError("TEACHER_V4_STATIC_PHASE_LR_MULT must be positive.")
         if cls.get_teacher_init_mode() == "scratch" and cls.FREEZE_TEACHER:
             raise ValueError("A scratch teacher cannot be frozen.")
         if len(cls.TEACHER_V2_SLM_PROFILES) != cls.TEACHER_V2_NUM_SLM_LAYERS:

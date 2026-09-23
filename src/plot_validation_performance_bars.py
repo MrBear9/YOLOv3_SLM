@@ -76,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-stem",
         type=Path,
-        default=Path("paper/figures/current_validation_performance"),
+        default=Path("output/figures/current_validation_performance"),
         help="Output path without an extension; both PNG and PDF are written.",
     )
     parser.add_argument(
@@ -122,7 +122,7 @@ def add_value_labels(
             textcoords="offset points",
             ha="center",
             va="bottom",
-            fontsize=9,
+            fontsize=11.5,
             color="#222222",
             clip_on=False,
         )
@@ -145,29 +145,33 @@ def plot_validation_performance(
     png_path = output_stem.with_suffix(".png")
     pdf_path = output_stem.with_suffix(".pdf")
 
-    # A slightly compressed group spacing and narrow bars work better when the
-    # chart is embedded as a journal sub-panel.
-    x = np.arange(len(datasets), dtype=float) * 0.72
-    width = 0.17
-    intra_group_gap = 0.06
+    # Set spacing relative to the full pair of bars, so inter-dataset whitespace
+    # stays compact without collapsing the gap between the two series.
+    width = 0.13
+    intra_group_gap = 0.065
+    inter_group_gap = 0.18
+    group_width = 2 * width + intra_group_gap
+    x = np.arange(len(datasets), dtype=float) * (group_width + inter_group_gap)
     bar_offset = (width + intra_group_gap) / 2.0
 
     rc_params = {
         "font.family": "serif",
         "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
-        "font.size": 10,
-        "axes.titlesize": 10.5,
-        "axes.labelsize": 10,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 9,
-        "legend.fontsize": 10.5,
+        "font.size": 12,
+        "axes.titlesize": 12,
+        "axes.labelsize": 12.5,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 11.5,
+        "legend.fontsize": 11.5,
         "axes.linewidth": 0.8,
         "pdf.fonttype": 42,
         "ps.fonttype": 42,
     }
 
     with plt.rc_context(rc_params):
-        figure, axis = plt.subplots(figsize=(3.45, 3.35))
+        # Approximately one journal column wide, with a taller plotting area
+        # to keep the bars slender while retaining readable type at print size.
+        figure, axis = plt.subplots(figsize=(3.45, 3.55))
 
         digital_bars = axis.bar(
             x - bar_offset,
@@ -195,8 +199,9 @@ def plot_validation_performance(
 
         axis.set_ylabel("mAP50")
         axis.set_xticks(x, datasets)
-        axis.set_xlim(x[0] - 0.34, x[-1] + 0.34)
-        axis.set_ylim(0.0, 1.06)
+        side_margin = group_width / 2.0 + 0.08
+        axis.set_xlim(x[0] - side_margin, x[-1] + side_margin)
+        axis.set_ylim(0.0, 1.10)
         axis.set_yticks(np.linspace(0.0, 1.0, 6))
         axis.grid(
             axis="y",
@@ -228,16 +233,17 @@ def plot_validation_performance(
 
         axis.legend(
             loc="upper center",
-            bbox_to_anchor=(0.5, -0.18),
+            bbox_to_anchor=(0.5, -0.16),
             ncol=2,
             frameon=False,
-            handlelength=2.15,
-            handleheight=1.25,
-            columnspacing=1.15,
+            handlelength=1.05,
+            handleheight=0.85,
+            handletextpad=0.45,
+            columnspacing=0.8,
             borderaxespad=0.0,
         )
 
-        figure.subplots_adjust(left=0.19, right=0.98, top=0.85, bottom=0.27)
+        figure.subplots_adjust(left=0.19, right=0.98, top=0.86, bottom=0.23)
         figure.savefig(
             png_path,
             dpi=dpi,

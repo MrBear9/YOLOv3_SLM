@@ -12,6 +12,7 @@ from collections import defaultdict
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 import numpy as np
 import torch
 
@@ -329,27 +330,147 @@ def compute_detection_confusion_matrix(
     return confusion, class_tp, class_fp, class_fn
 
 
-def _render_confusion_matrix_image(confusion, class_names, title="Detection Confusion Matrix"):
-    """Render confusion matrix as a matplotlib figure, return numpy array."""
+def _resolve_confusion_matrix_font():
+    """Prefer Arial while remaining portable on headless Linux servers."""
+    for family in ("Arial", "Liberation Sans", "DejaVu Sans"):
+        try:
+            font_manager.findfont(family, fallback_to_default=False)
+            return family
+        except ValueError:
+            continue
+    return "DejaVu Sans"
+
+
+_CONFUSION_MATRIX_FONT = _resolve_confusion_matrix_font()
+_CONFUSION_MATRIX_RC = {
+    "font.family": _CONFUSION_MATRIX_FONT,
+    "font.sans-serif": ["Arial", "Liberation Sans", "DejaVu Sans"],
+    "mathtext.fontset": "dejavusans",
+    "axes.titlesize": 25,
+    "axes.labelsize": 25,
+    "xtick.labelsize": 23,
+    "ytick.labelsize": 23,
+}
+
+
+def _publication_class_label(name):
+    """Format one display label without changing dataset/checkpoint metadata."""
+    label = str(name).replace("_", " ").strip()
+    return label[:1].upper() + label[1:] if label else label
+
+
+def _matrix_labels(class_names, num_classes, include_background):
+    labels = [
+        _publication_class_label(class_name_for_id(class_names, index))
+        for index in range(num_classes)
+    ]
+    if include_background:
+        labels.append("Background")
+    return labels
+
+
+def _matrix_figure(labels, include_background=False):
+    """Create a canvas whose margins and width follow the displayed labels."""
+    n = len(labels)
+    longest_label = max((len(label) for label in labels), default=1)
+    if n <= 6:
+        if include_background:
+            # The extra Background label is much wider than a class name. Use
+            # that otherwise-empty horizontal space for wider matrix columns.
+            figure_size = (10.4, 7.2)
+            margins = dict(left=0.24, right=0.98, bottom=0.20, top=0.88)
+            tick_size = 20
+        else:
+            figure_size = (7.6, 6.8)
+            margins = dict(left=0.22, right=0.97, bottom=0.18, top=0.88)
+            tick_size = 23
+    else:
+        height = max(8.5, n * 0.82)
+        width = max(
+            height,
+            n * (1.05 if include_background else 0.95) + longest_label * 0.14,
+        )
+        figure_size = (width, height)
+        margins = dict(
+            left=0.15 if include_background else 0.17,
+            right=0.98,
+            bottom=0.18,
+            top=0.90,
+        )
+        tick_size = 16 if n <= 10 else 13
+    with plt.rc_context(_CONFUSION_MATRIX_RC):
+        fig, ax = plt.subplots(figsize=figure_size, dpi=200)
+    fig.subplots_adjust(**margins)
+    ax.tick_params(axis="both", which="major", length=0, pad=8, labelsize=tick_size)
+    return fig, ax
+
+
+def _style_matrix_axes(ax, labels, title, square_cells=True):
+    n = len(labels)
+    title_size = 21 if n <= 6 else 26
+    axis_size = 25 if n <= 6 else 24
+    tick_size = (
+        (23 if square_cells else 20)
+        if n <= 6
+        else (16 if n <= 10 else 13)
+    )
+    ticks = np.arange(n)
+    ax.set_xticks(ticks, labels, rotation=0, ha="center")
+    ax.set_yticks(ticks, labels, rotation=0, va="center")
+    ax.set_xlabel(
+        "Predicted class", labelpad=11, fontsize=axis_size,
+        fontweight="medium", fontfamily=_CONFUSION_MATRIX_FONT,
+    )
+    ax.set_ylabel(
+        "True class", labelpad=11, fontsize=axis_size,
+        fontweight="medium", fontfamily=_CONFUSION_MATRIX_FONT,
+    )
+    ax.set_title(
+        title, pad=14, fontsize=title_size, fontweight="semibold",
+        fontfamily=_CONFUSION_MATRIX_FONT,
+    )
+    ax.set_aspect("equal" if square_cells else "auto")
+    ax.set_xticks(np.arange(-0.5, n, 1.0), minor=True)
+    ax.set_yticks(np.arange(-0.5, n, 1.0), minor=True)
+    ax.grid(which="minor", color="white", linewidth=1.4)
+    ax.tick_params(which="minor", bottom=False, left=False)
+    for tick_label in (*ax.get_xticklabels(), *ax.get_yticklabels()):
+        tick_label.set_fontfamily(_CONFUSION_MATRIX_FONT)
+        tick_label.set_fontsize(tick_size)
+    for spine in ax.spines.values():
+        spine.set_color("#333333")
+        spine.set_linewidth(1.2)
+
+
+def _figure_to_rgb(fig):
+    """Convert a Matplotlib figure to an RGB array for PNG/TensorBoard output."""
+    fig.canvas.draw()
+    width, height = fig.canvas.get_width_height()
+    image = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(
+        height, width, 4
+    )[:, :, :3]
+    plt.close(fig)
+    return image
+
+
+def _render_confusion_matrix_image(confusion, class_names, title="Detection confusion matrix"):
+    """Render a publication-style count matrix including background errors."""
     n = confusion.shape[0]
     num_classes = n - 1
-    labels = [class_name_for_id(class_names, i) for i in range(num_classes)] + ["background"]
+    labels = _matrix_labels(class_names, num_classes, include_background=True)
 
-    fig, ax = plt.subplots(figsize=(max(8, n * 0.8), max(6, n * 0.6)))
-    im = ax.imshow(confusion, interpolation="nearest", cmap="Blues")
-    ax.set_title(title, fontsize=12)
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig, ax = _matrix_figure(labels, include_background=True)
+    maximum = float(np.max(confusion)) if confusion.size else 0.0
+    ax.imshow(
+        confusion,
+        interpolation="nearest",
+        cmap="Blues",
+        vmin=0.0,
+        vmax=maximum if maximum > 0.0 else 1.0,
+    )
+    _style_matrix_axes(ax, labels, title, square_cells=False)
 
-    tick_marks = np.arange(n)
-    ax.set_xticks(tick_marks)
-    ax.set_yticks(tick_marks)
-    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_yticklabels(labels, fontsize=8)
-    ax.set_xlabel("Predicted", fontsize=10)
-    ax.set_ylabel("Ground Truth", fontsize=10)
-
-    # Add text annotations
-    thresh = confusion.max() / 2.0 if confusion.max() > 0 else 0.5
+    threshold = maximum * 0.50
     for i in range(n):
         for j in range(n):
             val = confusion[i, j]
@@ -357,26 +478,22 @@ def _render_confusion_matrix_image(confusion, class_names, title="Detection Conf
                 ax.text(
                     j, i, f"{int(val)}",
                     ha="center", va="center",
-                    color="white" if val > thresh else "black",
-                    fontsize=7,
+                    color="white" if val > threshold else "#202020",
+                    fontsize=29 if n <= 6 else (16 if n <= 10 else 13),
+                    fontfamily=_CONFUSION_MATRIX_FONT,
                 )
 
-    plt.tight_layout()
-
-    # Convert figure to numpy array (兼容新旧 matplotlib)
-    fig.canvas.draw()
-    w, h = fig.canvas.get_width_height()
-    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)[:, :, :3]
-    plt.close(fig)
-    return buf
+    return _figure_to_rgb(fig)
 
 
-def _render_normalized_confusion_matrix_image(confusion, class_names, title="Normalized Detection Confusion Matrix"):
-    """Render foreground-only GT-row-normalized confusion percentages."""
+def _render_normalized_confusion_matrix_image(
+    confusion, class_names, title="Foreground class consistency (%)"
+):
+    """Render a publication-style foreground GT-row percentage matrix."""
     num_classes = confusion.shape[0] - 1
     # Exclude the background row/column from both the display and normalization.
     foreground_confusion = confusion[:num_classes, :num_classes]
-    labels = [class_name_for_id(class_names, i) for i in range(num_classes)]
+    labels = _matrix_labels(class_names, num_classes, include_background=False)
     row_totals = foreground_confusion.sum(axis=1, keepdims=True)
     percentages = np.divide(
         foreground_confusion * 100.0,
@@ -386,37 +503,24 @@ def _render_normalized_confusion_matrix_image(confusion, class_names, title="Nor
     )
     n = num_classes
 
-    fig, ax = plt.subplots(figsize=(max(8, n * 1.0), max(6, n * 0.8)))
-    im = ax.imshow(percentages, interpolation="nearest", cmap="Blues", vmin=0.0, vmax=100.0)
-    ax.set_title(title, fontsize=12)
-    colorbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    colorbar.set_label("percentage (%)", fontsize=9)
-
-    tick_marks = np.arange(n)
-    ax.set_xticks(tick_marks)
-    ax.set_yticks(tick_marks)
-    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_yticklabels(labels, fontsize=8)
-    ax.set_xlabel("Predicted category", fontsize=10)
-    ax.set_ylabel("Ground truth category", fontsize=10)
+    fig, ax = _matrix_figure(labels, include_background=False)
+    ax.imshow(
+        percentages, interpolation="nearest", cmap="Blues", vmin=0.0, vmax=100.0
+    )
+    _style_matrix_axes(ax, labels, title)
 
     for i in range(n):
         for j in range(n):
             value = percentages[i, j]
             ax.text(
-                j, i, f"{value:.0f}%",
+                j, i, f"{value:.0f}",
                 ha="center", va="center",
-                color="white" if value >= 50.0 else "black",
-                fontsize=8,
-                fontweight="bold" if i == j else "normal",
+                color="white" if value >= 50.0 else "#202020",
+                fontsize=29 if n <= 6 else (16 if n <= 10 else 13),
+                fontfamily=_CONFUSION_MATRIX_FONT,
             )
 
-    plt.tight_layout()
-    fig.canvas.draw()
-    width, height = fig.canvas.get_width_height()
-    image = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(height, width, 4)[:, :, :3]
-    plt.close(fig)
-    return image
+    return _figure_to_rgb(fig)
 
 
 def write_confusion_matrix(
@@ -454,13 +558,13 @@ def write_confusion_matrix(
     # Write confusion matrix image
     img = _render_confusion_matrix_image(
         confusion, class_names,
-        title=f"Detection Confusion Matrix (IoU≥{iou_threshold}, Conf≥{conf_threshold})"
+        title="Detection confusion matrix"
     )
     # TensorBoard add_image expects (C, H, W) or (H, W, C) with dataformats
     writer.add_image(prefix, img, step, dataformats="HWC")
     normalized_img = _render_normalized_confusion_matrix_image(
         confusion, class_names,
-        title=f"Normalized Detection Confusion Matrix (IoU≥{iou_threshold}, Conf≥{conf_threshold})"
+        title="Foreground class consistency (%)"
     )
     writer.add_image(f"{prefix}/NormalizedPercent", normalized_img, step, dataformats="HWC")
 

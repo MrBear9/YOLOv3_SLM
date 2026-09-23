@@ -15,14 +15,14 @@ class ConfigSLM(OpticalConfig):
     CLASS_NAMES = None
     NUM_CLASSES = None
     # New hardware-aware 640x640 experiment; old single-pitch checkpoints are incompatible.
-    OUTPUT_DIR = r"output/SLM_Tv2_dmd640_contextdw_d20d10_p13_v2"
+    OUTPUT_DIR = r"output/SLM_Tv2_scratch_control_2gpu_seed42"
     VISUALIZATION_DIR = None
     LOG_ROOT_DIR = None
     LOG_FILE = None
     TIMESTAMP = None
     TRAIN_START_TIME = None
 
-    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_dmd640_contextdw_d20d10_p13_v2/teacher_detector_best.pth"
+    TEACHER_DETECTOR_CHECKPOINT = r"output/Tv2_scratch_control_2gpu_seed42/teacher_detector_best.pth"
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     GPU_IDS = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
@@ -47,6 +47,14 @@ class ConfigSLM(OpticalConfig):
     JOINT_FIT_EPOCHS = 30
     # Deployment normalization remains a separate hardware experiment.
     NORM_JOINT_EPOCHS = 0
+    # A transferable V4 checkpoint already supplies the exact validated static
+    # phase and matching detector. Use a short verification/adaptation schedule
+    # instead of repeating the 210-epoch random-phase search.
+    TEACHER_STATIC_PHASE_FOCUS_EPOCHS = 5
+    TEACHER_STATIC_DETECTOR_FOCUS_EPOCHS = 30
+    TEACHER_STATIC_PHASE_REFINE_EPOCHS = 20
+    TEACHER_STATIC_JOINT_FIT_EPOCHS = 30
+    TEACHER_STATIC_PHASE_FOCUS_LR = 3e-4
     EPOCHS = (
         PHASE_FOCUS_EPOCHS + DETECTOR_FOCUS_EPOCHS + PHASE_REFINE_EPOCHS
         + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
@@ -321,6 +329,13 @@ class ConfigSLM(OpticalConfig):
         cls.TEACHER_V2_ACTIVE_PIXEL_SHAPES = tuple(
             cls.slm_active_shape(index) for index in range(1, cls.TEACHER_V2_NUM_SLM_LAYERS + 1)
         )
+        if str(cls.SLM_INIT_MODE).strip().lower() == "teacher_static":
+            cls.PHASE_FOCUS_EPOCHS = cls.TEACHER_STATIC_PHASE_FOCUS_EPOCHS
+            cls.DETECTOR_FOCUS_EPOCHS = cls.TEACHER_STATIC_DETECTOR_FOCUS_EPOCHS
+            cls.PHASE_REFINE_EPOCHS = cls.TEACHER_STATIC_PHASE_REFINE_EPOCHS
+            cls.JOINT_FIT_EPOCHS = cls.TEACHER_STATIC_JOINT_FIT_EPOCHS
+            cls.NORM_JOINT_EPOCHS = 0
+            cls.PHASE_FOCUS_PHASE_PARAM_LR = cls.TEACHER_STATIC_PHASE_FOCUS_LR
         cls.EPOCHS = (
             cls.PHASE_FOCUS_EPOCHS + cls.DETECTOR_FOCUS_EPOCHS
             + cls.PHASE_REFINE_EPOCHS + cls.JOINT_FIT_EPOCHS

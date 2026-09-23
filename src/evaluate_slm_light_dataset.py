@@ -315,11 +315,11 @@ def save_outputs(output_dir, confusion, metrics, checkpoint, restore_info, args,
     percentages = np.divide(foreground * 100.0, foreground.sum(axis=1, keepdims=True), out=np.zeros_like(foreground), where=foreground.sum(axis=1, keepdims=True) > 0)
     Image.fromarray(_render_confusion_matrix_image(
         confusion, class_names,
-        title=f"{args.split} SLM + light Confusion Matrix (IoU >= {args.iou_threshold:.2f}, Conf >= {args.conf_threshold:.2f})",
+        title="Detection confusion matrix",
     )).save(output_dir / "confusion_matrix_counts_with_background.png")
     Image.fromarray(_render_normalized_confusion_matrix_image(
         confusion, class_names,
-        title=f"{args.split} SLM + light Foreground Normalized Matrix (IoU >= {args.iou_threshold:.2f}, Conf >= {args.conf_threshold:.2f})",
+        title="Foreground class consistency (%)",
     )).save(output_dir / "confusion_matrix_normalized_foreground_percent.png")
     np.savetxt(output_dir / "confusion_matrix_counts_with_background.csv", confusion.astype(np.int64), delimiter=",", fmt="%d")
     np.savetxt(output_dir / "confusion_matrix_normalized_foreground_percent.csv", percentages, delimiter=",", fmt="%.2f")

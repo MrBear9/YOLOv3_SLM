@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 
@@ -108,13 +107,13 @@ def teacher_slm_cipher_loss(config, teacher_aux):
         + edge_weight * F.relu(edge_mean - edge_limit)
     )
     return raw * weight, {
-        "slm_cipher": float(raw.detach().item()),
-        "slm_tv": float(tv.detach().item()),
-        "slm_hf": float(hf.detach().item()),
-        "slm_range": float(spatial_range.mean().detach().item()),
-        "slm_mean": float(mean_val.detach().item()),
-        "slm_peak": float(peak_mean.detach().item()),
-        "slm_edge": float(edge_mean.detach().item()),
+        "slm_cipher": raw.detach(),
+        "slm_tv": tv.detach(),
+        "slm_hf": hf.detach(),
+        "slm_range": spatial_range.mean().detach(),
+        "slm_mean": mean_val.detach(),
+        "slm_peak": peak_mean.detach(),
+        "slm_edge": edge_mean.detach(),
     }
 
 
@@ -135,68 +134,48 @@ def enhance_feature_for_display(feature_map):
 
 
 # =========================================================================
-# Feature distillation (teacher → detector)
+# Static-phase transfer constraint for V4
 # =========================================================================
 
 
-class FeatureDistillationLoss(nn.Module):
-    """Multi-scale feature distillation from teacher to detector.
+def _circular_total_variation(phase):
+    dx = phase[..., :, 1:] - phase[..., :, :-1]
+    dy = phase[..., 1:, :] - phase[..., :-1, :]
+    return 0.5 * ((1.0 - torch.cos(dx)).mean() + (1.0 - torch.cos(dy)).mean())
 
-    Projects teacher intermediate features (feat_scale2/4/8) to match
-    detector FPN features (s8/s16/s32) via learnable 1×1 convolutions,
-    then computes MSE at each scale.  Training-only.
+
+def teacher_phase_transfer_loss(config, teacher_aux):
+    """Keep V4's conditional residual small enough for a static SLM student.
+
+    The residual penalty is circular, so phases that differ by 2π remain
+    physically identical.  It replaces the old CNN-to-detector projection
+    loss whose projection parameters were outside both DDP and the optimizer.
     """
-
-    def __init__(self, teacher_feat_channels, detector_feat_channels):
-        super().__init__()
-        t8, t4, t2 = teacher_feat_channels
-        d8, d16, d32 = detector_feat_channels
-        self.proj_s8 = nn.Conv2d(t8, d8, 1)
-        self.proj_s16 = nn.Conv2d(t4, d16, 1)
-        self.proj_s32 = nn.Conv2d(t2, d32, 1)
-
-    def forward(self, teacher_aux, det_features):
-        loss_s8 = F.mse_loss(
-            self.proj_s8(teacher_aux["feat_scale8"]),
-            det_features["s8"],
-        )
-        t_s16 = F.adaptive_avg_pool2d(teacher_aux["feat_scale4"], det_features["s16"].shape[-2:])
-        loss_s16 = F.mse_loss(self.proj_s16(t_s16), det_features["s16"])
-        t_s32 = F.adaptive_avg_pool2d(teacher_aux["feat_scale2"], det_features["s32"].shape[-2:])
-        loss_s32 = F.mse_loss(self.proj_s32(t_s32), det_features["s32"])
-        total = loss_s8 + loss_s16 + loss_s32
-        stats = {
-            "distill_s8": float(loss_s8.detach().item()),
-            "distill_s16": float(loss_s16.detach().item()),
-            "distill_s32": float(loss_s32.detach().item()),
-            "distill_total": float(total.detach().item()),
+    residuals = () if teacher_aux is None else teacher_aux.get("phase_residuals", ())
+    weight = float(getattr(config, "TEACHER_V4_TRANSFER_LOSS_WEIGHT", 0.0))
+    if weight <= 0 or not residuals:
+        device = teacher_aux["det_feature"].device if teacher_aux is not None else "cpu"
+        zero = torch.zeros((), device=device)
+        static_only = teacher_aux.get("static_only_batch") if teacher_aux is not None else None
+        scale = teacher_aux.get("dynamic_phase_scale_rad") if teacher_aux is not None else None
+        return zero, {
+            "phase_transfer": 0.0,
+            "phase_residual_energy": 0.0,
+            "phase_residual_tv": 0.0,
+            "phase_residual_scale_rad": scale.detach() if scale is not None else 0.0,
+            "static_batch_fraction": static_only.detach() if static_only is not None else 0.0,
         }
-        return total, stats
 
-
-def build_feature_distillation_loss(config):
-    """Create FeatureDistillationLoss with channels inferred from config."""
-    arch = str(getattr(config, "TEACHER_ARCH", "convteacher_v2")).strip().lower()
-
-    # Teacher feature channels  {feat_scale8, feat_scale4, feat_scale2}
-    if arch in {"convteacher_v3", "v3"}:
-        c = int(getattr(config, "TEACHER_V3_BASE_CHANNELS", 24))
-        teacher_chs = (c, c * 2, c)
-    elif arch in {"convteacher_v2", "v2"}:
-        c = int(getattr(config, "TEACHER_V2_BASE_CHANNELS", 24))
-        teacher_chs = (c, c * 2, c)
-    else:
-        # ConvTeacher v1: refined s8 uses c1; lateral s4/s2 use c3=4*c1.
-        c = int(getattr(config, "TEACHER_V1_BASE_CHANNELS", 32))
-        teacher_chs = (c, c * 4, c * 4)
-
-    # Detector feature channels  {s8, s16, s32}
-    head_type = str(getattr(config, "DETECTOR_HEAD_TYPE", "light")).strip().lower()
-    if head_type in {"light", "yolo_light"}:
-        lc = int(getattr(config, "YOLO_LIGHT_BASE_CH", 8))
-        detector_chs = (lc * 8, lc * 8, lc * 8)
-    else:
-        dc = int(getattr(config, "YOLOV8_BASE_CHANNELS", 32))
-        detector_chs = (dc * 8, dc * 8, dc * 8)
-
-    return FeatureDistillationLoss(teacher_chs, detector_chs)
+    energy = torch.stack([(1.0 - torch.cos(value)).mean() for value in residuals]).mean()
+    residual_tv = torch.stack([_circular_total_variation(value) for value in residuals]).mean()
+    tv_weight = float(getattr(config, "TEACHER_V4_RESIDUAL_TV_WEIGHT", 0.1))
+    raw = energy + tv_weight * residual_tv
+    scale = teacher_aux.get("dynamic_phase_scale_rad")
+    static_only = teacher_aux.get("static_only_batch")
+    return raw * weight, {
+        "phase_transfer": raw.detach(),
+        "phase_residual_energy": energy.detach(),
+        "phase_residual_tv": residual_tv.detach(),
+        "phase_residual_scale_rad": scale.detach() if scale is not None else 0.0,
+        "static_batch_fraction": static_only.detach() if static_only is not None else 0.0,
+    }

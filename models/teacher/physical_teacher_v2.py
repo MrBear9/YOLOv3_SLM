@@ -47,6 +47,7 @@ class PhysicallyConstrainedTeacherV2(nn.Module):
         fourier_bands=8,
         fourier_low_pass_sigma=0.5,
         stage_depths=None,
+        create_phase_heads=True,
     ):
         super().__init__()
         c1 = int(base_channels)
@@ -120,7 +121,7 @@ class PhysicallyConstrainedTeacherV2(nn.Module):
         self.phase_heads = nn.ModuleList(
             PhasePredictionHead(c1)
             for _ in range(self.simulator.num_layers)
-        )
+        ) if create_phase_heads else nn.ModuleList()
 
     def refine_multiscale(self, x1, x2, x3):
         return x1, x2, x3
@@ -128,6 +129,13 @@ class PhysicallyConstrainedTeacherV2(nn.Module):
     def fuse_phase_features(self, coarse, detail, gray):
         return _interpolate_preserve_layout(coarse, size=gray.shape[-2:],
                                             mode="bilinear", align_corners=False)
+
+    def predict_phase_maps(self, phase_features, gray):
+        """Return phase maps and architecture-specific phase diagnostics."""
+        del gray
+        if len(self.phase_heads) != self.simulator.num_layers:
+            raise RuntimeError("Teacher phase heads were not constructed.")
+        return tuple(head(phase_features) for head in self.phase_heads), {}
 
     def forward(self, x, return_aux=False):
         if x.shape[1] > 1:
@@ -166,7 +174,7 @@ class PhysicallyConstrainedTeacherV2(nn.Module):
         )
         phase_features = self.fuse_phase_features(phase_features, x1, gray)
         phase_features = self.phase_refine(phase_features)
-        phase_maps = tuple(head(phase_features) for head in self.phase_heads)
+        phase_maps, phase_aux = self.predict_phase_maps(phase_features, gray)
         det_feature = self.simulator(gray, phase_maps)
 
         if not return_aux:
@@ -181,6 +189,7 @@ class PhysicallyConstrainedTeacherV2(nn.Module):
             "phase_maps": phase_maps,
             "physics": self.simulator.physics_metadata(),
         }
+        aux.update(phase_aux)
         for index, phase_map in enumerate(phase_maps, start=1):
             aux[f"phase_map_{index}"] = phase_map
         return aux

@@ -33,6 +33,11 @@ def configure_teacher_checkpoint(config, path):
     for key, attr in {
         "teacher_v4_base_channels": "TEACHER_V4_BASE_CHANNELS",
         "teacher_v4_depths": "TEACHER_V4_DEPTHS",
+        "teacher_v4_fusion_depth": "TEACHER_V4_FUSION_DEPTH",
+        "teacher_v4_residual_start_rad": "TEACHER_V4_RESIDUAL_START_RAD",
+        "teacher_v4_residual_end_rad": "TEACHER_V4_RESIDUAL_END_RAD",
+        "teacher_v4_static_batch_prob": "TEACHER_V4_STATIC_BATCH_PROB",
+        "teacher_v4_static_eval": "TEACHER_V4_STATIC_EVAL",
         "global_local_context_grid": "GLOBAL_LOCAL_CONTEXT_GRID",
         "teacher_depths": "GLOBAL_LOCAL_TEACHER_DEPTHS",
         "detector_depths": "GLOBAL_LOCAL_DETECTOR_DEPTHS",

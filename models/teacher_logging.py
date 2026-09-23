@@ -92,7 +92,19 @@ def log_all_parameters():
             f"distances={Config.TEACHER_V2_PROP_DISTANCES}",
         )
     if arch_lower in {"physical_teacher_v4", "v4"}:
-        log_to_file(Config, f"V4 CNN: depths={Config.TEACHER_V4_DEPTHS}, base={Config.TEACHER_V4_BASE_CHANNELS}; scratch training")
+        log_to_file(
+            Config,
+            f"V4 transferable CNN: depths={Config.TEACHER_V4_DEPTHS}, "
+            f"fusion_depth={Config.TEACHER_V4_FUSION_DEPTH}, "
+            f"base={Config.TEACHER_V4_BASE_CHANNELS}, "
+            f"static_phase_init=±{Config.TEACHER_V4_STATIC_PHASE_INIT_RANGE_RAD} rad, "
+            f"residual={Config.TEACHER_V4_RESIDUAL_START_RAD}->"
+            f"{Config.TEACHER_V4_RESIDUAL_END_RAD} rad, "
+            f"static_batch_prob={Config.TEACHER_V4_STATIC_BATCH_PROB}, "
+            f"static_eval={Config.TEACHER_V4_STATIC_EVAL}, "
+            f"transfer_weight={Config.TEACHER_V4_TRANSFER_LOSS_WEIGHT}, "
+            f"static_phase_lr_mult={Config.TEACHER_V4_STATIC_PHASE_LR_MULT}",
+        )
     log_to_file(Config, f"Teacher parameters: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
     log_to_file(Config, f"Detector head type: {Config.DETECTOR_HEAD_TYPE}")
     log_to_file(Config, f"Detector parameters: {sum(p.numel() for p in detector.parameters() if p.requires_grad):,}")
@@ -105,9 +117,14 @@ def log_all_parameters():
             f"{Config.TEACHER_V3_RESIDUAL_L1_WEIGHT}/"
             f"{Config.TEACHER_V3_OUTPUT_DEVIATION_WEIGHT}",
         )
-    if getattr(Config, "ENABLE_FEATURE_DISTILL", False):
-        log_to_file(Config, f"Feature distillation: weight={Config.FEATURE_DISTILL_WEIGHT}")
     log_to_file(Config, f"AMP: enabled={Config.ENABLE_AMP}, dtype={Config.AMP_DTYPE}")
+    log_to_file(
+        Config,
+        f"Performance: deterministic={Config.DETERMINISTIC_TRAINING}, "
+        f"cudnn_benchmark={Config.ENABLE_CUDNN_BENCHMARK}, "
+        f"channels_last={Config.ENABLE_CHANNELS_LAST}, workers={Config.NUM_WORKERS}, "
+        f"val_interval={Config.VAL_INTERVAL}, grad_clip={Config.TEACHER_GRAD_CLIP_NORM}",
+    )
     log_to_file(
         Config,
         f"Teacher SLM-cipher loss: weight={Config.TEACHER_SLM_CIPHER_LOSS_WEIGHT}, "

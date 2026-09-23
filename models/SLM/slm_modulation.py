@@ -155,11 +155,11 @@ class SLMLayer(nn.Module):
             radius2 = xx.square() + yy.square()
             phase = charge * theta + radial_scale * np.pi * radius2
             return self._wrap_with_noise(phase, height, width)
-        if init_mode == "checkpoint":
+        if init_mode in {"checkpoint", "teacher_static"}:
             # The train setup replaces this neutral phase with the checkpoint.
             return torch.zeros(1, 1, *resolution)
         raise ValueError(
-            "SLM_INIT_MODE must be one of: zero, random, vortex, checkpoint; "
+            "SLM_INIT_MODE must be one of: zero, random, vortex, checkpoint, teacher_static; "
             f"got {init_mode!r}."
         )
 

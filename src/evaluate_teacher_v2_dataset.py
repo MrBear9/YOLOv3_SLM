@@ -286,12 +286,12 @@ def write_results(output_dir, confusion, metrics, checkpoint, args, dataset_size
     Image.fromarray(_render_confusion_matrix_image(
         confusion,
         class_names,
-        title=f"{args.split} Detection Confusion Matrix (IoU >= {args.iou_threshold:.2f}, Conf >= {args.conf_threshold:.2f})",
+        title="Detection confusion matrix",
     )).save(output_dir / "confusion_matrix_counts_with_background.png")
     Image.fromarray(_render_normalized_confusion_matrix_image(
         confusion,
         class_names,
-        title=f"{args.split} Foreground Normalized Confusion Matrix (IoU >= {args.iou_threshold:.2f}, Conf >= {args.conf_threshold:.2f})",
+        title="Foreground class consistency (%)",
     )).save(output_dir / "confusion_matrix_normalized_foreground_percent.png")
     np.savetxt(output_dir / "confusion_matrix_counts_with_background.csv", confusion.astype(np.int64), delimiter=",", fmt="%d")
     np.savetxt(output_dir / "confusion_matrix_normalized_foreground_percent.csv", normalized, delimiter=",", fmt="%.2f")

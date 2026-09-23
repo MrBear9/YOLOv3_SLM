@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 from models.dataset import YOLODataset, build_class_balanced_train_sampler, identity_collate
 from models.runtime import (
+    DistributedEvalSampler,
     append_plain_log,
     cleanup_distributed,
     get_dataloader_kwargs,
@@ -32,7 +33,7 @@ from models.runtime import (
 )
 from models.teacher import build_teacher
 from models.teacher_guidance import (
-    build_feature_distillation_loss,
+    teacher_phase_transfer_loss,
     teacher_slm_cipher_loss,
 )
 from models.teacher_logging import bootstrap_runtime, log_all_parameters, write_teacher_tensorboard_scalars
@@ -76,11 +77,22 @@ def _checkpoint_payload(model, epoch, loss_value, val_map50):
         "detection_protocol": "anchor_free_tal",
         "architecture_revision": getattr(teacher, "architecture_revision", "contextdw_v1"),
         "teacher_v4_base_channels": getattr(Config, "TEACHER_V4_BASE_CHANNELS", 32),
-        "teacher_v4_depths": getattr(Config, "TEACHER_V4_DEPTHS", (3, 5, 5, 3)),
+        "teacher_v4_depths": getattr(Config, "TEACHER_V4_DEPTHS", (2, 3, 3, 2)),
+        "teacher_v4_fusion_depth": getattr(Config, "TEACHER_V4_FUSION_DEPTH", 1),
+        "teacher_v4_residual_start_rad": getattr(Config, "TEACHER_V4_RESIDUAL_START_RAD", 0.0),
+        "teacher_v4_residual_end_rad": getattr(Config, "TEACHER_V4_RESIDUAL_END_RAD", 0.0),
+        "teacher_v4_static_batch_prob": getattr(Config, "TEACHER_V4_STATIC_BATCH_PROB", 0.0),
+        "teacher_v4_static_eval": getattr(Config, "TEACHER_V4_STATIC_EVAL", True),
         "global_local_context_grid": Config.GLOBAL_LOCAL_CONTEXT_GRID,
         "teacher_depths": Config.GLOBAL_LOCAL_TEACHER_DEPTHS,
         "detector_depths": Config.GLOBAL_LOCAL_DETECTOR_DEPTHS,
     }
+    if hasattr(teacher, "export_static_phases"):
+        payload["teacher_static_phase_keys"] = tuple(
+            f"static_phases.{index}"
+            for index, _ in enumerate(teacher.export_static_phases())
+        )
+        payload["teacher_static_phase_convention"] = "raw_radians_student_phase_raw"
     return payload
 
 
@@ -112,7 +124,7 @@ def _write_teacher_tensorboard_model_summary(writer, model):
         f"Input tensor: (B, 1, {Config.RESOLUTION[0]}, {Config.RESOLUTION[1]})",
         f"Detection strides: {Config.ANCHOR_FREE_STRIDES}",
         f"AMP enabled: {Config.ENABLE_AMP}",
-        f"Feature distillation enabled: {getattr(Config, 'ENABLE_FEATURE_DISTILL', False)}",
+        f"Static-transfer teacher: {hasattr(teacher, 'export_static_phases')}",
     ])
     param_text = "\n".join([
         f"TeacherWithDetector parameters: {_module_param_count(model_core):,}",
@@ -132,16 +144,55 @@ def _write_teacher_tensorboard_model_summary(writer, model):
     writer.add_text("Model/parameters", param_text, 0)
 
 
+def _phase_image_chw(phase_tensor):
+    """Return one detached phase map in TensorBoard's single-channel CHW format."""
+    phase = phase_tensor.detach().float().cpu()
+    if phase.ndim == 4:
+        phase = phase[0]
+    if phase.ndim == 2:
+        phase = phase.unsqueeze(0)
+    if phase.ndim != 3:
+        raise ValueError(
+            "A phase image must have shape [B,C,H,W], [C,H,W], or [H,W], "
+            f"but received {tuple(phase.shape)}"
+        )
+    if phase.shape[0] != 1:
+        phase = phase[:1]
+    return phase
+
+
 def _write_physical_teacher_phase_maps(writer, step, teacher_aux):
-    """Record predicted V2 phase maps without retaining their training graph."""
+    """Record physical-teacher phase maps without retaining their training graph."""
     if writer is None or teacher_aux is None:
         return
     for index, phase_map in enumerate(teacher_aux.get("phase_maps", ()), start=1):
-        # add_image expects CHW; retain only the first sample, not its batch axis.
-        phase = phase_map[0].detach().float().cpu()
+        phase = _phase_image_chw(phase_map)
         phase_image = (phase + torch.pi) / (2.0 * torch.pi)
-        writer.add_image(f"TeacherV2/phase_map_{index}", phase_image.clamp(0.0, 1.0), step)
+        writer.add_image(
+            f"TeacherV2/phase_map_{index}",
+            phase_image.clamp(0.0, 1.0),
+            step,
+            dataformats="CHW",
+        )
         add_tensorboard_scalar(writer, f"TeacherV2/phase_map_{index}_abs_mean", phase.abs().mean(), step)
+    for index, phase_map in enumerate(teacher_aux.get("static_phase_maps", ()), start=1):
+        phase = _phase_image_chw(phase_map)
+        phase_image = torch.remainder(phase, 2.0 * torch.pi) / (2.0 * torch.pi)
+        writer.add_image(
+            f"TeacherV4/static_phase_{index}", phase_image, step, dataformats="CHW"
+        )
+    for index, residual_map in enumerate(teacher_aux.get("phase_residuals", ()), start=1):
+        residual = _phase_image_chw(residual_map)
+        limit = max(float(residual.abs().amax().item()), 1e-6)
+        writer.add_image(
+            f"TeacherV4/residual_phase_{index}",
+            (0.5 + residual / (2.0 * limit)).clamp(0.0, 1.0),
+            step,
+            dataformats="CHW",
+        )
+        add_tensorboard_scalar(
+            writer, f"TeacherV4/residual_phase_{index}_abs_mean", residual.abs().mean(), step
+        )
 
 
 def _collect_teacher_val_detections(config, model, val_loader, device):
@@ -197,6 +248,7 @@ def train():
     )
     device = get_runtime_device(Config)
     if device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
         torch.backends.cudnn.benchmark = Config.ENABLE_CUDNN_BENCHMARK
         if hasattr(torch.backends.cudnn, "allow_tf32"):
             torch.backends.cudnn.allow_tf32 = Config.ENABLE_TF32
@@ -245,12 +297,6 @@ def train():
     model = wrap_data_parallel(Config, TeacherWithDetector(Config, teacher=teacher, detector=detector), module_name="TeacherWithDetector")
     set_detector_trainable(model, True)
 
-    distill_loss_fn = None
-    enable_distill = bool(getattr(Config, "ENABLE_FEATURE_DISTILL", False))
-    if enable_distill:
-        distill_loss_fn = build_feature_distillation_loss(Config).to(device)
-        log_to_file(Config, f"Feature distillation enabled, weight={Config.FEATURE_DISTILL_WEIGHT}")
-
     train_dataset = YOLODataset(Config, split="train")
     train_sampler = None
     if use_ddp and Config.USE_CLASS_BALANCED_SAMPLER:
@@ -278,11 +324,12 @@ def train():
     try:
         val_dataset = YOLODataset(Config, split="val")
         if len(val_dataset) > 0:
+            val_sampler = DistributedEvalSampler(val_dataset) if use_ddp else None
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=Config.BATCH_SIZE,
                 collate_fn=identity_collate,
-                **get_dataloader_kwargs(Config, shuffle=False),
+                **get_dataloader_kwargs(Config, shuffle=False, sampler=val_sampler),
             )
     except Exception as exc:
         log_to_file(Config, f"Validation dataset unavailable: {exc}")
@@ -325,6 +372,9 @@ def train():
         if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
             train_sampler.set_epoch(epoch)
         model.train()
+        teacher_core = unwrap_module(model).teacher
+        if hasattr(teacher_core, "set_training_progress"):
+            teacher_core.set_training_progress(epoch, Config.EPOCHS)
         last_teacher_aux = None
         train_component_sums = {
             "total": 0.0,
@@ -342,6 +392,11 @@ def train():
             "slm_mean": 0.0,
             "slm_peak": 0.0,
             "slm_edge": 0.0,
+            "phase_transfer": 0.0,
+            "phase_residual_energy": 0.0,
+            "phase_residual_tv": 0.0,
+            "phase_residual_scale_rad": 0.0,
+            "static_batch_fraction": 0.0,
         }
         stage_settings = Config.get_stage_settings(epoch)
         if resume_checkpoint is not None:
@@ -358,17 +413,18 @@ def train():
             scheduler = CosineAnnealingLR(optimizer, T_max=remaining, eta_min=Config.ETA_MIN)
             log_to_file(Config, f"Epoch {epoch}: phase={phase}, teacher_lr={stage_settings['teacher_lr']:.6g}, detector_lr={stage_settings['detector_lr']:.6g}, cosine_T_max={remaining}")
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True, disable=not is_main):
+        for batch_index, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}/{Config.EPOCHS} [{phase}]", leave=True, disable=not is_main)):
             batch_images, batch_targets = prepare_batch(Config, batch, device)
-            optimizer.zero_grad()
-            use_distill = enable_distill and distill_loss_fn is not None
+            optimizer.zero_grad(set_to_none=True)
             use_slm_cipher = Config.TEACHER_SLM_CIPHER_LOSS_WEIGHT > 0
+            if hasattr(teacher_core, "set_static_batch"):
+                probability = float(getattr(Config, "TEACHER_V4_STATIC_BATCH_PROB", 0.0))
+                cycle_position = (
+                    (epoch * max(len(train_loader), 1) + batch_index) * 37
+                ) % 100
+                teacher_core.set_static_batch(cycle_position < int(round(probability * 100)))
             with amp_context():
-                if use_distill:
-                    teacher_features, predictions, teacher_aux, det_features = model(
-                        batch_images, return_feature=True, return_teacher_aux=True, return_det_features=True
-                    )
-                elif is_v3 or is_physical_v2 or use_slm_cipher:
+                if is_v3 or is_physical_v2 or use_slm_cipher:
                     teacher_features, predictions, teacher_aux = model(
                         batch_images, return_feature=True, return_teacher_aux=True
                     )
@@ -376,22 +432,40 @@ def train():
                     teacher_features, predictions = model(batch_images, return_feature=True)
                     teacher_aux = None
 
-                if is_physical_v2 and is_main:
-                    last_teacher_aux = {"phase_maps": tuple(
-                        p[:1].detach() for p in teacher_aux.get("phase_maps", ())
-                    )}
+                capture_interval = int(getattr(Config, "MONITOR_INTERVAL", 0))
+                capture_phase = (
+                    is_physical_v2
+                    and is_main
+                    and capture_interval > 0
+                    and (epoch + 1) % capture_interval == 0
+                    and batch_index + 1 == len(train_loader)
+                )
+                if capture_phase:
+                    last_teacher_aux = {
+                        key: tuple(value[:1].detach() for value in teacher_aux.get(key, ()))
+                        for key in ("phase_maps", "static_phase_maps", "phase_residuals")
+                    }
 
                 loss, loss_stats = criterion(predictions, batch_targets)
-
-                if use_distill:
-                    distill_loss, _ = distill_loss_fn(teacher_aux, det_features)
-                    loss = loss + distill_loss * Config.FEATURE_DISTILL_WEIGHT
 
                 if use_slm_cipher:
                     slm_cipher_loss, slm_cipher_stats = teacher_slm_cipher_loss(Config, teacher_aux)
                     loss = loss + slm_cipher_loss
                     for key in ("slm_cipher", "slm_tv", "slm_hf", "slm_range", "slm_mean", "slm_peak", "slm_edge"):
                         train_component_sums[key] += slm_cipher_stats[key]
+
+                phase_transfer_loss, phase_transfer_stats = teacher_phase_transfer_loss(
+                    Config, teacher_aux
+                )
+                loss = loss + phase_transfer_loss
+                for key in (
+                    "phase_transfer",
+                    "phase_residual_energy",
+                    "phase_residual_tv",
+                    "phase_residual_scale_rad",
+                    "static_batch_fraction",
+                ):
+                    train_component_sums[key] += phase_transfer_stats[key]
 
 
                 if is_v3 and teacher_aux is not None:
@@ -406,18 +480,32 @@ def train():
                     )
 
             amp_scaler.scale(loss).backward()
-            amp_scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            clip_norm = float(getattr(Config, "TEACHER_GRAD_CLIP_NORM", 0.0))
+            monitor_interval = int(getattr(Config, "MONITOR_INTERVAL", 0))
+            monitor_gradients = (
+                monitor_interval > 0
+                and (epoch + 1) % monitor_interval == 0
+                and batch_index + 1 == len(train_loader)
+            )
+            if clip_norm > 0 or monitor_gradients:
+                amp_scaler.unscale_(optimizer)
+            if clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
             amp_scaler.step(optimizer)
             amp_scaler.update()
-            train_component_sums["total"] += float(loss.detach().item())
+            train_component_sums["total"] += loss.detach()
             for key in ("box", "obj", "noobj", "cls", "dfl", "positive_total", "positive_small"):
                 train_component_sums[key] += loss_stats.get(key, 0.0)
             for cls_id in range(Config.NUM_CLASSES):
                 key = f"positive_class_{cls_id}"
                 train_component_sums[key] = train_component_sums.get(key, 0.0) + loss_stats.get(key, 0.0)
 
-        avg_train = {key: value / max(len(train_loader), 1) for key, value in train_component_sums.items()}
+        avg_train = {
+            key: float((value / max(len(train_loader), 1)).detach().item())
+            if torch.is_tensor(value)
+            else value / max(len(train_loader), 1)
+            for key, value in train_component_sums.items()
+        }
         copy_paste_stats = train_dataset.get_copy_paste_stats(reset=True)
         avg_train.update({f"copy_paste_{key}": value for key, value in copy_paste_stats.items()})
         history["train_total"].append(avg_train["total"])
@@ -448,11 +536,23 @@ def train():
                 lr=current_lr,
             )
             # ── 梯度 & 参数监测 ──
-            write_gradient_monitoring(tensorboard_writer, model, epoch + 1, prefix="Grad")
-            write_parameter_monitoring(tensorboard_writer, model, epoch + 1, prefix="Param")
-            _write_physical_teacher_phase_maps(tensorboard_writer, epoch + 1, last_teacher_aux)
-            # ── 混淆矩阵（每 VIS_INTERVAL 个 epoch 或验证时）──
-            if val_loader is not None and (epoch + 1) % max(Config.VIS_INTERVAL, 1) == 0:
+            monitor_interval = int(getattr(Config, "MONITOR_INTERVAL", 0))
+            if monitor_interval > 0 and (epoch + 1) % monitor_interval == 0:
+                try:
+                    write_gradient_monitoring(tensorboard_writer, model, epoch + 1, prefix="Grad")
+                    write_parameter_monitoring(tensorboard_writer, model, epoch + 1, prefix="Param")
+                    _write_physical_teacher_phase_maps(
+                        tensorboard_writer, epoch + 1, last_teacher_aux
+                    )
+                except Exception as exc:
+                    # Monitoring must never terminate a long multi-GPU run.
+                    log_to_file(
+                        Config,
+                        f"TensorBoard monitoring skipped at epoch {epoch + 1}: {exc}",
+                    )
+            # Confusion-matrix collection is an optional second validation pass.
+            cm_interval = int(getattr(Config, "CONFUSION_MATRIX_INTERVAL", 0))
+            if val_loader is not None and cm_interval > 0 and (epoch + 1) % cm_interval == 0:
                 cm_dets, cm_targets = _collect_teacher_val_detections(Config, model, val_loader, device)
                 write_confusion_matrix(
                     tensorboard_writer, cm_dets, cm_targets,

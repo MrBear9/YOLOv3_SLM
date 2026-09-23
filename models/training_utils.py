@@ -82,10 +82,26 @@ def build_optimizer_from_model(config, model, teacher_lr=None, detector_lr=None)
     teacher_lr = config.LEARNING_RATE if teacher_lr is None else teacher_lr
     detector_lr = config.LEARNING_RATE if detector_lr is None else detector_lr
     param_groups = []
-    teacher_params = [p for p in model_core.teacher.parameters() if p.requires_grad]
+    static_phase_params = []
+    teacher_params = []
+    for name, parameter in model_core.teacher.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if name.startswith("static_phases."):
+            static_phase_params.append(parameter)
+        else:
+            teacher_params.append(parameter)
     detector_params = [p for p in model_core.detector.parameters() if p.requires_grad]
     if teacher_params:
         param_groups.append({"params": teacher_params, "lr": teacher_lr, "role": "teacher"})
+    if static_phase_params:
+        phase_multiplier = float(getattr(config, "TEACHER_V4_STATIC_PHASE_LR_MULT", 3.0))
+        param_groups.append({
+            "params": static_phase_params,
+            "lr": teacher_lr * phase_multiplier,
+            "weight_decay": 0.0,
+            "role": "teacher_static_phase",
+        })
     if detector_params:
         param_groups.append({"params": detector_params, "lr": detector_lr, "role": "detector"})
     if not param_groups:

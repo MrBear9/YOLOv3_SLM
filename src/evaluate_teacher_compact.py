@@ -102,7 +102,7 @@ def main():
     image = _render_confusion_matrix_image(
         confusion,
         Config.CLASS_NAMES,
-        title=f"Detection Confusion Matrix (IoU>={iou_threshold}, Conf>={conf_threshold})",
+        title="Detection confusion matrix",
     )
     Image.fromarray(image).save(output_path)
 

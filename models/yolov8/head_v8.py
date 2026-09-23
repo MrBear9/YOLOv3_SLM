@@ -66,11 +66,10 @@ class TeacherWithDetector(nn.Module):
         self.teacher = build_teacher(config) if teacher is None else teacher
         self.detector = build_detector_head(config, in_channels=1) if detector is None else detector
 
-    def forward(self, x, return_feature=False, return_teacher_aux=False, return_det_features=False):
+    def forward(self, x, return_feature=False, return_teacher_aux=False):
         x = prepare_conv_tensor(self.config, x)
-        need_aux = return_teacher_aux or return_det_features
-        teacher_out = self.teacher(x, return_aux=need_aux)
-        teacher_feature = teacher_out["det_feature"] if need_aux else teacher_out
+        teacher_out = self.teacher(x, return_aux=return_teacher_aux)
+        teacher_feature = teacher_out["det_feature"] if return_teacher_aux else teacher_out
 
         # Conditionally invert for YOLO detector: optical features have dark targets
         # (low values), but YOLO expects bright targets (high values).  When enabled,
@@ -80,13 +79,9 @@ class TeacherWithDetector(nn.Module):
         # distributions stay in a reasonable regime.
         det_input = prepare_detector_feature(self.config, teacher_feature)
 
-        det_out = self.detector(prepare_conv_tensor(self.config, det_input), return_features=return_det_features)
-        if return_det_features:
-            detections, det_features = det_out
-        else:
-            detections, det_features = det_out, None
+        detections = self.detector(prepare_conv_tensor(self.config, det_input))
 
-        if not return_feature and not need_aux:
+        if not return_feature and not return_teacher_aux:
             return detections
         result = []
         if return_feature:
@@ -94,6 +89,4 @@ class TeacherWithDetector(nn.Module):
         result.append(detections)
         if return_teacher_aux:
             result.append(teacher_out)
-        if return_det_features:
-            result.append(det_features)
         return tuple(result)
