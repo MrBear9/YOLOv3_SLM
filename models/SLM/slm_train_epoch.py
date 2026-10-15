@@ -25,8 +25,7 @@ from models.SLM.slm_utils import (
 )
 from models.SLM.utils_slm import (
     collect_slm_statistics,
-    save_detector_best,
-    save_student_best,
+    save_validation_pair,
 )
 from models.monitoring import write_confusion_matrix, write_gradient_monitoring, write_parameter_monitoring
 from models.runtime import gather_detection_results, log_epoch_table_row, log_to_file
@@ -89,6 +88,9 @@ def run_epoch(
     for batch_index, batch in enumerate(tqdm(train_loader, desc=f"Epoch {global_epoch + 1}/{Config.EPOCHS} [{stage_name}]", leave=True, disable=not is_main)):
         gray, rgb, targets = prepare_batch(batch, device)
         optimizer.zero_grad(set_to_none=True)
+        # DDP may keep an excluded phase active in autograd. Its stale gradient
+        # must not accumulate across batches or enter clipping of active layers.
+        student_raw.zero_grad(set_to_none=True)
         teacher_feature = None
         if stage_weights["feature"] > 0 or stage_weights["response"] > 0:
             with torch.no_grad():
@@ -145,7 +147,7 @@ def run_epoch(
             phase_grad_norm = sum(value * value for value in phase_grad_norms.values()) ** 0.5
             phase_grad_samples += 1
         if stage_name in {"phase_refine", "joint_fit", "norm_joint"}:
-            clipped_norm = clip_phase_grad_norm(student_raw, Config.PHASE_GRAD_CLIP_NORM)
+            clipped_norm = clip_phase_grad_norm(student_raw, Config.PHASE_GRAD_CLIP_NORM, optimizer=optimizer)
             if monitor_phase_grad and clipped_norm is not None:
                 phase_grad_norm = min(clipped_norm, Config.PHASE_GRAD_CLIP_NORM)
         if monitor_phase_grad:
@@ -162,6 +164,12 @@ def run_epoch(
         epoch_response_t += response_loss.detach()
         epoch_phase_regularization_t += phase_regularization_loss_value.detach()
 
+    # Record the rates actually used, before advancing to the next epoch.
+    current_lr = max(group["lr"] for group in optimizer.param_groups)
+    lr_by_group = {}
+    for group in optimizer.param_groups:
+        group_name = group.get("slm_group", "detector" if stage_name == "detector_focus" else "other")
+        lr_by_group[group_name] = max(lr_by_group.get(group_name, 0.0), float(group["lr"]))
     if scheduler is not None:
         scheduler.step()
 
@@ -203,6 +211,12 @@ def run_epoch(
     history["train_phase_regularization"].append(avg_phase_regularization)
     display_epoch = global_epoch + 1
     slm_stats = collect_slm_statistics(student_raw)
+    if hasattr(optimizer, "phase_gain_statistics"):
+        gain_stats = optimizer.phase_gain_statistics()
+        slm_stats.update(gain_stats)
+        log_to_file(Config, "Phase modulation gains: " + ", ".join(
+            f"{key}={value:.4f}" for key, value in gain_stats.items()
+        ))
     # Direct-SGD has no preferred phase histogram; diagnostics cannot veto a
     # checkpoint selected by validation detection performance.
     slm_ok = True
@@ -254,12 +268,6 @@ def run_epoch(
                      "precision", "recall", "f1", "map50",
                      "precision_op", "recall_op", "f1_op"):
             history[key].append(np.nan)
-    current_lr = max(group["lr"] for group in optimizer.param_groups)
-    lr_by_group = {}
-    for group in optimizer.param_groups:
-        group_name = group.get("slm_group", "detector" if stage_name == "detector_focus" else "other")
-        lr_by_group[group_name] = max(lr_by_group.get(group_name, 0.0), float(group["lr"]))
-
     # TensorBoard & checkpoint
     if is_main:
         write_slm_tensorboard_scalars(
@@ -369,59 +377,11 @@ def run_epoch(
     best_checkpoint_path = None
     if stage_name in detector_stages and detector_score_is_best:
         best_detector_loss = avg_total
-        if is_main:
-            save_detector_best(
-                detector_raw := ctx["detector_raw"],
-                Config.get_detector_best_path(),
-                display_epoch,
-                avg_total,
-                extra={
-                    "train_loss": avg_total,
-                    "val_loss": val_losses["total"] if val_losses is not None else None,
-                    "val_map50": best_map50 if val_metrics is not None else None,
-                    "selection_metric": "detector_val_map50" if val_metrics is not None else "detector_train_loss",
-                    "recommended_inference_checkpoint": True,
-                    "paired_student_source": "student_state_dict",
-                    "paired_student_epoch": display_epoch,
-                    "paired_student_stage": stage_name,
-                    "detector_head_type": Config.DETECTOR_HEAD_TYPE,
-                    "detection_protocol": "anchor_free_tal",
-                    "light_base_ch": Config.YOLO_LIGHT_BASE_CH,
-                    "shared_detector_head": True,
-                    "architecture_revision": "contextdw_v1",
-                    "feature_loss_revision": "gt_local_invariant_v1",
-                    "teacher_detector_sha256": ctx["teacher_checkpoint_sha256"],
-                    "student_norm_mode": Config.STUDENT_NORM_MODE,
-                    "student_norm_schedule": Config.STUDENT_NORM_SCHEDULE,
-                    "slm_stats": slm_stats,
-                    "slm_quality_passed": bool(slm_ok),
-                },
-                student=student_raw,
-                config=Config,
-            )
-            save_student_best(
-                Config,
-                student_raw,
-                Config.get_student_best_path(),
-                display_epoch,
-                avg_total,
-                extra={
-                    "train_loss": avg_total,
-                    "val_loss": val_losses["total"] if val_losses is not None else None,
-                    "slm_stats": slm_stats,
-                    "val_map50": best_map50 if val_metrics is not None else None,
-                    "paired_with_detector_best": True,
-                    "paired_detector_checkpoint": Config.get_detector_best_path(),
-                    "paired_student_epoch": display_epoch,
-                    "paired_student_stage": stage_name,
-                    "selection_metric": "paired_detector_val_map50" if val_metrics is not None else "paired_detector_train_loss",
-                    "recommended_inference_checkpoint": False,
-                    "student_norm_mode": Config.STUDENT_NORM_MODE,
-                    "student_norm_schedule": Config.STUDENT_NORM_SCHEDULE,
-                    "slm_quality_passed": bool(slm_ok),
-                },
-            )
-            best_checkpoint_path = Config.get_detector_best_path()
+        best_checkpoint_path = save_validation_pair(
+            Config, ctx, display_epoch, stage_name, avg_total,
+            val_losses["total"] if val_losses is not None else None,
+            best_map50 if val_metrics is not None else None, slm_stats, slm_ok,
+        )
         best_student_map50 = max(best_student_map50, best_map50)
 
     # Visualization

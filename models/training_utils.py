@@ -107,6 +107,17 @@ def build_optimizer_from_model(config, model, teacher_lr=None, detector_lr=None)
     if not param_groups:
         raise ValueError("No trainable parameters found when building optimizer.")
     optimizer_name = str(getattr(config, "OPTIMIZER", "Adam")).strip()
+    gain_lr = float(getattr(config, "TEACHER_V4_PHASE_GAIN_LR", 0.0))
+    if (str(getattr(config, "TEACHER_ARCH", "")).lower() in {"physical_teacher_v4", "v4"}
+            and static_phase_params and gain_lr > 0):
+        from models.phase_optimizer import PhaseGainAdam, PhaseGainAdamW
+        for group in param_groups:
+            if group.get("role") == "teacher_static_phase":
+                group["phase_gain_names"] = [f"slm{i + 1}" for i in range(len(group["params"]))]
+                group["phase_gain_lr"] = gain_lr
+                group["phase_gain_reference_lr"] = group["lr"]
+        optimizer_class = PhaseGainAdamW if optimizer_name.lower() == "adamw" else PhaseGainAdam
+        return optimizer_class(param_groups, weight_decay=config.WEIGHT_DECAY)
     if optimizer_name.lower() == "adamw":
         return torch.optim.AdamW(param_groups, weight_decay=config.WEIGHT_DECAY)
     return torch.optim.Adam(param_groups, weight_decay=config.WEIGHT_DECAY)

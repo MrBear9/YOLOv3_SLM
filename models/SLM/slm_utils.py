@@ -206,6 +206,7 @@ def write_slm_tensorboard_scalars(
             if any(key.endswith(suffix) for suffix in (
                 "_raw_mean", "_raw_std", "_raw_range", "_circular_tv",
                 "_circular_high_freq", "_circular_variance", "_simulation_min", "_simulation_max",
+                "_modulation_gain",
             )):
                 add_tensorboard_scalar(writer, f"SLM/{stage_name}/{key}", value, step)
     add_tensorboard_scalar(writer, f"Grad/{stage_name}/phase_grad_norm", phase_grad_norm, step)
@@ -261,14 +262,18 @@ def collect_phase_grad_norm(student):
     return sum(value * value for value in collect_phase_grad_norms(student).values()) ** 0.5
 
 
-def clip_phase_grad_norm(student, max_norm):
+def clip_phase_grad_norm(student, max_norm, optimizer=None):
     max_norm = float(max_norm)
     if max_norm <= 0:
         return None
+    active = None if optimizer is None else {
+        id(parameter) for group in optimizer.param_groups for parameter in group["params"]
+    }
     params = [
         param
         for name, param in student.named_parameters()
         if is_phase_parameter(name) and param.requires_grad and param.grad is not None
+        and (active is None or id(param) in active)
     ]
     if not params:
         return None
@@ -408,6 +413,15 @@ def log_config():
         f"phase_refine={Config.PHASE_REFINE_EPOCHS}  joint={Config.JOINT_FIT_EPOCHS}  "
         f"norm_joint={Config.NORM_JOINT_EPOCHS}",
     )
+    if str(Config.SLM_INIT_MODE).lower() == "teacher_static":
+        log_to_file(
+            Config,
+            "V4 static transfer: head adaptation -> both-phase refinement; "
+            f"pixel LRs={Config.PHASE_REFINE_PHASE_PARAM_LR * Config.PHASE_REFINE_LR_MULT[1]:.6g}/"
+            f"{Config.PHASE_REFINE_PHASE_PARAM_LR * Config.PHASE_REFINE_LR_MULT[2]:.6g}; "
+            f"whole-layer gain LR={Config.TEACHER_STATIC_PHASE_GAIN_LR:.6g}; "
+            "gain range per stage=0.5..2.0, folded into raw phase, selected by validation mAP50.",
+        )
     log_to_file(
         Config,
         f"LR: phase={Config.PHASE_FOCUS_PHASE_PARAM_LR}  detector={Config.DETECTOR_LR}  "

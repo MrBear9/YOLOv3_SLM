@@ -312,6 +312,20 @@ def build_stage_optimizer(config, student, detector, stage_name):
             groups.append({"params": detector_params, "lr": detector_lr,
                           "weight_decay": config.WEIGHT_DECAY, "slm_group": "detector"})
 
+    gain_lr = float(getattr(config, "TEACHER_STATIC_PHASE_GAIN_LR", 0.0))
+    if (str(config.SLM_INIT_MODE).lower() == "teacher_static"
+            and str(config.TEACHER_ARCH).lower() in {"physical_teacher_v4", "v4"}
+            and stage_name == "phase_refine" and gain_lr > 0):
+        from models.phase_optimizer import PhaseGainAdam
+        phase_names = {
+            id(p): name.removesuffix(".phase_raw")
+            for name, p in student.named_parameters() if name.endswith(".phase_raw")
+        }
+        for group in groups:
+            group["phase_gain_names"] = [phase_names.get(id(p)) for p in group["params"]]
+            group["phase_gain_lr"] = gain_lr
+            group["phase_gain_reference_lr"] = group["lr"]
+        return PhaseGainAdam(groups, weight_decay=0.0)
     return torch.optim.Adam(groups, weight_decay=0.0)
 
 
@@ -420,6 +434,51 @@ def save_detector_best(detector, path, epoch, loss_value, extra=None,
     if extra:
         payload.update(extra)
     torch.save(payload, path)
+
+
+def save_validation_pair(config, ctx, epoch, stage, train_loss, val_loss, map50,
+                         slm_stats, slm_ok):
+    """Save a consistent student/head pair; return its path on every rank."""
+    path = config.get_detector_best_path()
+    if ctx["is_main"]:
+        extra = {
+            "train_loss": train_loss, "val_loss": val_loss, "val_map50": map50,
+            "selection_metric": "detector_val_map50" if map50 is not None else "detector_train_loss",
+            "recommended_inference_checkpoint": True,
+            "paired_student_source": "student_state_dict",
+            "paired_student_epoch": epoch, "paired_student_stage": stage,
+            "detector_head_type": config.DETECTOR_HEAD_TYPE,
+            "detection_protocol": "anchor_free_tal", "light_base_ch": config.YOLO_LIGHT_BASE_CH,
+            "shared_detector_head": True, "architecture_revision": "contextdw_v1",
+            "feature_loss_revision": "gt_local_invariant_v1",
+            "teacher_detector_sha256": ctx["teacher_checkpoint_sha256"],
+            "student_norm_mode": config.STUDENT_NORM_MODE,
+            "student_norm_schedule": config.STUDENT_NORM_SCHEDULE,
+            "slm_stats": slm_stats, "slm_quality_passed": bool(slm_ok),
+        }
+        save_detector_best(ctx["detector_raw"], path, epoch, train_loss, extra=extra,
+                           student=ctx["student_raw"], config=config)
+        save_student_best(config, ctx["student_raw"], config.get_student_best_path(),
+                          epoch, train_loss, extra={
+                              **extra, "paired_with_detector_best": True,
+                              "paired_detector_checkpoint": path,
+                              "recommended_inference_checkpoint": False,
+                              "selection_metric": "paired_detector_val_map50" if map50 is not None else "paired_detector_train_loss",
+                          })
+    # Caller must synchronize after writing, before another rank opens it.
+    return path
+
+
+@torch.no_grad()
+def synchronize_detector_buffers(detector):
+    """Evaluate one deployed model, not a mixture of per-rank BN statistics."""
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        for buffer in detector.buffers():
+            data = torch.view_as_real(buffer) if buffer.is_complex() else buffer
+            packed = data.contiguous()
+            torch.distributed.broadcast(packed, src=0)
+            if packed.data_ptr() != data.data_ptr():
+                data.copy_(packed)
 
 
 def _save_wrapped_phases(payload, student):

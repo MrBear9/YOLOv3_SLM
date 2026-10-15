@@ -47,14 +47,12 @@ class ConfigSLM(OpticalConfig):
     JOINT_FIT_EPOCHS = 30
     # Deployment normalization remains a separate hardware experiment.
     NORM_JOINT_EPOCHS = 0
-    # A transferable V4 checkpoint already supplies the exact validated static
-    # phase and matching detector. Use a short verification/adaptation schedule
-    # instead of repeating the 210-epoch random-phase search.
-    TEACHER_STATIC_PHASE_FOCUS_EPOCHS = 5
+    # V4 already supplies matching optical features: adapt the head, then
+    # refine both phases against detection labels. No redundant feature-only
+    # warmup or historically unhelpful final joint stage.
     TEACHER_STATIC_DETECTOR_FOCUS_EPOCHS = 30
     TEACHER_STATIC_PHASE_REFINE_EPOCHS = 20
-    TEACHER_STATIC_JOINT_FIT_EPOCHS = 30
-    TEACHER_STATIC_PHASE_FOCUS_LR = 3e-4
+    TEACHER_STATIC_PHASE_GAIN_LR = 1e-3
     EPOCHS = (
         PHASE_FOCUS_EPOCHS + DETECTOR_FOCUS_EPOCHS + PHASE_REFINE_EPOCHS
         + JOINT_FIT_EPOCHS + NORM_JOINT_EPOCHS
@@ -330,12 +328,7 @@ class ConfigSLM(OpticalConfig):
             cls.slm_active_shape(index) for index in range(1, cls.TEACHER_V2_NUM_SLM_LAYERS + 1)
         )
         if str(cls.SLM_INIT_MODE).strip().lower() == "teacher_static":
-            cls.PHASE_FOCUS_EPOCHS = cls.TEACHER_STATIC_PHASE_FOCUS_EPOCHS
-            cls.DETECTOR_FOCUS_EPOCHS = cls.TEACHER_STATIC_DETECTOR_FOCUS_EPOCHS
-            cls.PHASE_REFINE_EPOCHS = cls.TEACHER_STATIC_PHASE_REFINE_EPOCHS
-            cls.JOINT_FIT_EPOCHS = cls.TEACHER_STATIC_JOINT_FIT_EPOCHS
-            cls.NORM_JOINT_EPOCHS = 0
-            cls.PHASE_FOCUS_PHASE_PARAM_LR = cls.TEACHER_STATIC_PHASE_FOCUS_LR
+            cls.configure_teacher_static_training()
         cls.EPOCHS = (
             cls.PHASE_FOCUS_EPOCHS + cls.DETECTOR_FOCUS_EPOCHS
             + cls.PHASE_REFINE_EPOCHS + cls.JOINT_FIT_EPOCHS
@@ -354,6 +347,23 @@ class ConfigSLM(OpticalConfig):
         os.makedirs(cls.VISUALIZATION_DIR, exist_ok=True)
         cls.TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
         cls.LOG_FILE = os.path.join(cls.LOG_ROOT_DIR, f"training_log_{cls.TIMESTAMP}.txt")
+
+    @classmethod
+    def configure_teacher_static_training(cls):
+        """V4-only transfer schedule; copy inherited maps before changing them."""
+        if str(cls.TEACHER_ARCH).lower() not in {"physical_teacher_v4", "v4"}:
+            raise ValueError("teacher-static initialization requires a V4 teacher checkpoint.")
+        if cls.TEACHER_STATIC_PHASE_GAIN_LR < 0:
+            raise ValueError("TEACHER_STATIC_PHASE_GAIN_LR must be non-negative.")
+        cls.PHASE_FOCUS_EPOCHS = cls.JOINT_FIT_EPOCHS = cls.NORM_JOINT_EPOCHS = 0
+        cls.DETECTOR_FOCUS_EPOCHS = cls.TEACHER_STATIC_DETECTOR_FOCUS_EPOCHS
+        cls.PHASE_REFINE_EPOCHS = cls.TEACHER_STATIC_PHASE_REFINE_EPOCHS
+        cls.PHASE_TRAINABLE_LAYERS = {
+            **cls.PHASE_TRAINABLE_LAYERS,
+            "phase_refine": {i: True for i in range(1, cls.TEACHER_V2_NUM_SLM_LAYERS + 1)},
+        }
+        cls.PHASE_REFINE_LR_MULT = {**cls.PHASE_REFINE_LR_MULT, 1: 0.3, 2: 1.0}
+        cls.PHASE_REFINE_VAL_INTERVAL = 1
 
     @classmethod
     def get_detector_output_channels(cls):

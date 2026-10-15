@@ -103,7 +103,8 @@ def log_all_parameters():
             f"static_batch_prob={Config.TEACHER_V4_STATIC_BATCH_PROB}, "
             f"static_eval={Config.TEACHER_V4_STATIC_EVAL}, "
             f"transfer_weight={Config.TEACHER_V4_TRANSFER_LOSS_WEIGHT}, "
-            f"static_phase_lr_mult={Config.TEACHER_V4_STATIC_PHASE_LR_MULT}",
+            f"static_phase_lr_mult={Config.TEACHER_V4_STATIC_PHASE_LR_MULT}, "
+            f"phase_gain_lr={Config.TEACHER_V4_PHASE_GAIN_LR} (task-driven, folded into phase)",
         )
     log_to_file(Config, f"Teacher parameters: {sum(p.numel() for p in teacher.parameters() if p.requires_grad):,}")
     log_to_file(Config, f"Detector head type: {Config.DETECTOR_HEAD_TYPE}")
@@ -143,7 +144,9 @@ def write_teacher_tensorboard_scalars(writer, step, train_losses, val_losses=Non
     if writer is None:
         return
     for key, value in train_losses.items():
-        if key.startswith("copy_paste_"):
+        if key.endswith("_modulation_gain"):
+            add_tensorboard_scalar(writer, f"SLM/{key}", value, step)
+        elif key.startswith("copy_paste_"):
             add_tensorboard_scalar(writer, f"Augmentation/CopyPaste/{key.removeprefix('copy_paste_')}", value, step)
         elif key.startswith("positive_"):
             assignment_name = key.removeprefix("positive_")

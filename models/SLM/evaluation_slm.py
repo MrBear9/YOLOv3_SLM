@@ -10,6 +10,7 @@ from tqdm import tqdm
 from models.class_display import class_name_for_id
 from models.geometry import bbox_iou_xywh
 from models.SLM.losses_slm import detection_response_loss, phase_regularization_loss
+from models.SLM.utils_slm import synchronize_detector_buffers
 from models.runtime import unwrap_module
 from models.teacher_guidance import enhance_feature_for_display
 from models.yolov8.feature_adapter import prepare_slm_detector_feature
@@ -47,6 +48,7 @@ def evaluate_slm_detector(
     teacher_core = unwrap_module(teacher)
     student_core = unwrap_module(student)
     detector_core = unwrap_module(detector)
+    synchronize_detector_buffers(detector_core)
     response_detector_core = unwrap_module(response_detector) if response_detector is not None else detector_core
     was_student_training = student_core.training
     was_detector_training = detector_core.training

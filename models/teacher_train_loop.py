@@ -83,6 +83,7 @@ def _checkpoint_payload(model, epoch, loss_value, val_map50):
         "teacher_v4_residual_end_rad": getattr(Config, "TEACHER_V4_RESIDUAL_END_RAD", 0.0),
         "teacher_v4_static_batch_prob": getattr(Config, "TEACHER_V4_STATIC_BATCH_PROB", 0.0),
         "teacher_v4_static_eval": getattr(Config, "TEACHER_V4_STATIC_EVAL", True),
+        "teacher_v4_phase_gain_lr": getattr(Config, "TEACHER_V4_PHASE_GAIN_LR", 0.0),
         "global_local_context_grid": Config.GLOBAL_LOCAL_CONTEXT_GRID,
         "teacher_depths": Config.GLOBAL_LOCAL_TEACHER_DEPTHS,
         "detector_depths": Config.GLOBAL_LOCAL_DETECTOR_DEPTHS,
@@ -265,7 +266,7 @@ def train():
     amp_dtype = torch.bfloat16 if amp_dtype_name in {"bf16", "bfloat16"} else torch.float16
     amp_scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled and amp_dtype == torch.float16)
     amp_context = (
-        lambda: torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled)
+        (lambda: torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=amp_enabled))
         if device.type == "cuda"
         else nullcontext
     )
@@ -509,6 +510,12 @@ def train():
         copy_paste_stats = train_dataset.get_copy_paste_stats(reset=True)
         avg_train.update({f"copy_paste_{key}": value for key, value in copy_paste_stats.items()})
         history["train_total"].append(avg_train["total"])
+        if hasattr(optimizer, "phase_gain_statistics"):
+            gain_stats = optimizer.phase_gain_statistics()
+            avg_train.update(gain_stats)
+            log_to_file(Config, "Phase modulation gains: " + ", ".join(
+                f"{key}={value:.4f}" for key, value in gain_stats.items()
+            ))
         scheduler.step()
         current_lr = max(group["lr"] for group in optimizer.param_groups)
         val_losses = None

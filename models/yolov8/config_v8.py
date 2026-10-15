@@ -130,6 +130,8 @@ class ConfigYOLOv8Anchor(OpticalConfig):
     TEACHER_V4_TRANSFER_LOSS_WEIGHT = 0.10
     TEACHER_V4_RESIDUAL_TV_WEIGHT = 0.10
     TEACHER_V4_STATIC_PHASE_LR_MULT = 3.0
+    # Task-driven whole-layer modulation updates, folded into static_phases.
+    TEACHER_V4_PHASE_GAIN_LR = 1e-3
 
     # =========================================================================
     # TEACHER_ARCH = "convteacher_v3" | "v3"  (residual + gate)
@@ -388,6 +390,8 @@ class ConfigYOLOv8Anchor(OpticalConfig):
             raise ValueError("V4 residual phase limits must be non-negative.")
         if float(cls.TEACHER_V4_STATIC_PHASE_LR_MULT) <= 0:
             raise ValueError("TEACHER_V4_STATIC_PHASE_LR_MULT must be positive.")
+        if float(cls.TEACHER_V4_PHASE_GAIN_LR) < 0:
+            raise ValueError("TEACHER_V4_PHASE_GAIN_LR must be non-negative.")
         if cls.get_teacher_init_mode() == "scratch" and cls.FREEZE_TEACHER:
             raise ValueError("A scratch teacher cannot be frozen.")
         if len(cls.TEACHER_V2_SLM_PROFILES) != cls.TEACHER_V2_NUM_SLM_LAYERS:

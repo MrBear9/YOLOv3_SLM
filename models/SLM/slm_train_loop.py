@@ -7,6 +7,7 @@ Supporting helpers live in:
 - slm_train_epoch.py   : run_epoch() — single epoch logic
 """
 
+import math
 import os
 import warnings
 
@@ -20,8 +21,8 @@ from models.SLM.slm_utils import (
 )
 from models.SLM.slm_train_epoch import run_epoch
 from models.SLM.slm_train_setup import setup_training
-from models.SLM.evaluation_slm import save_slm_detection_visualization
-from models.SLM.utils_slm import collect_slm_statistics, save_detector_best, save_student_best
+from models.SLM.evaluation_slm import evaluate_slm_detector, save_slm_detection_visualization
+from models.SLM.utils_slm import collect_slm_statistics, save_detector_best, save_student_best, save_validation_pair
 from models.monitoring import snapshot_parameters
 from models.runtime import (
     cleanup_distributed,
@@ -39,6 +40,7 @@ def train():
     is_main = local_rank == 0
 
     ctx = setup_training(is_main, use_ddp)
+    ctx["is_main"] = is_main
 
     best_student_loss = float("inf")
     best_detector_loss = float("inf")
@@ -58,9 +60,29 @@ def train():
     # Use the first active stage's normalization mode so this preview matches
     # the output domain that training will see in its first epoch.
     initial_stage = next((name for name, epochs in stage_schedule() if epochs > 0), None)
-    if is_main and initial_stage is not None:
+    if initial_stage is not None:
         initial_norm_mode = configure_student_norm_for_stage(initial_stage, deployment_norm_mode)
         ctx["student_raw"].enable_norm = bool(Config.ENABLE_STUDENT_NORM and initial_norm_mode != "none")
+    if (str(Config.SLM_INIT_MODE).lower() == "teacher_static"
+            and ctx["val_loader"] is not None and initial_stage is not None):
+        # Ordinary best-checkpoint selection starts at the loaded teacher pair,
+        # so adaptation cannot replace it with a lower-scoring student.
+        losses, metrics = evaluate_slm_detector(
+            Config, ctx["teacher"], ctx["student"], ctx["detector"], ctx["val_loader"],
+            ctx["detection_criterion"], ctx["feature_criterion"], ctx["device"], initial_stage,
+            response_detector=ctx["reference_detector"],
+        )
+        best_map50 = best_student_map50 = float(metrics["map50"])
+        if not math.isfinite(best_map50) or not math.isfinite(float(losses["total"])):
+            raise RuntimeError("Initial static pair produced non-finite validation results.")
+        best_paired_checkpoint_path = save_validation_pair(
+            Config, ctx, 0, "initial_pair", 0.0, losses["total"], best_map50,
+            collect_slm_statistics(ctx["student_raw"]), True,
+        )
+        if use_ddp:
+            torch.distributed.barrier()
+        log_to_file(Config, f"Initial static pair: mAP50={best_map50:.6f}; saved before adaptation.")
+    if is_main and initial_stage is not None:
         save_slm_detection_visualization(
             Config,
             0,
@@ -125,7 +147,7 @@ def train():
             Config,
             f"Start stage={stage_name}, epochs={stage_epochs}, student_norm_mode={stage_norm_mode}, "
             f"student_enable_norm={ctx['student_raw'].enable_norm}, "
-            f"scheduler={Config.LR_SCHEDULER if scheduler is not None else 'none'}",
+            f"scheduler={type(scheduler).__name__ if scheduler is not None else 'none'}",
         )
         detector_no_improve = 0
 
@@ -144,7 +166,7 @@ def train():
             if new_best_path is not None:
                 best_paired_checkpoint_path = new_best_path
             global_epoch += 1
-            detector_no_improve += no_improve_delta
+            detector_no_improve = 0 if new_best_path is not None else detector_no_improve + no_improve_delta
             should_stop_stage = (
                 stage_name in {"detector_focus", "phase_refine", "joint_fit"}
                 and Config.ENABLE_DETECTOR_FOCUS_EARLY_STOP
@@ -162,7 +184,7 @@ def train():
             if should_stop_stage:
                 log_to_file(
                     Config,
-                    f"Early stopping {stage_name} after {detector_no_improve} epochs without mAP50 improvement. "
+                    f"Early stopping {stage_name} after {detector_no_improve} validation checks without mAP50 improvement. "
                     f"Best mAP50={best_map50:.4f}.",
                 )
                 break
