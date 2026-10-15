@@ -43,13 +43,18 @@ DEFAULT_REPORT = Path(
 )
 DEFAULT_OUTPUT_STEM = Path("paper/figures/evaluation_report_summary")
 
-CLASS_COLORS = ["#3572B0", "#E6862A", "#36A35C", "#7B5AA6", "#A55E5E"]
+# Full sequential palette; categorical plots use a spaced subset for contrast.
+ACADEMIC_PALETTE = [
+    "#430258", "#3F387E", "#365D8D", "#2B7D8F",
+    "#30A083", "#51BE64", "#9ED73F", "#F8E520",
+]
+CLASS_COLORS = [ACADEMIC_PALETTE[i] for i in (0, 2, 4, 6, 1, 3, 5, 7)]
 METRIC_COLORS = {
-    "Precision": "#3572B0",
-    "Recall": "#E6862A",
-    "F1": "#258B8C",
+    "Precision": "#365D8D",
+    "Recall": "#430258",
+    "F1": "#30A083",
 }
-SIZE_COLORS = ["#6FA8DC", "#71B7A5", "#8064A2"]
+SIZE_COLORS = ["#3F387E", "#2B7D8F", "#51BE64"]
 GRID_COLOR = "#D7DADD"
 TEXT_COLOR = "#222222"
 EDGE_COLOR = "#303030"
@@ -76,6 +81,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=600,
         help="PNG resolution in dots per inch.",
+    )
+    parser.add_argument(
+        "--curve-smoothing-window",
+        type=int,
+        default=11,
+        help="Odd display-only smoothing window on the 501-point grid; 0 disables it. Metrics remain raw.",
     )
     parser.add_argument(
         "--panel-labels",
@@ -238,11 +249,38 @@ def global_threshold_curves(
     return thresholds, precision, recall, f1
 
 
+def smooth_display_curve(values: np.ndarray, window: int = 11) -> np.ndarray:
+    """Light triangular smoothing for display only; preserve gaps and zero tails.
+
+    Never use this output to compute AP, F1 maxima, or operating thresholds.
+    A positive averaging kernel avoids spline overshoot and preserves monotonicity.
+    """
+    if window != 0 and (window < 3 or window % 2 == 0):
+        raise ValueError("Smoothing window must be 0 or an odd integer >= 3.")
+    result = np.asarray(values, dtype=float).copy()
+    if window == 0:
+        return result
+    valid = np.isfinite(result) & (result != 0.0)
+    boundaries = np.diff(np.r_[False, valid, False].astype(int))
+    for start, stop in zip(np.flatnonzero(boundaries == 1), np.flatnonzero(boundaries == -1)):
+        segment = result[start:stop].copy()
+        radius = min(window // 2, (segment.size - 1) // 2)
+        if radius < 1:
+            continue
+        weights = radius + 1 - np.abs(np.arange(-radius, radius + 1))
+        smoothed = np.convolve(
+            np.pad(segment, radius, mode="edge"), weights / weights.sum(), mode="valid"
+        )
+        smoothed[0], smoothed[-1] = segment[0], segment[-1]
+        result[start:stop] = smoothed
+    return result
+
+
 def style_axis(axis: plt.Axes, *, both_grid_axes: bool = False) -> None:
-    axis.spines["top"].set_visible(False)
-    axis.spines["right"].set_visible(False)
-    axis.spines["left"].set_color(EDGE_COLOR)
-    axis.spines["bottom"].set_color(EDGE_COLOR)
+    for spine in axis.spines.values():
+        spine.set_visible(True)
+        spine.set_color(EDGE_COLOR)
+        spine.set_linewidth(0.8)
     axis.tick_params(direction="out", length=3.0, width=0.8, colors=TEXT_COLOR)
     axis.grid(
         axis="both" if both_grid_axes else "y",
@@ -289,6 +327,7 @@ def plot_report(
     *,
     dpi: int,
     panel_labels: bool,
+    curve_smoothing_window: int = 11,
 ) -> tuple[Path, Path]:
     metrics = report["metrics"]
     class_ids = sorted_class_ids(metrics)
@@ -309,6 +348,9 @@ def plot_report(
         "font.family": "serif",
         "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
         "font.size": 8.5,
+        "font.weight": "bold",
+        "axes.titleweight": "bold",
+        "axes.labelweight": "bold",
         "axes.titlesize": 10,
         "axes.labelsize": 9,
         "xtick.labelsize": 8,
@@ -318,6 +360,9 @@ def plot_report(
         "mathtext.fontset": "stix",
         "pdf.fonttype": 42,
         "ps.fonttype": 42,
+        "lines.antialiased": True,
+        "lines.solid_joinstyle": "round",
+        "lines.solid_capstyle": "round",
     }
 
     with plt.rc_context(rc_params):
@@ -341,7 +386,7 @@ def plot_report(
             class_precision_curves.append(precision_curve)
             axis_pr.plot(
                 recall_grid,
-                precision_curve,
+                smooth_display_curve(precision_curve, curve_smoothing_window),
                 color=color,
                 linewidth=1.5,
                 label=f"{class_name} ({ap50:.3f})",
@@ -351,8 +396,8 @@ def plot_report(
         map50 = float(metrics.get("map50", np.mean(ap50_values)))
         axis_pr.plot(
             recall_grid,
-            macro_precision,
-            color="#1D1D1D",
+            smooth_display_curve(macro_precision, curve_smoothing_window),
+            color="#E41A1C",
             linewidth=2.2,
             label=f"Macro (mAP$_{{50}}$={map50:.3f})",
             zorder=5,
@@ -374,21 +419,21 @@ def plot_report(
         best_f1 = float(f1_curve[best_index])
         axis_threshold.plot(
             thresholds,
-            precision_curve,
+            smooth_display_curve(precision_curve, curve_smoothing_window),
             color=METRIC_COLORS["Precision"],
             linewidth=1.7,
             label="Precision",
         )
         axis_threshold.plot(
             thresholds,
-            recall_curve,
+            smooth_display_curve(recall_curve, curve_smoothing_window),
             color=METRIC_COLORS["Recall"],
             linewidth=1.7,
             label="Recall",
         )
         axis_threshold.plot(
             thresholds,
-            f1_curve,
+            smooth_display_curve(f1_curve, curve_smoothing_window),
             color=METRIC_COLORS["F1"],
             linewidth=2.0,
             label=rf"F1 (max={best_f1:.3f} at $\tau$={best_threshold:.3f})",
@@ -488,6 +533,7 @@ def main() -> None:
         args.output_stem,
         dpi=args.dpi,
         panel_labels=args.panel_labels,
+        curve_smoothing_window=args.curve_smoothing_window,
     )
     print(f"Saved PNG: {png_path.resolve()}")
     print(f"Saved PDF: {pdf_path.resolve()}")
