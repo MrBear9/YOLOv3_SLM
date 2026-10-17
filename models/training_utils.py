@@ -38,7 +38,11 @@ def load_teacher_checkpoint(config, teacher, checkpoint_path, device):
     compatible_state = {}
     for key, value in state_dict.items():
         normalized_key = key[8:] if key.startswith("teacher.") else key
-        if normalized_key in teacher_state and teacher_state[normalized_key].shape == value.shape:
+        # Let ASM validate cached kernels when P/K changed their shape.
+        if normalized_key in teacher_state and (
+            teacher_state[normalized_key].shape == value.shape
+            or normalized_key == "H" or normalized_key.endswith(".H")
+        ):
             compatible_state[normalized_key] = value
     if not compatible_state:
         return False, f"No compatible ConvTeacher weights found in: {checkpoint_path}"

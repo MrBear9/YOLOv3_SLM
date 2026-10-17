@@ -89,7 +89,7 @@ class ConfigSLM(OpticalConfig):
     GLOBAL_LOCAL_TEACHER_DEPTHS = (2, 3, 3)
     # These must match the newly trained hardware-aware 640x640 physical teacher.
     TEACHER_V2_NUM_SLM_LAYERS = 2
-    TEACHER_V2_WAVELENGTH = 532e-9
+    TEACHER_V2_WAVELENGTH = OpticalConfig.WAVELENGTH
     TEACHER_V2_SLM_PROFILES = tuple(OpticalConfig.SLM_LAYER_PROFILES[index] for index in range(1, 3))
     TEACHER_V2_HARDWARE_PIXEL_PITCHES = tuple(
         OpticalConfig.SLM_PROFILES[name]["hardware_pixel_pitch"] for name in TEACHER_V2_SLM_PROFILES

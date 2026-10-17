@@ -46,7 +46,7 @@ class PhysicalSLMSimulator(nn.Module):
             )
         # Compatibility attribute for older logs/checkpoints.
         self.pixel_size = self.sampling_pitches[0]
-        distances = getattr(config, "TEACHER_V2_PROP_DISTANCES", DEFAULT_PROPAGATION_DISTANCES)
+        distances = getattr(config, "TEACHER_V2_PROP_DISTANCES", DEFAULT_PROPAGATION_DISTANCES[:self.num_layers])
         if isinstance(distances, (int, float)):
             distances = (float(distances),) * self.num_layers
         self.propagation_distances = tuple(float(value) for value in distances)
@@ -58,7 +58,11 @@ class PhysicalSLMSimulator(nn.Module):
         if self.wavelength <= 0 or any(distance == 0 for distance in self.propagation_distances):
             raise ValueError("Teacher V2 wavelength must be positive and propagation distances must be non-zero.")
 
-        optics_config = SimpleNamespace(WAVELENGTH=self.wavelength, RESOLUTION=resolution)
+        optics_config = SimpleNamespace(
+            WAVELENGTH=self.wavelength, RESOLUTION=resolution,
+            ASM_PADDING_FACTOR=getattr(config, "ASM_PADDING_FACTOR", 2),
+            ASM_SUPERSAMPLE_FACTOR=getattr(config, "ASM_SUPERSAMPLE_FACTOR", 1),
+        )
         self.propagations = nn.ModuleList(
             ASMPropagation(optics_config, distance, pixel_size=pitch)
             for distance, pitch in zip(self.propagation_distances, self.sampling_pitches)
@@ -109,4 +113,6 @@ class PhysicalSLMSimulator(nn.Module):
             "hardware_active_shapes": self.hardware_shapes,
             "simulate_hardware_pixel_grid": self.simulate_hardware_grid,
             "propagation_distances": self.propagation_distances,
+            "asm_padding_factor": self.propagations[0].padding_factor,
+            "asm_supersample_factor": self.propagations[0].supersample_factor,
         }

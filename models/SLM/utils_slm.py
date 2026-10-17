@@ -48,7 +48,11 @@ def load_matching_state(module, state_dict, prefixes=()):
                 break
         if key in non_persistent:
             continue
-        if key in target_state and target_state[key].shape == value.shape:
+        # Pass cached ASM kernels through even on shape mismatch so the ASM
+        # loader can reject incompatible P/K instead of silently skipping H.
+        if key in target_state and (
+            target_state[key].shape == value.shape or key == "H" or key.endswith(".H")
+        ):
             compatible[key] = value
     if compatible:
         module.load_state_dict({**target_state, **compatible}, strict=False)

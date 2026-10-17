@@ -46,12 +46,12 @@ def parse_args():
     parser.add_argument("--conf-threshold", type=float, default=None, help="Detection confidence threshold.")
     parser.add_argument("--nms-threshold", type=float, default=None, help="NMS IoU threshold.")
     parser.add_argument("--limit", type=int, default=None, help="Optional number of images to export, useful for a hardware trial.")
-    parser.add_argument("--lut", type=Path, default=None, help="Optional calibrated gray-to-phase LUT (.npy, .csv, or .txt).")
-    parser.add_argument("--gray-inverted", action="store_true", help="Invert SLM gray drive after LUT conversion.")
-    parser.add_argument("--phase-levels", type=int, default=256, help="Number of SLM drive levels (2 to 256, default: 256).")
+    parser.add_argument("--lut", type=Path, default=Path(Config.SLM_GRAY_TO_PHASE_LUT) if Config.SLM_GRAY_TO_PHASE_LUT else None, help="Calibrated LUT; defaults to optics YAML.")
+    parser.add_argument("--gray-inverted", action=argparse.BooleanOptionalAction, default=Config.SLM_GRAY_INVERTED, help="Gray polarity; defaults to optics YAML.")
+    parser.add_argument("--phase-levels", type=int, default=Config.SLM_PHASE_LEVELS, help="Number of SLM drive levels (2 to 256); defaults to optics YAML.")
     parser.add_argument(
-        "--export-phase-offset-rad", type=float, default=math.pi,
-        help="Hardware phase offset before wrapping to [0, 2pi), default: pi.",
+        "--export-phase-offset-rad", type=float, default=Config.SLM_EXPORT_PHASE_OFFSET_RAD,
+        help="Hardware phase offset before wrapping to [0, 2pi); defaults to optics YAML.",
     )
     return parser.parse_args()
 

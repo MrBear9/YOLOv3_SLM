@@ -1,37 +1,122 @@
-"""Shared bench geometry for the DMD, physical SLMs, and numerical ASM grid.
+"""Shared training optics defaults loaded from the main project YAML.
 
-Hardware pitch and numerical sampling pitch are deliberately separate.  The
-latter is an empirical propagation-model parameter inherited from the
-hardware-validated HolographSLM experiments; it must not be used to decide how
-many physical pixels to illuminate or export.
+Hardware pitch determines the illuminated/exported pixel count. ASM sampling
+defaults to that pitch; explicit overrides reproduce older numerical models.
 """
 
-DEFAULT_WAVELENGTH = 532e-9
-DEFAULT_DMD_RESOLUTION = (640, 640)
-DEFAULT_DMD_PIXEL_PITCH = 5.4e-6
-# Current cascaded bench: SLM1 -> 20 cm -> SLM2 -> 10 cm -> sensor plane.
-DEFAULT_PROPAGATION_DISTANCES = (0.20, 0.10)
+import math
+import os
+from pathlib import Path
 
-SLM_PROFILES = {
-    "zk_weixing_8p0": {
-        "model": "中科微兴",
-        "hardware_pixel_pitch": 8.0e-6,
-        "effective_sampling_pitch": 13.0e-6,
-    },
-    "magicholo_4p5": {
-        "model": "MagicHolo",
-        "hardware_pixel_pitch": 4.5e-6,
-        "effective_sampling_pitch": 6.4e-6,
-    },
-}
+import yaml
 
-DEFAULT_SLM_LAYER_PROFILES = {
-    1: "zk_weixing_8p0",
-    2: "magicholo_4p5",
-}
 
-# Compatibility default for callers that still accept one scalar pitch.
-DEFAULT_PIXEL_SIZE = SLM_PROFILES[DEFAULT_SLM_LAYER_PROFILES[2]]["effective_sampling_pitch"]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+OPTICS_CONFIG_PATH = Path(os.environ.get("SLM_OPTICS_CONFIG", "configs/optics.yaml"))
+if not OPTICS_CONFIG_PATH.is_absolute():
+    OPTICS_CONFIG_PATH = PROJECT_ROOT / OPTICS_CONFIG_PATH
+OPTICS_CONFIG_PATH = OPTICS_CONFIG_PATH.resolve()
+
+
+def _positive(value, label):
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be positive and finite.")
+    value = float(value)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{label} must be positive and finite.")
+    return value
+
+
+def _shape(value, label):
+    if not isinstance(value, (list, tuple)) or len(value) != 2 or any(
+        type(v) is not int or v < 1 for v in value
+    ):
+        raise ValueError(f"{label} must be [positive integer height, width].")
+    return tuple(value)
+
+
+def load_optics(path=OPTICS_CONFIG_PATH):
+    """Validate a YAML file and resolve its units without mutating configs."""
+    path = Path(path).resolve()
+    with path.open(encoding="utf-8-sig") as stream:
+        data = yaml.safe_load(stream)
+    if not isinstance(data, dict):
+        raise ValueError("Optics YAML must contain a mapping.")
+    try:
+        resolution = _shape(data["resolution"], "resolution")
+        dmd_pitch = _positive(data["dmd"]["pixel_pitch_um"], "dmd.pixel_pitch_um") * 1e-6
+        hardware, propagation, export = (data[k] for k in ("hardware", "propagation", "phase_export"))
+        factors = {}
+        for key, default in (("padding_factor", 2), ("supersample_factor", 1)):
+            value = propagation.get(key, default)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"propagation.{key} must be a positive integer.")
+            factors[key] = value
+        wavelength = _positive(hardware["wavelength_nm"], "hardware.wavelength_nm") * 1e-9
+        sampling = propagation["sampling_pitch_um"]
+        if not isinstance(sampling, dict) or set(sampling) - set(hardware["profiles"]):
+            raise ValueError("sampling_pitch_um must map known profile names to pitches or null.")
+        profiles = {}
+        for name, entry in hardware["profiles"].items():
+            pitch = _positive(entry["pixel_pitch_um"], f"{name}.pixel_pitch_um") * 1e-6
+            override = sampling.get(name)
+            fill = _positive(entry["fill_factor_pct"], f"{name}.fill_factor_pct")
+            if fill > 100:
+                raise ValueError(f"{name}.fill_factor_pct must not exceed 100.")
+            profiles[name] = {
+                "model": str(entry["model"]),
+                "resolution": _shape(entry["resolution"], f"{name}.resolution"),
+                "hardware_pixel_pitch": pitch,
+                "effective_sampling_pitch": pitch if override is None else _positive(
+                    override, f"sampling_pitch_um.{name}"
+                ) * 1e-6,
+                "fill_factor_pct": fill,
+            }
+        layers = propagation["layers"]
+        if not isinstance(layers, list) or not 2 <= len(layers) <= 4:
+            raise ValueError("Configure two to four propagation layers; unused layers are reserved.")
+        layer_profiles, distances = {}, []
+        for index, layer in enumerate(layers, 1):
+            name = layer["profile"]
+            if name not in profiles:
+                raise ValueError(f"Unknown SLM profile for layer {index}: {name!r}.")
+            profile = profiles[name]
+            active = tuple(round(n * dmd_pitch / profile["hardware_pixel_pitch"]) for n in resolution)
+            if any(n < 1 or n > full for n, full in zip(active, profile["resolution"])):
+                raise ValueError(f"Layer {index}: illuminated aperture does not fit the SLM panel.")
+            layer_profiles[index] = name
+            distances.append(_positive(layer["distance_cm"], f"layer {index}.distance_cm") * 1e-2)
+        if type(export["levels"]) is not int or export["levels"] != 256:
+            raise ValueError("Current hardware export requires 256 gray levels.")
+        if type(export["gray_inverted"]) is not bool:
+            raise ValueError("phase_export.gray_inverted must be boolean.")
+        offset = float(export["phase_offset_pi"]) * math.pi
+        if not math.isfinite(offset):
+            raise ValueError("phase_export.phase_offset_pi must be finite.")
+        lut = export["gray_to_phase_lut"]
+        if lut:
+            lut = Path(lut)
+            lut = str((path.parent / lut).resolve()) if not lut.is_absolute() else str(lut)
+        return dict(
+            resolution=resolution, dmd_pixel_pitch=dmd_pitch, wavelength=wavelength,
+            profiles=profiles, layer_profiles=layer_profiles, distances=tuple(distances),
+            phase_levels=export["levels"], gray_inverted=export["gray_inverted"],
+            phase_offset=offset, gray_to_phase_lut=lut or "",
+            **factors,
+        )
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"Invalid optics YAML {path}: {error}") from error
+
+
+OPTICS = load_optics()
+DEFAULT_WAVELENGTH = OPTICS["wavelength"]
+DEFAULT_DMD_RESOLUTION = OPTICS["resolution"]
+DEFAULT_DMD_PIXEL_PITCH = OPTICS["dmd_pixel_pitch"]
+DEFAULT_PROPAGATION_DISTANCES = OPTICS["distances"]
+SLM_PROFILES = OPTICS["profiles"]
+DEFAULT_SLM_LAYER_PROFILES = OPTICS["layer_profiles"]
+# Compatibility scalar; actual propagation uses the per-layer pitches.
+DEFAULT_PIXEL_SIZE = SLM_PROFILES[DEFAULT_SLM_LAYER_PROFILES[1]]["effective_sampling_pitch"]
 
 
 def aperture_size(resolution=DEFAULT_DMD_RESOLUTION, pixel_pitch=DEFAULT_DMD_PIXEL_PITCH):
@@ -47,6 +132,9 @@ def active_pixel_shape(profile_name, aperture_hw=None):
     if profile_name not in SLM_PROFILES:
         raise ValueError(f"Unknown SLM profile: {profile_name!r}.")
     aperture_hw = aperture_size() if aperture_hw is None else aperture_hw
-    pitch = SLM_PROFILES[profile_name]["hardware_pixel_pitch"]
-    return tuple(int(round(float(length) / pitch)) for length in aperture_hw)
+    profile = SLM_PROFILES[profile_name]
+    shape = tuple(int(round(float(length) / profile["hardware_pixel_pitch"])) for length in aperture_hw)
+    if any(n < 1 or n > full for n, full in zip(shape, profile["resolution"])):
+        raise ValueError(f"Illuminated aperture does not fit SLM profile {profile_name!r}.")
+    return shape
 

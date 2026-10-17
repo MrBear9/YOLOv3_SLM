@@ -376,6 +376,8 @@ def log_config():
         f"depths={Config.GLOBAL_LOCAL_DETECTOR_DEPTHS}, context_grid={Config.GLOBAL_LOCAL_CONTEXT_GRID}",
     )
     num_layers = int(getattr(Config, "NUM_LAYERS", 2))
+    log_to_file(Config, f"Optics YAML: {Config.OPTICS_CONFIG_PATH}; wavelength={Config.WAVELENGTH:g} m")
+    log_to_file(Config, f"ASM sampling: P={Config.ASM_PADDING_FACTOR}, K={Config.ASM_SUPERSAMPLE_FACTOR}")
     multi = bool(getattr(Config, "SLM_MULTI_HEAD_ENABLED", False))
     log_to_file(Config, f"Optical: {num_layers}-layer, multi_head={multi}, phase_mode={Config.SLM_PHASE_PARAM_MODE}, init={Config.SLM_INIT_MODE}")
     log_to_file(

@@ -43,14 +43,14 @@ def parse_args():
         help="Optional camera image captured after the loaded SLM phases. It is detected by the light head.",
     )
     parser.add_argument(
-        "--lut", type=Path, default=None,
-        help="Optional calibrated gray-to-phase LUT (.npy, .csv, or .txt).",
+        "--lut", type=Path, default=Path(Config.SLM_GRAY_TO_PHASE_LUT) if Config.SLM_GRAY_TO_PHASE_LUT else None,
+        help="Calibrated gray-to-phase LUT; defaults to optics YAML.",
     )
-    parser.add_argument("--gray-inverted", action="store_true", help="Invert SLM gray drive after LUT conversion.")
-    parser.add_argument("--phase-levels", type=int, default=256, help="SLM gray levels (default: 256).")
+    parser.add_argument("--gray-inverted", action=argparse.BooleanOptionalAction, default=Config.SLM_GRAY_INVERTED, help="Gray polarity; defaults to optics YAML.")
+    parser.add_argument("--phase-levels", type=int, default=Config.SLM_PHASE_LEVELS, help="SLM gray levels; defaults to optics YAML.")
     parser.add_argument(
-        "--export-phase-offset-rad", type=float, default=math.pi,
-        help="Hardware phase offset before wrapping to [0, 2pi), default: pi.",
+        "--export-phase-offset-rad", type=float, default=Config.SLM_EXPORT_PHASE_OFFSET_RAD,
+        help="Hardware phase offset before wrapping to [0, 2pi); defaults to optics YAML.",
     )
     return parser.parse_args()
 

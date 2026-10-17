@@ -3,13 +3,15 @@
 使用方式: ``ConfigSLM(OpticalConfig)`` 继承，然后通过访问器方法取值。
 """
 
-import math
-
 from models.SLM.physical_defaults import (
     DEFAULT_DMD_PIXEL_PITCH,
     DEFAULT_DMD_RESOLUTION,
     DEFAULT_PROPAGATION_DISTANCES,
     DEFAULT_SLM_LAYER_PROFILES,
+    DEFAULT_WAVELENGTH,
+    DEFAULT_PIXEL_SIZE,
+    OPTICS,
+    OPTICS_CONFIG_PATH,
     SLM_PROFILES,
     active_pixel_shape,
     aperture_size,
@@ -19,8 +21,8 @@ class OpticalConfig:
     """光学传播的共享默认值 + per-layer 可覆盖配置。
 
     Per-layer 配置通过 ``{layer_idx: value}`` 字典组织，访问器方法自动
-    fallback 到 layer 1 的值。新增 3 层/4 层只需改 ``NUM_LAYERS`` +
-    在对应 dict 中加 key，无需新增任何配置项。
+    fallback 到 layer 1 的值。各层硬件和传播距离在 optics.yaml 中配置；
+    ``NUM_LAYERS`` 控制实际启用的学生层数。
     """
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -33,12 +35,15 @@ class OpticalConfig:
     # DMD input: 640 pixels * 5.4 um = 3.456 mm in both axes.
     RESOLUTION = DEFAULT_DMD_RESOLUTION
     DMD_PIXEL_PITCH = DEFAULT_DMD_PIXEL_PITCH
-    WAVELENGTH = 532e-9
-    # Real panel facts and fitted numerical ASM sampling are independent.
+    WAVELENGTH = DEFAULT_WAVELENGTH
+    OPTICS_CONFIG_PATH = str(OPTICS_CONFIG_PATH)
+    ASM_PADDING_FACTOR = OPTICS["padding_factor"]
+    ASM_SUPERSAMPLE_FACTOR = OPTICS["supersample_factor"]
+    # Hardware pitch is the default ASM pitch; YAML can override sampling only.
     SLM_PROFILES = SLM_PROFILES
     SLM_LAYER_PROFILES = dict(DEFAULT_SLM_LAYER_PROFILES)
     # Compatibility scalar. New propagation code calls sampling_pitch(layer).
-    PIXEL_SIZE = SLM_PROFILES["magicholo_4p5"]["effective_sampling_pitch"]
+    PIXEL_SIZE = DEFAULT_PIXEL_SIZE
     SLM_MODE = "phase"
     INPUT_INTENSITY_MODE = "srgb"
     OPTICAL_FIELD_EPS = 1e-8
@@ -70,12 +75,12 @@ class OpticalConfig:
     SLM_DIRECT_SGD_INIT_RANGE_RAD = 0.5
     SLM_INIT_NOISE_STD = 0.02
     SLM_INIT_CHECKPOINT = r"output/SLM_Tv2_light_phase_refine/detector_best.pth"
-    SLM_PHASE_LEVELS = 256
+    SLM_PHASE_LEVELS = OPTICS["phase_levels"]
     SIMULATE_PHASE_QUANTIZATION = False
     SIMULATE_HARDWARE_PIXEL_GRID = True
-    SLM_GRAY_INVERTED = True
-    SLM_EXPORT_PHASE_OFFSET_RAD = float(math.pi)
-    SLM_GRAY_TO_PHASE_LUT = r""
+    SLM_GRAY_INVERTED = OPTICS["gray_inverted"]
+    SLM_EXPORT_PHASE_OFFSET_RAD = OPTICS["phase_offset"]
+    SLM_GRAY_TO_PHASE_LUT = OPTICS["gray_to_phase_lut"]
 
     # ═══════════════════════════════════════════════════════════════════════
     # 可选相位金字塔（当前隔离且不生效）
@@ -91,13 +96,8 @@ class OpticalConfig:
     # ═══════════════════════════════════════════════════════════════════════
     # Per-layer 配置  {layer_idx (1-based): value}
     # ═══════════════════════════════════════════════════════════════════════
-    # Student geometry: SLM1 -> 20 cm -> SLM2 -> 10 cm -> sensor plane.
-    PROP_DISTANCE = {
-        1: DEFAULT_PROPAGATION_DISTANCES[0],
-        2: DEFAULT_PROPAGATION_DISTANCES[1],
-        3: 0.20,
-        4: 0.20,
-    }
+    # All configured layers, including reserved layers, come from optics.yaml.
+    PROP_DISTANCE = dict(enumerate(DEFAULT_PROPAGATION_DISTANCES, start=1))
 
     # Which optical layers each phase-only stage may update.  The refinement
     # stage deliberately gives the final SLM its own detector-aware update;
@@ -173,7 +173,7 @@ class OpticalConfig:
     @classmethod
     def validate_optical_geometry(cls):
         if tuple(cls.RESOLUTION) != tuple(DEFAULT_DMD_RESOLUTION):
-            raise ValueError("This bench configuration expects the DMD canvas to be 640x640.")
+            raise ValueError(f"DMD canvas must match optics YAML: {DEFAULT_DMD_RESOLUTION}.")
         for layer_idx in range(1, int(cls.NUM_LAYERS) + 1):
             shape = cls.slm_active_shape(layer_idx)
             pitch = cls.hardware_pixel_pitch(layer_idx)

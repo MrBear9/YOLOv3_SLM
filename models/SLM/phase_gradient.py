@@ -15,8 +15,11 @@ from models.SLM.phase_search import confirmation
 
 
 def adjoint_propagate(prop, error):
-    """Exact adjoint of C F^-1 H F P, including asymmetric odd-size padding."""
-    h,w=prop.input_resolution
+    """Exact adjoint including complex block averaging, padding and repetition."""
+    k=prop.supersample_factor
+    h,w=prop.fine_resolution
+    if k>1:
+        error=error.repeat_interleave(k,dim=-2).repeat_interleave(k,dim=-1)/(k*k)
     if prop._linear_conv:
         ph,pw=prop.H.shape[-2:]
         top=(ph-h+1-h%2)//2;left=(pw-w+1-w%2)//2
@@ -27,6 +30,9 @@ def adjoint_propagate(prop, error):
         ph,pw=prop.H.shape[-2:]
         top=(ph-h+h%2)//2;left=(pw-w+w%2)//2
         out=out[...,top:top+h,left:left+w]
+    if k>1:
+        h,w=prop.input_resolution
+        out=out.reshape(*out.shape[:-2],h,k,w,k).sum(dim=(-3,-1))
     return out
 
 

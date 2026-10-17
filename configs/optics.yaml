@@ -1,0 +1,48 @@
+# 教师 V2/V4、静态学生及导出共用；尺寸顺序 [高, 宽]。
+# 修改后重新启动进程生效。也可用环境变量 SLM_OPTICS_CONFIG 指定另一份 YAML。
+resolution: [640, 640]  # DMD/训练计算画布，不是 SLM 的整块面板分辨率
+dmd:
+  pixel_pitch_um: 5.4  # 照明口径 3.456 × 3.456 mm（未建模中继放大率）
+
+hardware:
+  wavelength_nm: 532
+  profiles:
+    zk_weixing_8p0:
+      model: 中科微兴
+      resolution: [1080, 1920]
+      pixel_pitch_um: 8.0
+      fill_factor_pct: 87  # 器件记录，当前 ASM 不模拟像素死区
+    magicholo_4p5:
+      model: MagicHolo
+      resolution: [1080, 1920]
+      pixel_pitch_um: 4.5
+      fill_factor_pct: 91  # 器件记录，当前 ASM 不模拟像素死区
+
+propagation:
+  # P：每个方向的零填充倍数，保持原来的 2 倍。
+  padding_factor: 2
+  # K：每个像素沿高、宽细分 K 份，细网格间距为 sampling_pitch / K。
+  # 传播后对复场块平均回原尺寸；不增加独立相位参数，不改变硬件像元。
+  supersample_factor: 1
+  # null 表示直接采用对应硬件的 pixel_pitch_um。
+  # 复现本项目旧权重时改为 13.0 / 6.4；不要改硬件 pixel_pitch_um。
+  sampling_pitch_um:
+    zk_weixing_8p0: null
+    magicholo_4p5: null
+  # 按层号排列；当前 NUM_LAYERS=2，只使用前两层。
+  # 第 3、4 层为预留配置，不会因为写在这里就自动启用。
+  layers:
+    - {profile: zk_weixing_8p0, distance_cm: 20}
+    - {profile: magicholo_4p5, distance_cm: 10}
+    # 预留器件沿用此前第 3、4 层回退到第 1 层的默认值，可按实际硬件修改。
+    - {profile: zk_weixing_8p0, distance_cm: 20}
+    - {profile: zk_weixing_8p0, distance_cm: 20}
+  # P=2、K=1 延续原来的带限 ASM；未启用 Zernike 校正。
+
+phase_export:
+  levels: 256
+  gray_inverted: true
+  phase_offset_pi: 1.0
+  # 理想映射仍为 0..2pi。LUT 为递增灰度对应的相位(rad)，不是器件最大相位能力。
+  # null 使用理想线性映射；路径相对本 YAML 所在目录。
+  gray_to_phase_lut: null

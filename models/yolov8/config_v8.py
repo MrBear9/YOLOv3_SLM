@@ -97,7 +97,7 @@ class ConfigYOLOv8Anchor(OpticalConfig):
     # These must match the optical-student hardware/simulation settings.
     # V2 is always physical; no CNN residual-output fallback is retained.
     TEACHER_V2_NUM_SLM_LAYERS = 2
-    TEACHER_V2_WAVELENGTH = 532e-9
+    TEACHER_V2_WAVELENGTH = OpticalConfig.WAVELENGTH
     TEACHER_V2_SLM_PROFILES = tuple(
         DEFAULT_SLM_LAYER_PROFILES[index] for index in range(1, 3)
     )
@@ -109,7 +109,7 @@ class ConfigYOLOv8Anchor(OpticalConfig):
     )
     # Deprecated compatibility alias; the simulator uses the per-layer tuple.
     TEACHER_V2_PIXEL_SIZE = TEACHER_V2_SAMPLING_PITCHES[0]
-    TEACHER_V2_PROP_DISTANCES = DEFAULT_PROPAGATION_DISTANCES
+    TEACHER_V2_PROP_DISTANCES = DEFAULT_PROPAGATION_DISTANCES[:TEACHER_V2_NUM_SLM_LAYERS]
     SIMULATE_HARDWARE_PIXEL_GRID = True
 
     TEACHER_V4_BASE_CHANNELS = 32
