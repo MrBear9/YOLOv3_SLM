@@ -226,6 +226,7 @@ def main():
             teacher_feature_to_image(teacher_aux["det_feature"]).save(feature_path)
             draw_detection_boxes(input_image, detections, ground_truth).save(detection_path)
             phase_files = []
+            panel_files = []
             for layer_index, phase_map in enumerate(phase_maps, start=1):
                 phase_path = directories[f"slm{layer_index}"] / f"{file_id}.png"
                 target_shape = Config.TEACHER_V2_ACTIVE_PIXEL_SHAPES[layer_index - 1]
@@ -233,6 +234,19 @@ def main():
                     phase_map_to_drive_image(phase_map, target_shape, lut_phase, lut_gray, args), mode="L"
                 ).save(phase_path)
                 phase_files.append(str(phase_path.relative_to(output_root)).replace("\\", "/"))
+                if Config.OPTICAL_COORDINATE_MODE == "physical":
+                    profile = Config.SLM_PROFILES[Config.TEACHER_V2_SLM_PROFILES[layer_index - 1]]
+                    panel_shape = profile["resolution"]
+                    background = phase_map_to_drive_image(torch.zeros_like(phase_map), (1, 1),
+                                                          lut_phase, lut_gray, args).item()
+                    drive = phase_map_to_drive_image(phase_map, target_shape, lut_phase, lut_gray, args)
+                    panel = np.full(panel_shape, background, dtype=np.uint8)
+                    top, left = ((n - m) // 2 for n, m in zip(panel_shape, target_shape))
+                    panel[top:top + target_shape[0], left:left + target_shape[1]] = drive
+                    panel_path = output_root / f"slm{layer_index}_panel" / f"{file_id}.png"
+                    panel_path.parent.mkdir(parents=True, exist_ok=True)
+                    Image.fromarray(panel, mode="L").save(panel_path)
+                    panel_files.append(str(panel_path.relative_to(output_root)).replace("\\", "/"))
 
             record = {
                 "id": file_id,
@@ -240,6 +254,8 @@ def main():
                 "input_letterboxed": str(input_path.relative_to(output_root)).replace("\\", "/"),
                 "teacher_feature": str(feature_path.relative_to(output_root)).replace("\\", "/"),
                 "slm_gray_drives": phase_files,
+                "slm_full_panel_drives": panel_files,
+                "physical_grid": teacher.simulator.geometry.metadata() if teacher.simulator.geometry is not None else None,
                 "detection_visualization": str(detection_path.relative_to(output_root)).replace("\\", "/"),
                 "detections": detections_to_records(detections),
                 "ground_truth": ground_truth_to_records(ground_truth, input_image.size[::-1]),

@@ -40,12 +40,14 @@ def load_matching_state(module, state_dict, prefixes=()):
                 non_persistent.add(full_name)
 
     compatible = {}
+    normalized_state = {}
     for raw_key, value in state_dict.items():
         key = raw_key[7:] if raw_key.startswith("module.") else raw_key
         for prefix in prefixes:
             if key.startswith(prefix):
                 key = key[len(prefix):]
                 break
+        normalized_state[key] = value
         if key in non_persistent:
             continue
         # Pass cached ASM kernels through even on shape mismatch so the ASM
@@ -54,6 +56,8 @@ def load_matching_state(module, state_dict, prefixes=()):
             target_state[key].shape == value.shape or key == "H" or key.endswith(".H")
         ):
             compatible[key] = value
+    from models.SLM.physical_grid import validate_geometry_state
+    validate_geometry_state(module, normalized_state)
     if compatible:
         module.load_state_dict({**target_state, **compatible}, strict=False)
     return len(compatible), len(target_state)

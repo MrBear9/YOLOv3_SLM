@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from models.SLM.asm_propagation import ASMPropagation
 from models.SLM.phase_parameterization import _resolve_prop_distance
 from models.SLM.slm_modulation import SLMLayer, complex_intensity
+from models.SLM.physical_grid import PhysicalGrid, physical_coordinates
 
 class OpticalStudent(nn.Module):
     """N-layer optical student: SLM1鈫扨rop1鈫扴LM2鈫扨rop2鈫?..鈫扴LM_N鈫扨rop_N.
@@ -26,6 +27,14 @@ class OpticalStudent(nn.Module):
         super().__init__()
         self.config = config
         self.num_layers = int(getattr(config, "NUM_LAYERS", 2))
+        self.geometry = None
+        if physical_coordinates(config):
+            if config.SLM_MODE != "phase":
+                raise ValueError("Physical coordinates currently support phase-only SLMs.")
+            self.geometry = PhysicalGrid(config,
+                [config.sampling_pitch(i) for i in range(1, self.num_layers + 1)],
+                [config.hardware_pixel_pitch(i) for i in range(1, self.num_layers + 1)],
+                [config.slm_profile(i)["resolution"] for i in range(1, self.num_layers + 1)])
 
         for layer_idx in range(1, self.num_layers + 1):
             slm = SLMLayer(config, layer_index=layer_idx)
@@ -34,7 +43,8 @@ class OpticalStudent(nn.Module):
                 config.sampling_pitch(layer_idx)
                 if hasattr(config, "sampling_pitch") else config.PIXEL_SIZE
             )
-            prop = ASMPropagation(config, dist, pixel_size=sampling_pitch)
+            prop = ASMPropagation(config, dist, pixel_size=sampling_pitch,
+                resolution=self.geometry.shapes[layer_idx - 1] if self.geometry is not None else None)
             setattr(self, f"slm{layer_idx}", slm)
             setattr(self, f"prop{layer_idx}", prop)
 
@@ -44,6 +54,16 @@ class OpticalStudent(nn.Module):
 
     def _propagate_field(self, intensity):
         """Propagate an incident intensity through the configured SLM cascade."""
+        if self.geometry is not None:
+            with torch.autocast(device_type=intensity.device.type, enabled=False):
+                field = self.geometry.incident_field(intensity, self.config.OPTICAL_FIELD_EPS)
+                for index in range(self.num_layers):
+                    if index:
+                        field = self.geometry.transfers[index - 1](field)
+                    phase = getattr(self, f"slm{index + 1}").simulation_phase()
+                    field = self.geometry.modulate(field, phase, index)
+                    field = getattr(self, f"prop{index + 1}")(field)
+                return field
         amp = torch.sqrt(intensity.clamp(min=0) + self.config.OPTICAL_FIELD_EPS)
         field = torch.complex(amp, torch.zeros_like(amp))
         for layer_idx in range(1, self.num_layers + 1):
@@ -66,16 +86,18 @@ class OpticalStudent(nn.Module):
     def forward_with_optical_field(self, intensity):
         """Return detector input plus the final, pre-normalisation optical field.
 
-        ``raw_intensity`` is the physical simulated output :math:`|U|^2`
-        immediately after the final propagation.  It deliberately precedes
+        ``field`` remains on the final propagation grid. In physical mode,
+        ``raw_intensity`` samples its intensity on the fixed physical readout ROI;
+        the two arrays can have different sizes. It deliberately precedes
         output blur, normalisation, clamping, detector polarity conversion,
         and any display-only contrast stretch.
         """
         field = self._propagate_field(intensity)
-        raw_intensity = complex_intensity(field)
+        raw_intensity = self.geometry.intensity(field) if self.geometry is not None else complex_intensity(field)
         return self._postprocess_intensity(raw_intensity), {
             "field": field,
             "raw_intensity": raw_intensity,
+            "geometry": self.geometry.metadata() if self.geometry is not None else None,
         }
 
     def forward(self, intensity):

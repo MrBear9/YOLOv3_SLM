@@ -12,6 +12,7 @@ from models.SLM.physical_defaults import (
     DEFAULT_WAVELENGTH,
 )
 from models.SLM.slm_modulation import apply_phase_modulation, complex_intensity, resample_phase_map
+from models.SLM.physical_grid import PhysicalGrid, physical_coordinates
 
 
 class PhysicalSLMSimulator(nn.Module):
@@ -62,16 +63,28 @@ class PhysicalSLMSimulator(nn.Module):
             WAVELENGTH=self.wavelength, RESOLUTION=resolution,
             ASM_PADDING_FACTOR=getattr(config, "ASM_PADDING_FACTOR", 2),
             ASM_SUPERSAMPLE_FACTOR=getattr(config, "ASM_SUPERSAMPLE_FACTOR", 1),
+            OPTICAL_COORDINATE_MODE=getattr(config, "OPTICAL_COORDINATE_MODE", "legacy"),
         )
+        self.geometry = None
+        if physical_coordinates(config):
+            profiles = config.TEACHER_V2_SLM_PROFILES
+            if len(profiles) != self.num_layers:
+                raise ValueError("Teacher SLM profiles must match its number of layers.")
+            self.geometry = PhysicalGrid(config, self.sampling_pitches,
+                [config.SLM_PROFILES[name]["hardware_pixel_pitch"] for name in profiles],
+                [config.SLM_PROFILES[name]["resolution"] for name in profiles])
         self.propagations = nn.ModuleList(
-            ASMPropagation(optics_config, distance, pixel_size=pitch)
-            for distance, pitch in zip(self.propagation_distances, self.sampling_pitches)
+            ASMPropagation(optics_config, distance, pixel_size=pitch,
+                resolution=self.geometry.shapes[i] if self.geometry is not None else None)
+            for i, (distance, pitch) in enumerate(zip(self.propagation_distances, self.sampling_pitches))
         )
         self.field_epsilon = float(getattr(config, "OPTICAL_FIELD_EPS", 1e-8))
         hardware_shapes = getattr(config, "TEACHER_V2_ACTIVE_PIXEL_SHAPES", None)
         if hardware_shapes is None:
             hardware_shapes = (resolution,) * self.num_layers
         self.hardware_shapes = tuple(tuple(int(value) for value in shape) for shape in hardware_shapes)
+        if self.geometry is not None:
+            self.hardware_shapes = self.geometry.active_shapes
         if len(self.hardware_shapes) != self.num_layers:
             raise ValueError("TEACHER_V2_ACTIVE_PIXEL_SHAPES must contain one shape per SLM layer.")
         self.simulate_hardware_grid = bool(getattr(config, "SIMULATE_HARDWARE_PIXEL_GRID", True))
@@ -85,6 +98,16 @@ class PhysicalSLMSimulator(nn.Module):
         # FFT propagation uses complex64 so it remains valid under float16 AMP.
         with torch.autocast(device_type=intensity.device.type, enabled=False):
             incident = intensity.float()
+            if self.geometry is not None:
+                field = self.geometry.incident_field(incident, self.field_epsilon)
+                for i, (phase_map, propagation) in enumerate(zip(phase_maps, self.propagations)):
+                    if phase_map.shape != incident.shape:
+                        raise ValueError("Teacher phase maps must match the DMD intensity shape.")
+                    if i:
+                        field = self.geometry.transfers[i - 1](field)
+                    field = self.geometry.modulate(field, phase_map, i)
+                    field = propagation(field)
+                return self.geometry.intensity(field)
             field = torch.complex(
                 torch.sqrt(incident.clamp_min(0.0) + self.field_epsilon),
                 torch.zeros_like(incident),
@@ -107,6 +130,7 @@ class PhysicalSLMSimulator(nn.Module):
 
     def physics_metadata(self):
         return {
+            "physical_grid": self.geometry.metadata() if self.geometry is not None else None,
             "num_slm_layers": self.num_layers,
             "wavelength": self.wavelength,
             "sampling_pitches": self.sampling_pitches,

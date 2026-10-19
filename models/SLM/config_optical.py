@@ -39,6 +39,11 @@ class OpticalConfig:
     OPTICS_CONFIG_PATH = str(OPTICS_CONFIG_PATH)
     ASM_PADDING_FACTOR = OPTICS["padding_factor"]
     ASM_SUPERSAMPLE_FACTOR = OPTICS["supersample_factor"]
+    OPTICAL_COORDINATE_MODE = OPTICS["coordinate_mode"]
+    DMD_RELAY_MAGNIFICATION = OPTICS["relay_magnification"]
+    OPTICAL_FIELD_EXTENT_FACTOR = OPTICS["field_extent_factor"]
+    OPTICAL_GRID_MULTIPLE = OPTICS["grid_multiple"]
+    OPTICAL_MAX_GRID_SIZE = OPTICS["max_grid_size"]
     # Hardware pitch is the default ASM pitch; YAML can override sampling only.
     SLM_PROFILES = SLM_PROFILES
     SLM_LAYER_PROFILES = dict(DEFAULT_SLM_LAYER_PROFILES)
@@ -168,7 +173,11 @@ class OpticalConfig:
 
     @classmethod
     def slm_active_shape(cls, layer_idx):
-        return active_pixel_shape(cls.slm_profile_name(layer_idx), cls.dmd_aperture())
+        return active_pixel_shape(cls.slm_profile_name(layer_idx), cls.optical_reference_extent())
+
+    @classmethod
+    def optical_reference_extent(cls):
+        return tuple(v * cls.DMD_RELAY_MAGNIFICATION for v in cls.dmd_aperture())
 
     @classmethod
     def validate_optical_geometry(cls):
@@ -178,7 +187,7 @@ class OpticalConfig:
             shape = cls.slm_active_shape(layer_idx)
             pitch = cls.hardware_pixel_pitch(layer_idx)
             represented = tuple(count * pitch for count in shape)
-            error = max(abs(a - b) for a, b in zip(represented, cls.dmd_aperture()))
+            error = max(abs(a - b) for a, b in zip(represented, cls.optical_reference_extent()))
             if error > pitch / 2 + 1e-12:
                 raise ValueError(f"SLM{layer_idx} cannot cover the DMD aperture within half a hardware pixel.")
 

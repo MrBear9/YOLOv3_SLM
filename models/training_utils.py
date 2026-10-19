@@ -35,6 +35,10 @@ def load_teacher_checkpoint(config, teacher, checkpoint_path, device):
         checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = extract_state_dict(checkpoint)
     teacher_state = teacher.state_dict()
+    from models.SLM.physical_grid import validate_geometry_state
+    validate_geometry_state(teacher, {
+        (k[8:] if k.startswith("teacher.") else k): v for k, v in state_dict.items()
+    })
     compatible_state = {}
     for key, value in state_dict.items():
         normalized_key = key[8:] if key.startswith("teacher.") else key

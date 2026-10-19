@@ -2,7 +2,8 @@
 # 修改后重新启动进程生效。也可用环境变量 SLM_OPTICS_CONFIG 指定另一份 YAML。
 resolution: [640, 640]  # DMD/训练计算画布，不是 SLM 的整块面板分辨率
 dmd:
-  pixel_pitch_um: 5.4  # 照明口径 3.456 × 3.456 mm（未建模中继放大率）
+  pixel_pitch_um: 5.4
+  relay_magnification: 1.0  # 理想中继的物理倍率；暂不加入倒像/安装标定
 
 hardware:
   wavelength_nm: 532
@@ -19,6 +20,12 @@ hardware:
       fill_factor_pct: 91  # 器件记录，当前 ASM 不模拟像素死区
 
 propagation:
+  coordinate_mode: physical  # physical: 物理坐标；legacy: 仅复现旧数值模型
+  field_extent_factor: 1.5  # 计算视野/中继后 DMD 参考区域；与 FFT 的 P 分开
+  grid_multiple: 32  # 每层网格自动向上取整；先保证后层视野不超出前层
+  max_grid_size: 2048  # 防止配置错误引起意外超大 FFT
+  # 理想读出：中继后 DMD 同尺寸物理区域，中心采样成 resolution。
+  # 不是相机标定模型；相机 ROI/像元与实际透镜后续单独标定。
   # P：每个方向的零填充倍数，保持原来的 2 倍。
   padding_factor: 2
   # K：每个像素沿高、宽细分 K 份，细网格间距为 sampling_pitch / K。

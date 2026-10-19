@@ -45,7 +45,18 @@ def load_optics(path=OPTICS_CONFIG_PATH):
     try:
         resolution = _shape(data["resolution"], "resolution")
         dmd_pitch = _positive(data["dmd"]["pixel_pitch_um"], "dmd.pixel_pitch_um") * 1e-6
+        magnification = _positive(data["dmd"].get("relay_magnification", 1), "dmd.relay_magnification")
         hardware, propagation, export = (data[k] for k in ("hardware", "propagation", "phase_export"))
+        coordinate_mode = propagation.get("coordinate_mode", "legacy")
+        if coordinate_mode not in ("physical", "legacy"):
+            raise ValueError("propagation.coordinate_mode must be physical or legacy.")
+        extent_factor = _positive(propagation.get("field_extent_factor", 1.5), "field_extent_factor")
+        if extent_factor < 1:
+            raise ValueError("field_extent_factor must be at least one.")
+        grid_multiple = propagation.get("grid_multiple", 32)
+        max_grid_size = propagation.get("max_grid_size", 2048)
+        if any(type(v) is not int or v < 1 for v in (grid_multiple, max_grid_size)):
+            raise ValueError("grid_multiple and max_grid_size must be positive integers.")
         factors = {}
         for key, default in (("padding_factor", 2), ("supersample_factor", 1)):
             value = propagation.get(key, default)
@@ -81,7 +92,7 @@ def load_optics(path=OPTICS_CONFIG_PATH):
             if name not in profiles:
                 raise ValueError(f"Unknown SLM profile for layer {index}: {name!r}.")
             profile = profiles[name]
-            active = tuple(round(n * dmd_pitch / profile["hardware_pixel_pitch"]) for n in resolution)
+            active = tuple(round(n * dmd_pitch * magnification / profile["hardware_pixel_pitch"]) for n in resolution)
             if any(n < 1 or n > full for n, full in zip(active, profile["resolution"])):
                 raise ValueError(f"Layer {index}: illuminated aperture does not fit the SLM panel.")
             layer_profiles[index] = name
@@ -102,6 +113,8 @@ def load_optics(path=OPTICS_CONFIG_PATH):
             profiles=profiles, layer_profiles=layer_profiles, distances=tuple(distances),
             phase_levels=export["levels"], gray_inverted=export["gray_inverted"],
             phase_offset=offset, gray_to_phase_lut=lut or "",
+            coordinate_mode=coordinate_mode, relay_magnification=magnification,
+            field_extent_factor=extent_factor, grid_multiple=grid_multiple, max_grid_size=max_grid_size,
             **factors,
         )
     except (KeyError, TypeError) as error:
@@ -109,6 +122,25 @@ def load_optics(path=OPTICS_CONFIG_PATH):
 
 
 OPTICS = load_optics()
+
+
+def save_optics_snapshot(output_dir):
+    """Save a replayable YAML with the run; only the main DDP rank writes it."""
+    if int(os.environ.get("RANK", "0")) != 0:
+        return
+    source = yaml.safe_load(OPTICS_CONFIG_PATH.read_text(encoding="utf-8-sig"))
+    if OPTICS["gray_to_phase_lut"]:
+        source["phase_export"]["gray_to_phase_lut"] = OPTICS["gray_to_phase_lut"]
+    destination = Path(output_dir) / "optics.yaml"
+    if destination.exists():
+        previous = yaml.safe_load(destination.read_text(encoding="utf-8-sig"))
+        if previous != source:
+            raise ValueError(f"{destination} belongs to different optics; select a new output directory.")
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(yaml.safe_dump(source, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
 DEFAULT_WAVELENGTH = OPTICS["wavelength"]
 DEFAULT_DMD_RESOLUTION = OPTICS["resolution"]
 DEFAULT_DMD_PIXEL_PITCH = OPTICS["dmd_pixel_pitch"]

@@ -46,6 +46,9 @@ def mapped_forward_error(prop,error):
 
 
 def phase_gradient(student, gray, objective, same_forward=False, mapped_forward=True):
+    if getattr(student, 'geometry', None) is not None:
+        raise ValueError('Legacy FFM adjoint does not include physical coordinate transfers; '
+                         'use autograd for the physical-grid teacher/student training.')
     layers=[l for _,l in student.all_slm_layers()]
     if any(l.mode!='phase' or l._phase_param_mode!='direct_sgd' for l in layers):
         raise ValueError('Numerical adjoint requires direct_sgd phase-only layers')

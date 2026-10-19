@@ -102,6 +102,8 @@ class MultiHeadOpticalStudent(nn.Module):
 
     def __init__(self, config, enable_norm=None):
         super().__init__()
+        if getattr(config, "OPTICAL_COORDINATE_MODE", "legacy") == "physical":
+            raise ValueError("Physical coordinates require the single-path OpticalStudent; disable SLM_MULTI_HEAD_ENABLED.")
         self.config = config
         self.num_heads = int(getattr(config, "SLM_MULTI_HEAD_NUM_HEADS", 4))
         self.num_layers = int(getattr(config, "NUM_LAYERS", 2))

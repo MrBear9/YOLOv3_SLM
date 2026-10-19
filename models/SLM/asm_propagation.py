@@ -50,30 +50,43 @@ class ASMPropagation(nn.Module):
         padded_height, padded_width = (n * self.padding_factor for n in self.fine_resolution)
         y_len, x_len = padded_height * dy, padded_width * dx
 
-        # Match the validated neural-holography ordering: centered H, then ifftshift.
-        fy = np.linspace(
-            -1 / (2 * dy) + 0.5 / (2 * y_len),
-            1 / (2 * dy) - 0.5 / (2 * y_len),
-            padded_height,
-        )
-        fx = np.linspace(
-            -1 / (2 * dx) + 0.5 / (2 * x_len),
-            1 / (2 * dx) - 0.5 / (2 * x_len),
-            padded_width,
-        )
-        FX, FY = np.meshgrid(fx, fy)
-        propagating = 1.0 / wavelength ** 2 - (FX ** 2 + FY ** 2)
-        # Match the validated neural-holography implementation: quantize the
-        # phase-per-metre grid to float32 before applying the propagation distance.
-        phase_per_metre = torch.from_numpy(
-            2.0 * math.pi * np.sqrt(np.clip(propagating, 0.0, None))
-        ).to(dtype=torch.float32)
-        phase = phase_per_metre * distance
         fy_max = 1.0 / math.sqrt((2.0 * distance / y_len) ** 2 + 1.0) / wavelength
         fx_max = 1.0 / math.sqrt((2.0 * distance / x_len) ** 2 + 1.0) / wavelength
-        band = (propagating >= 0.0) & (np.abs(FX) < fx_max) & (np.abs(FY) < fy_max)
-        band = torch.from_numpy(band.astype(np.float32))
-        transfer_centered = torch.complex(band * torch.cos(phase), band * torch.sin(phase))
+        if getattr(config, "OPTICAL_COORDINATE_MODE", "legacy") == "physical":
+            # Physical mode uses the exact DFT bins. Compute the relative phase
+            # in float64 to avoid losing diffraction phase in the large k*z
+            # carrier; the omitted carrier is a spatially uniform phase only.
+            fy_exact = np.fft.fftshift(np.fft.fftfreq(padded_height, d=dy))
+            fx_exact = np.fft.fftshift(np.fft.fftfreq(padded_width, d=dx))
+            radial2 = fy_exact[:, None] ** 2 + fx_exact[None, :] ** 2
+            root = np.sqrt(np.maximum(wavelength ** -2 - radial2, 0))
+            relative_phase = -2 * math.pi * distance * radial2 / (root + 1 / wavelength)
+            valid = ((radial2 <= wavelength ** -2) &
+                     (np.abs(fy_exact[:, None]) < fy_max) & (np.abs(fx_exact[None, :]) < fx_max))
+            transfer_centered = torch.from_numpy((valid * np.exp(1j * relative_phase)).astype(np.complex64))
+        else:
+            # Match the validated neural-holography ordering: centered H, then ifftshift.
+            fy = np.linspace(
+                -1 / (2 * dy) + 0.5 / (2 * y_len),
+                1 / (2 * dy) - 0.5 / (2 * y_len),
+                padded_height,
+            )
+            fx = np.linspace(
+                -1 / (2 * dx) + 0.5 / (2 * x_len),
+                1 / (2 * dx) - 0.5 / (2 * x_len),
+                padded_width,
+            )
+            FX, FY = np.meshgrid(fx, fy)
+            propagating = 1.0 / wavelength ** 2 - (FX ** 2 + FY ** 2)
+            # Match the validated neural-holography implementation: quantize the
+            # phase-per-metre grid to float32 before applying the propagation distance.
+            phase_per_metre = torch.from_numpy(
+                2.0 * math.pi * np.sqrt(np.clip(propagating, 0.0, None))
+            ).to(dtype=torch.float32)
+            phase = phase_per_metre * distance
+            band = (propagating >= 0.0) & (np.abs(FX) < fx_max) & (np.abs(FY) < fy_max)
+            band = torch.from_numpy(band.astype(np.float32))
+            transfer_centered = torch.complex(band * torch.cos(phase), band * torch.sin(phase))
         self.register_buffer(
             "H", torch.fft.ifftshift(transfer_centered, dim=(-2, -1)).unsqueeze(0).unsqueeze(0)
         )

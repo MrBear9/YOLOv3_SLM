@@ -87,6 +87,8 @@ def setup_training(is_main, use_ddp, *, forward_only=False, detector_from_teache
         log_to_file(Config, f"Multi-head SLM enabled: K={num_heads} virtual pairs → {sum(p.numel() for p in student.parameters()):,} params")
     else:
         student = OpticalStudent(Config).to(device)
+    if getattr(student, "geometry", None) is not None:
+        log_to_file(Config, f"Physical coordinate grid: {student.geometry.metadata()}")
     init_mode = str(Config.SLM_INIT_MODE).strip().lower()
     if init_mode == "checkpoint":
         student_info = load_student_checkpoint(student, Config.SLM_INIT_CHECKPOINT, device)

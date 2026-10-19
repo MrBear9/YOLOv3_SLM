@@ -220,6 +220,10 @@ class SLMLayer(nn.Module):
     def simulation_phase(self):
         """Return the phase used during propagation, without hardware quantization."""
         raw_phase = self._raw_phase()
+        if getattr(self.config, "OPTICAL_COORDINATE_MODE", "legacy") == "physical":
+            # Native phase pixels are evaluated at physical coordinates by the
+            # common propagation geometry; never resize back to the DMD canvas.
+            return resample_phase_map(raw_phase, self.config.slm_active_shape(self.layer_index))
         if bool(getattr(self.config, "SIMULATE_HARDWARE_PIXEL_GRID", False)) and hasattr(
             self.config, "slm_active_shape"
         ):

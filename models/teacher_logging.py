@@ -72,12 +72,16 @@ def log_all_parameters():
         f"ioa_max={Config.SOLDIER_COPY_PASTE_IOA_MAX}",
     )
     log_to_file(Config, f"Output: {Config.TEACHER_OUTPUT_DIR}")
+    from models.SLM.physical_defaults import save_optics_snapshot
+    save_optics_snapshot(Config.TEACHER_OUTPUT_DIR)
     teacher = build_teacher(Config)
     detector = build_detector_head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
     arch_lower = str(Config.TEACHER_ARCH).strip().lower()
     log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}")
     log_to_file(Config, f"Optics YAML: {Config.OPTICS_CONFIG_PATH}")
     log_to_file(Config, f"ASM sampling: P={Config.ASM_PADDING_FACTOR}, K={Config.ASM_SUPERSAMPLE_FACTOR}")
+    if getattr(getattr(teacher, "simulator", None), "geometry", None) is not None:
+        log_to_file(Config, f"Physical coordinate grid: {teacher.simulator.geometry.metadata()}")
     if arch_lower in {"convteacher_v2", "v2"}:
         log_to_file(
             Config,

@@ -396,7 +396,7 @@ class ConfigYOLOv8Anchor(OpticalConfig):
             raise ValueError("A scratch teacher cannot be frozen.")
         if len(cls.TEACHER_V2_SLM_PROFILES) != cls.TEACHER_V2_NUM_SLM_LAYERS:
             raise ValueError("TEACHER_V2_SLM_PROFILES must match TEACHER_V2_NUM_SLM_LAYERS.")
-        dmd_aperture = aperture_size(cls.RESOLUTION, cls.DMD_PIXEL_PITCH)
+        dmd_aperture = cls.optical_reference_extent()
         cls.TEACHER_V2_ACTIVE_PIXEL_SHAPES = tuple(
             active_pixel_shape(name, dmd_aperture) for name in cls.TEACHER_V2_SLM_PROFILES
         )

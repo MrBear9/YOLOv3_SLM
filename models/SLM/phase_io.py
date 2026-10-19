@@ -23,6 +23,7 @@ def export_student_phase_images(config, checkpoint_path, output_dir, device="cpu
     if info["loaded"] == 0:
         raise RuntimeError(f"No compatible SLM tensors found in {checkpoint_path!r}.")
     saved = []
+    panel_metadata = {}
     for layer_name, slm in student.all_slm_layers():
         raw = slm._raw_phase().detach().squeeze(0).squeeze(0).cpu().numpy()
         direct = slm.direct_phase()
@@ -40,6 +41,23 @@ def export_student_phase_images(config, checkpoint_path, output_dir, device="cpu
         path = output_dir / f"{layer_name}.png"
         Image.fromarray(gray, mode="L").save(path)
         saved.append(path)
+        if getattr(student, "geometry", None) is not None:
+            index = slm.layer_index
+            panel_shape = tuple(config.slm_profile(index)["resolution"])
+            # +pi is harmless only when applied to the entire transmitting
+            # panel, including the area outside the learned phase patch.
+            offset = float(config.SLM_EXPORT_PHASE_OFFSET_RAD)
+            reference_phase = torch.full((1, 1, 1, 1), offset, device=device)
+            background = int(torch.round(slm.phase_to_gray(reference_phase).clamp(0, 1)
+                                        * (slm.phase_levels - 1)).item())
+            panel = np.full(panel_shape, background, dtype=np.uint8)
+            top, left = ((full - n) // 2 for full, n in zip(panel_shape, gray.shape))
+            panel[top:top + gray.shape[0], left:left + gray.shape[1]] = gray
+            panel_path = output_dir / f"{layer_name}_panel.png"
+            Image.fromarray(panel, mode="L").save(panel_path)
+            saved.append(panel_path)
+            panel_metadata[layer_name] = dict(background_gray=background, panel_shape_hw=panel_shape,
+                                               active_top_left_hw=[top, left], file=panel_path.name)
     metadata = {
         "phase_parameterization": str(getattr(config, "SLM_PHASE_PARAM_MODE", "direct_sgd")),
         "simulation_convention": "direct_sgd: exp(1j * raw_phase)",
@@ -62,6 +80,8 @@ def export_student_phase_images(config, checkpoint_path, output_dir, device="cpu
             for index in range(1, int(getattr(config, "NUM_LAYERS", 2)) + 1)
         } if hasattr(config, "slm_profile_name") else {},
         "gray_to_phase_lut": str(getattr(config, "SLM_GRAY_TO_PHASE_LUT", "") or ""),
+        "physical_grid": student.geometry.metadata() if getattr(student, "geometry", None) is not None else None,
+        "full_panel_exports": panel_metadata,
     }
     with (output_dir / "phase_export_metadata.json").open("w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2)
