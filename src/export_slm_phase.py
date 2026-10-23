@@ -11,19 +11,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from models.SLM.physical_defaults import add_optics_argument
 from models.SLM.config_slm import ConfigSLM
 from models.SLM.phase_io import export_student_phase_images
 
 
 def main():
     parser = argparse.ArgumentParser()
+    add_optics_argument(parser)
     parser.add_argument("--checkpoint", required=True, help="Optical student checkpoint path.")
     parser.add_argument("--output", required=True, help="Output directory for grayscale PNGs.")
     parser.add_argument("--lut", default=None, help="Optional gray-to-phase LUT (.npy, .csv, or .txt).")
     parser.add_argument("--inverted", action="store_true", help="Use inverted SLM gray drive.")
     args = parser.parse_args()
 
-    ConfigSLM.initialize()
+    # Phase export needs optical geometry only. Training initialization also
+    # loads a dataset and creates OUTPUT_DIR/logs/visualizations as side effects.
+    ConfigSLM.validate_optical_geometry()
     if args.lut is not None:
         ConfigSLM.SLM_GRAY_TO_PHASE_LUT = str(Path(args.lut).resolve())
     if args.inverted:

@@ -28,7 +28,7 @@ class OpticalConfig:
     # ═══════════════════════════════════════════════════════════════════════
     # 传播层数  2 | 3 | 4
     # ═══════════════════════════════════════════════════════════════════════
-    NUM_LAYERS = 2
+    NUM_LAYERS = OPTICS["num_layers"]
 
     # Optical canvas and shared physical constants.
     # Spatial sizes are always expressed as (height, width).
@@ -147,6 +147,21 @@ class OpticalConfig:
     @classmethod
     def prop_distance(cls, layer_idx):
         return cls._layer_val(cls.PROP_DISTANCE, layer_idx, 0.10)
+
+    @classmethod
+    def configure_num_layers(cls, count):
+        """Select the first N configured devices for both teacher and student."""
+        if type(count) is not int or not 1 <= count <= 4:
+            raise ValueError("--num-layers must be between 1 and 4.")
+        if any(i not in cls.SLM_LAYER_PROFILES or i not in cls.PROP_DISTANCE for i in range(1, count + 1)):
+            raise ValueError("The selected optics YAML does not configure all requested SLM layers.")
+        cls.NUM_LAYERS = cls.TEACHER_V2_NUM_SLM_LAYERS = count
+        cls.TEACHER_V2_SLM_PROFILES = tuple(cls.slm_profile_name(i) for i in range(1, count + 1))
+        cls.TEACHER_V2_HARDWARE_PIXEL_PITCHES = tuple(cls.hardware_pixel_pitch(i) for i in range(1, count + 1))
+        cls.TEACHER_V2_SAMPLING_PITCHES = tuple(cls.sampling_pitch(i) for i in range(1, count + 1))
+        cls.TEACHER_V2_PIXEL_SIZE = cls.TEACHER_V2_SAMPLING_PITCHES[0]
+        cls.TEACHER_V2_PROP_DISTANCES = tuple(cls.prop_distance(i) for i in range(1, count + 1))
+        cls.TEACHER_V2_ACTIVE_PIXEL_SHAPES = tuple(cls.slm_active_shape(i) for i in range(1, count + 1))
 
     @classmethod
     def slm_profile(cls, layer_idx):

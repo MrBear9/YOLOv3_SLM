@@ -73,7 +73,7 @@ def log_all_parameters():
     )
     log_to_file(Config, f"Output: {Config.TEACHER_OUTPUT_DIR}")
     from models.SLM.physical_defaults import save_optics_snapshot
-    save_optics_snapshot(Config.TEACHER_OUTPUT_DIR)
+    save_optics_snapshot(Config.TEACHER_OUTPUT_DIR, Config.TEACHER_V2_NUM_SLM_LAYERS)
     teacher = build_teacher(Config)
     detector = build_detector_head(Config, in_channels=1, out_channels=Config.get_detector_output_channels())
     arch_lower = str(Config.TEACHER_ARCH).strip().lower()

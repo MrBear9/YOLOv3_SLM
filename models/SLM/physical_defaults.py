@@ -4,6 +4,7 @@ Hardware pitch determines the illuminated/exported pixel count. ASM sampling
 defaults to that pitch; explicit overrides reproduce older numerical models.
 """
 
+import argparse
 import math
 import os
 from pathlib import Path
@@ -12,10 +13,30 @@ import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-OPTICS_CONFIG_PATH = Path(os.environ.get("SLM_OPTICS_CONFIG", "configs/optics.yaml"))
-if not OPTICS_CONFIG_PATH.is_absolute():
-    OPTICS_CONFIG_PATH = PROJECT_ROOT / OPTICS_CONFIG_PATH
-OPTICS_CONFIG_PATH = OPTICS_CONFIG_PATH.resolve()
+
+
+def add_optics_argument(parser):
+    """Register the shared YAML selector on a public command-line parser."""
+    parser.allow_abbrev = False
+    parser.add_argument("--optics", type=Path, default=None,
+                        help="Optical YAML path (default: project configs/optics.yaml).")
+
+
+def resolve_optics_path(argv=None):
+    """Resolve before config classes bind their constants at import time.
+
+    torchrun forwards script arguments to every worker. Parsing only --optics
+    here makes training, evaluation and exports use one YAML without mutable
+    environment state or reloading already-imported model configurations.
+    """
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    add_optics_argument(parser)
+    args, _ = parser.parse_known_args(argv)
+    path = args.optics if args.optics is not None else PROJECT_ROOT / "configs/optics.yaml"
+    return path.expanduser().resolve()
+
+
+OPTICS_CONFIG_PATH = resolve_optics_path()
 
 
 def _positive(value, label):
@@ -84,8 +105,11 @@ def load_optics(path=OPTICS_CONFIG_PATH):
                 "fill_factor_pct": fill,
             }
         layers = propagation["layers"]
-        if not isinstance(layers, list) or not 2 <= len(layers) <= 4:
-            raise ValueError("Configure two to four propagation layers; unused layers are reserved.")
+        if not isinstance(layers, list) or not 1 <= len(layers) <= 4:
+            raise ValueError("Configure one to four propagation layers; unused layers are reserved.")
+        num_layers = propagation.get("num_layers", min(2, len(layers)))
+        if type(num_layers) is not int or not 1 <= num_layers <= len(layers):
+            raise ValueError("propagation.num_layers must select one to four configured layers.")
         layer_profiles, distances = {}, []
         for index, layer in enumerate(layers, 1):
             name = layer["profile"]
@@ -114,6 +138,7 @@ def load_optics(path=OPTICS_CONFIG_PATH):
             phase_levels=export["levels"], gray_inverted=export["gray_inverted"],
             phase_offset=offset, gray_to_phase_lut=lut or "",
             coordinate_mode=coordinate_mode, relay_magnification=magnification,
+            num_layers=num_layers,
             field_extent_factor=extent_factor, grid_multiple=grid_multiple, max_grid_size=max_grid_size,
             **factors,
         )
@@ -124,16 +149,20 @@ def load_optics(path=OPTICS_CONFIG_PATH):
 OPTICS = load_optics()
 
 
-def save_optics_snapshot(output_dir):
+def save_optics_snapshot(output_dir, num_layers=None):
     """Save a replayable YAML with the run; only the main DDP rank writes it."""
     if int(os.environ.get("RANK", "0")) != 0:
         return
     source = yaml.safe_load(OPTICS_CONFIG_PATH.read_text(encoding="utf-8-sig"))
+    source["propagation"].setdefault("num_layers", OPTICS["num_layers"])
+    if num_layers is not None:
+        source["propagation"]["num_layers"] = int(num_layers)
     if OPTICS["gray_to_phase_lut"]:
         source["phase_export"]["gray_to_phase_lut"] = OPTICS["gray_to_phase_lut"]
     destination = Path(output_dir) / "optics.yaml"
     if destination.exists():
         previous = yaml.safe_load(destination.read_text(encoding="utf-8-sig"))
+        previous["propagation"].setdefault("num_layers", min(2, len(previous["propagation"]["layers"])))
         if previous != source:
             raise ValueError(f"{destination} belongs to different optics; select a new output directory.")
         return

@@ -1,5 +1,5 @@
 # 教师 V2/V4、静态学生及导出共用；尺寸顺序 [高, 宽]。
-# 修改后重新启动进程生效。也可用环境变量 SLM_OPTICS_CONFIG 指定另一份 YAML。
+# 修改后重新启动进程生效。也可用 --optics PATH 指定另一份 YAML。
 resolution: [640, 640]  # DMD/训练计算画布，不是 SLM 的整块面板分辨率
 dmd:
   pixel_pitch_um: 5.4
@@ -20,6 +20,7 @@ hardware:
       fill_factor_pct: 91  # 器件记录，当前 ASM 不模拟像素死区
 
 propagation:
+  num_layers: 2  # 使用下面 layers 的前 N 层；支持 1/2/3/4，CLI --num-layers 可覆盖
   coordinate_mode: physical  # physical: 物理坐标；legacy: 仅复现旧数值模型
   field_extent_factor: 1.5  # 计算视野/中继后 DMD 参考区域；与 FFT 的 P 分开
   grid_multiple: 32  # 每层网格自动向上取整；先保证后层视野不超出前层
@@ -36,8 +37,8 @@ propagation:
   sampling_pitch_um:
     zk_weixing_8p0: null
     magicholo_4p5: null
-  # 按层号排列；当前 NUM_LAYERS=2，只使用前两层。
-  # 第 3、4 层为预留配置，不会因为写在这里就自动启用。
+  # 按层号排列；由 num_layers 选择启用的前 N 层。
+  # 单层只用第 1 片中科微兴；增加列表条目不会自动启用。
   layers:
     - {profile: zk_weixing_8p0, distance_cm: 20}
     - {profile: magicholo_4p5, distance_cm: 10}

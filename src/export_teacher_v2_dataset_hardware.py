@@ -16,11 +16,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from models.SLM.physical_defaults import add_optics_argument
 from models.class_display import class_name_for_id
+from src.hardware_detection_iou import add_detection_iou
 from models.dataset import YOLODataset, letterbox_image_targets
 from models.SLM.slm_modulation import resample_phase_map
 from models.teacher import build_teacher, configure_teacher_checkpoint
-from models.teacher_guidance import enhance_feature_for_display
+from models.teacher_guidance import optical_preview_to_uint8
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 from models.yolov8.detection_protocol import decode_detections
 from models.yolov8.feature_adapter import prepare_detector_feature
@@ -38,6 +40,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Export Teacher V2 letterboxed inputs, SLM gray drives, and detections for a dataset split."
     )
+    add_optics_argument(parser)
     parser.add_argument("--checkpoint", type=Path, required=True, help="Teacher V2 + light detector checkpoint.")
     parser.add_argument("--data", type=Path, default=Path("data/military/data.yaml"), help="Dataset YAML file.")
     parser.add_argument("--split", choices=("val", "test"), default="test", help="Dataset split to export.")
@@ -45,7 +48,11 @@ def parse_args():
     parser.add_argument("--device", default="cpu", help="cuda, cuda:0, or cpu (default: cpu for local hardware export).")
     parser.add_argument("--conf-threshold", type=float, default=None, help="Detection confidence threshold.")
     parser.add_argument("--nms-threshold", type=float, default=None, help="NMS IoU threshold.")
+    parser.add_argument("--match-iou-threshold", type=float, default=0.5,
+                        help="Same-class one-to-one IoU matching threshold for JSON diagnostics (default: 0.5).")
     parser.add_argument("--limit", type=int, default=None, help="Optional number of images to export, useful for a hardware trial.")
+    parser.add_argument("--color-map", action="store_true",
+                        help="Render optical output previews with training viridis colors; default: grayscale. Inputs and SLM drives stay grayscale.")
     parser.add_argument("--lut", type=Path, default=Path(Config.SLM_GRAY_TO_PHASE_LUT) if Config.SLM_GRAY_TO_PHASE_LUT else None, help="Calibrated LUT; defaults to optics YAML.")
     parser.add_argument("--gray-inverted", action=argparse.BooleanOptionalAction, default=Config.SLM_GRAY_INVERTED, help="Gray polarity; defaults to optics YAML.")
     parser.add_argument("--phase-levels", type=int, default=Config.SLM_PHASE_LEVELS, help="Number of SLM drive levels (2 to 256); defaults to optics YAML.")
@@ -80,11 +87,10 @@ def phase_map_to_drive_image(phase_map, target_shape, lut_phase, lut_gray, args)
     return np.rint(gray * 255.0).astype(np.uint8)
 
 
-def teacher_feature_to_image(feature):
+def teacher_feature_to_image(feature, color_map=False):
     """Convert one teacher feature map into a contrast-enhanced 8-bit image."""
     feature_np = feature[0, 0].detach().float().cpu().numpy()
-    display = enhance_feature_for_display(feature_np)
-    return Image.fromarray(np.rint(display * 255.0).astype(np.uint8), mode="L")
+    return Image.fromarray(optical_preview_to_uint8(feature_np, color_map=color_map))
 
 
 def load_letterboxed_ground_truth(source_path, label_path, resolution):
@@ -161,6 +167,8 @@ def draw_detection_boxes(image, detections, ground_truth):
 
 def main():
     args = parse_args()
+    if not 0 < args.match_iou_threshold <= 1:
+        raise ValueError("--match-iou-threshold must be in (0, 1].")
     if not args.checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
     if not args.data.is_file():
@@ -223,7 +231,7 @@ def main():
                 Config.RESOLUTION,
             )
             input_image.save(input_path)
-            teacher_feature_to_image(teacher_aux["det_feature"]).save(feature_path)
+            teacher_feature_to_image(teacher_aux["det_feature"], color_map=args.color_map).save(feature_path)
             draw_detection_boxes(input_image, detections, ground_truth).save(detection_path)
             phase_files = []
             panel_files = []
@@ -260,6 +268,7 @@ def main():
                 "detections": detections_to_records(detections),
                 "ground_truth": ground_truth_to_records(ground_truth, input_image.size[::-1]),
             }
+            add_detection_iou(record, args.match_iou_threshold)
             json_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
             manifest.append(record)
 
@@ -279,6 +288,8 @@ def main():
         "slm_active_shapes_hw": [list(shape) for shape in Config.TEACHER_V2_ACTIVE_PIXEL_SHAPES],
         "input_intensity_mode": Config.INPUT_INTENSITY_MODE,
         "input_png_mode": "L",
+        "optical_preview_colormap": "viridis" if args.color_map else "gray",
+        "optical_preview_png_mode": "RGB" if args.color_map else "L",
         "input_gray_conversion": "teacher input tensor channel mean, clamped to [0,1], rounded to uint8",
         "detection_png_mode": "RGB",
         "detection_annotations": "Grayscale scene; GT: green boxes; Pred: red boxes; visualization only",

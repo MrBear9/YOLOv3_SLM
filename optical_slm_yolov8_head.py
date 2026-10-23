@@ -1,15 +1,19 @@
 """Static SLM distillation; retain V2 defaults or select a new CNN teacher."""
 import argparse
+from models.SLM.physical_defaults import add_optics_argument
 from models.SLM import train
 from models.SLM.config_slm import ConfigSLM as Config
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    add_optics_argument(parser)
     parser.add_argument("--teacher")
     parser.add_argument("--output")
     parser.add_argument("--data", help="YOLO dataset YAML used by student training")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--num-layers", type=int, choices=(1, 2, 3, 4),
+                        help="Use the first N SLM layers in the optics YAML; must match the teacher.")
     parser.add_argument(
         "--init-mode",
         choices=("random", "teacher-static", "checkpoint"),
@@ -17,6 +21,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--init-pair", help="paired SLM checkpoint for --init-mode checkpoint")
     args = parser.parse_args()
+    if args.num_layers is not None:
+        Config.configure_num_layers(args.num_layers)
     if args.teacher:
         if not args.output:
             parser.error("--teacher requires a separate --output directory")

@@ -13,6 +13,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
+from models.SLM.physical_defaults import add_optics_argument
 from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.forward_learning import CosinePhaseSpace, PhaseAdaptation, paired_lookahead
 from models.SLM.phase_search import search_block, probe_subspace, confirmation
@@ -49,6 +50,7 @@ SCRATCH_DEFAULTS = dict(cycles=100, grid=32, min_sigma=.01, detector_lr=1e-4, bn
 
 def arguments():
     p = argparse.ArgumentParser(description=__doc__)
+    add_optics_argument(p)
     p.add_argument("--teacher")
     p.add_argument("--init-pair")
     p.add_argument("--resume")

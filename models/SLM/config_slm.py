@@ -88,9 +88,9 @@ class ConfigSLM(OpticalConfig):
     GLOBAL_LOCAL_CONTEXT_GRID = 6
     GLOBAL_LOCAL_TEACHER_DEPTHS = (2, 3, 3)
     # These must match the newly trained hardware-aware 640x640 physical teacher.
-    TEACHER_V2_NUM_SLM_LAYERS = 2
+    TEACHER_V2_NUM_SLM_LAYERS = OpticalConfig.NUM_LAYERS
     TEACHER_V2_WAVELENGTH = OpticalConfig.WAVELENGTH
-    TEACHER_V2_SLM_PROFILES = tuple(OpticalConfig.SLM_LAYER_PROFILES[index] for index in range(1, 3))
+    TEACHER_V2_SLM_PROFILES = tuple(OpticalConfig.SLM_LAYER_PROFILES[index] for index in range(1, TEACHER_V2_NUM_SLM_LAYERS + 1))
     TEACHER_V2_HARDWARE_PIXEL_PITCHES = tuple(
         OpticalConfig.SLM_PROFILES[name]["hardware_pixel_pitch"] for name in TEACHER_V2_SLM_PROFILES
     )
@@ -99,7 +99,7 @@ class ConfigSLM(OpticalConfig):
     )
     TEACHER_V2_PIXEL_SIZE = TEACHER_V2_SAMPLING_PITCHES[0]
     TEACHER_V2_PROP_DISTANCES = tuple(
-        OpticalConfig.PROP_DISTANCE[index] for index in range(1, 3)
+        OpticalConfig.PROP_DISTANCE[index] for index in range(1, TEACHER_V2_NUM_SLM_LAYERS + 1)
     )
 
     # -------- TEACHER_ARCH = "convteacher_v3" --------

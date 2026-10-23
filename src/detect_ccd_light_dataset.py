@@ -24,6 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from models.SLM.physical_defaults import add_optics_argument
 from models.class_display import class_name_for_id
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 from models.yolov8.detection_protocol import decode_detections
@@ -40,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Detect processed CCD optical feature images with the trained Light head only."
     )
+    add_optics_argument(parser)
     parser.add_argument(
         "--images",
         type=Path,

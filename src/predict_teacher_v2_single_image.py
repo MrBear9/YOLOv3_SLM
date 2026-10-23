@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from models.SLM.physical_defaults import add_optics_argument
 from models.class_display import class_name_for_id
 from models.dataset import image_to_intensity_tensor, letterbox_image_targets
 from models.SLM.physical_defaults import aperture_size
@@ -32,6 +33,7 @@ from models.yolov8.head_v8 import build_detector_head
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Export Teacher V2 phases and detect one input image.")
+    add_optics_argument(parser)
     parser.add_argument("--image", type=Path, required=True, help="Input scene image, displayed to the DMD/SLM system.")
     parser.add_argument("--checkpoint", type=Path, required=True, help="Teacher + light detector checkpoint.")
     parser.add_argument("--output", type=Path, default=Path("output/single_teacher_v2"), help="Output directory.")

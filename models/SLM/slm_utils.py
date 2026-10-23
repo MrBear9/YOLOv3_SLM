@@ -366,7 +366,7 @@ def save_current_student_checkpoint(
 def log_config():
     """Compact config summary — details go to TensorBoard hparams."""
     from models.SLM.physical_defaults import save_optics_snapshot
-    save_optics_snapshot(Config.OUTPUT_DIR)
+    save_optics_snapshot(Config.OUTPUT_DIR, Config.NUM_LAYERS)
     log_to_file(Config, "=" * 80)
     log_to_file(Config, "Optical SLM student training — key config")
     log_to_file(Config, "=" * 80)

@@ -2,11 +2,17 @@
 
 import argparse
 from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader
 
+from models.SLM.physical_defaults import add_optics_argument
 from models.dataset import YOLODataset, identity_collate
 from models.runtime import get_dataloader_kwargs
 from models.teacher import build_teacher
@@ -19,6 +25,7 @@ from models.yolov8.head_v8 import build_detector_head
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate a teacher + compact detector checkpoint.")
+    add_optics_argument(parser)
     parser.add_argument(
         "--checkpoint",
         type=Path,

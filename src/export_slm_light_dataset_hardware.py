@@ -24,11 +24,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from models.SLM.physical_defaults import add_optics_argument
 from models.class_display import class_name_for_id
+from src.hardware_detection_iou import add_detection_iou
 from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.dataset_slm import SLMFeatureDataset, slm_collate_fn
 from models.SLM.optical_layers import OpticalStudent
-from models.teacher_guidance import enhance_feature_for_display
+from models.teacher_guidance import optical_preview_to_uint8
 from models.runtime import get_dataloader_kwargs
 from models.yolov8.detection_protocol import decode_detections
 from models.yolov8.feature_adapter import prepare_slm_detector_feature
@@ -42,6 +44,11 @@ def parse_args() -> argparse.Namespace:
             "simulated Light detections for a labelled dataset split."
         )
     )
+    add_optics_argument(parser)
+    parser.add_argument("--color-map", action="store_true",
+                        help="Render optical output previews with training viridis colors; default: grayscale. Inputs and SLM drives stay grayscale.")
+    parser.add_argument("--match-iou-threshold", type=float, default=0.5,
+                        help="Same-class one-to-one IoU matching threshold for JSON diagnostics (default: 0.5).")
     parser.add_argument(
         "--checkpoint",
         type=Path,
@@ -135,6 +142,8 @@ def resolve_project_path(path: Path) -> Path:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if not 0 < args.match_iou_threshold <= 1:
+        raise ValueError("--match-iou-threshold must be in (0, 1].")
     if args.batch_size < 1:
         raise ValueError("--batch-size must be at least 1.")
     if args.limit is not None and args.limit < 1:
@@ -238,10 +247,10 @@ def build_output_directories(root: Path, layer_count: int) -> dict[str, Path]:
     return directories
 
 
-def tensor_to_u8_image(values: torch.Tensor, enhance: bool = False) -> Image.Image:
+def tensor_to_u8_image(values: torch.Tensor, enhance: bool = False, color_map: bool = False) -> Image.Image:
     array = values.detach().float().cpu().numpy()
     if enhance:
-        array = enhance_feature_for_display(array)
+        return Image.fromarray(optical_preview_to_uint8(array, color_map=color_map))
     else:
         array = np.clip(array, 0.0, 1.0)
     return Image.fromarray(np.rint(array * 255.0).astype(np.uint8), mode="L")
@@ -425,8 +434,8 @@ def main() -> None:
                 file_id = f"{next_id:04d}"
                 next_id += 1
                 input_image = tensor_to_u8_image(batch["gray_tensor"][batch_index, 0])
-                raw_image = tensor_to_u8_image(optical["raw_intensity"][batch_index, 0], enhance=True)
-                feature_image = tensor_to_u8_image(detector_feature[batch_index, 0], enhance=True)
+                raw_image = tensor_to_u8_image(optical["raw_intensity"][batch_index, 0], enhance=True, color_map=args.color_map)
+                feature_image = tensor_to_u8_image(detector_feature[batch_index, 0], enhance=True, color_map=args.color_map)
                 detections_array = np.asarray(detections, dtype=np.float32).reshape(-1, 6)
 
                 input_path = directories["input"] / f"{file_id}.png"
@@ -449,6 +458,7 @@ def main() -> None:
                     "detections": detections_to_records(detections_array),
                     "ground_truth": ground_truth_to_records(targets, tuple(Config.RESOLUTION)),
                 }
+                add_detection_iou(record, args.match_iou_threshold)
                 json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
                 samples.append(record)
 
@@ -466,6 +476,8 @@ def main() -> None:
         "dmd_pixel_pitch_m": float(Config.DMD_PIXEL_PITCH),
         "dmd_aperture_m": list(Config.dmd_aperture()),
         "input_intensity_mode": str(Config.INPUT_INTENSITY_MODE),
+        "optical_preview_colormap": "viridis" if args.color_map else "gray",
+        "optical_preview_png_mode": "RGB" if args.color_map else "L",
         "student_enable_norm": bool(student.enable_norm),
         "student_norm_mode": str(Config.STUDENT_NORM_MODE),
         "student_output_blur_kernel": int(Config.STUDENT_OUTPUT_BLUR_KERNEL),

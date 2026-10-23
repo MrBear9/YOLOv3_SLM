@@ -133,6 +133,19 @@ def enhance_feature_for_display(feature_map):
     return np.power(feature_map, 0.8)
 
 
+def optical_preview_to_uint8(feature_map, color_map=False):
+    """Display-only optical PNG: training contrast enhancement and viridis.
+
+    Keep the grayscale default byte-identical to the hardware exporters.
+    Apply color before 8-bit quantization; never feed this preview to a model.
+    """
+    display = enhance_feature_for_display(feature_map)
+    if color_map:
+        from matplotlib import colormaps
+        return colormaps["viridis"](display, bytes=True)[..., :3].copy()
+    return np.rint(display * 255.0).astype(np.uint8)
+
+
 # =========================================================================
 # Static-phase transfer constraint for V4
 # =========================================================================

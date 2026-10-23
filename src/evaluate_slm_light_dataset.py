@@ -22,6 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from models.SLM.physical_defaults import add_optics_argument
 from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.dataset_slm import SLMFeatureDataset, slm_collate_fn
 from models.SLM.optical_layers import OpticalStudent
@@ -44,6 +45,7 @@ from models.yolov8.metrics_anchor_v8 import compute_average_precision, compute_p
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate an optical student + light detector on a labelled dataset split.")
+    add_optics_argument(parser)
     parser.add_argument("--checkpoint", type=Path, required=True, help="Paired detector_best.pth with student and detector states.")
     parser.add_argument("--data", type=Path, default=Path("data/military/data.yaml"), help="Dataset YAML file.")
     parser.add_argument("--split", choices=("val", "test"), default="test", help="Dataset split to evaluate.")

@@ -96,10 +96,10 @@ class ConfigYOLOv8Anchor(OpticalConfig):
     GLOBAL_LOCAL_TEACHER_DEPTHS = (2, 3, 3)
     # These must match the optical-student hardware/simulation settings.
     # V2 is always physical; no CNN residual-output fallback is retained.
-    TEACHER_V2_NUM_SLM_LAYERS = 2
+    TEACHER_V2_NUM_SLM_LAYERS = OpticalConfig.NUM_LAYERS
     TEACHER_V2_WAVELENGTH = OpticalConfig.WAVELENGTH
     TEACHER_V2_SLM_PROFILES = tuple(
-        DEFAULT_SLM_LAYER_PROFILES[index] for index in range(1, 3)
+        DEFAULT_SLM_LAYER_PROFILES[index] for index in range(1, TEACHER_V2_NUM_SLM_LAYERS + 1)
     )
     TEACHER_V2_HARDWARE_PIXEL_PITCHES = tuple(
         SLM_PROFILES[name]["hardware_pixel_pitch"] for name in TEACHER_V2_SLM_PROFILES

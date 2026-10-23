@@ -1,10 +1,13 @@
 """CNN physical teacher training (V2 default, V4 optional)."""
 import argparse
+from models.SLM.physical_defaults import add_optics_argument
 from models import train
 from models.yolov8.config_v8 import ConfigYOLOv8Anchor as Config
 
 
 def configure(args):
+    if args.num_layers is not None:
+        Config.configure_num_layers(args.num_layers)
     Config.TEACHER_INIT_MODE = "joint_checkpoint" if args.resume else "scratch"
     if args.resume:
         Config.TEACHER_INIT_CHECKPOINT = args.resume
@@ -25,11 +28,14 @@ def configure(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    add_optics_argument(parser)
     parser.add_argument("--experiment", choices=("dynamic-v4", "dynamic-v2"), default="dynamic-v2")
     parser.add_argument("--output")
     parser.add_argument("--data")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--num-layers", type=int, choices=(1, 2, 3, 4),
+                        help="Use the first N SLM layers in the optics YAML (default: YAML, otherwise 2).")
     parser.add_argument(
         "--resume",
         help="Resume teacher and detector from a joint teacher_detector_*.pth checkpoint",

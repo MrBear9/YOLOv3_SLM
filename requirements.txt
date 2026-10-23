@@ -10,9 +10,10 @@ pillow>=10.0.0
 PyYAML>=6.0
 matplotlib>=3.0.0
 tensorboard>=2.14.0
+tqdm>=4.66.0
 
 # Official offline COCO bbox evaluation
 pycocotools>=2.0.7
 
 # Reproducible stationary optical phase search (optical_slm_cmaes.py)
-cma==4.4.4
+# cma==4.4.4
