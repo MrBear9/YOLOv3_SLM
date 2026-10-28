@@ -173,17 +173,19 @@ def prepare_conv_tensor(config, tensor):
 def _make_params_contiguous(module, channels_last=False):
     """Canonicalize parameter strides before DDP constructs its buckets."""
     for name, param in module.named_parameters():
-        if channels_last and param.ndim == 4:
-            if not param.is_contiguous(memory_format=torch.channels_last):
-                param.data = param.data.contiguous(memory_format=torch.channels_last)
-        elif not param.is_contiguous():
-            param.data = param.data.contiguous()
+        # C=1 phases and 1x1 kernels can satisfy both layout predicates while
+        # carrying ambiguous singleton strides. Canonicalize them explicitly.
+        memory_format = (torch.channels_last if channels_last and param.ndim == 4
+                         and not param.is_contiguous() else torch.contiguous_format)
+        param.data = param.detach().clone(memory_format=memory_format)
     for name, buf in module.named_buffers():
-        if channels_last and buf.is_floating_point() and buf.ndim == 4:
-            if not buf.is_contiguous(memory_format=torch.channels_last):
-                buf.data = buf.data.contiguous(memory_format=torch.channels_last)
-        elif buf.is_floating_point() and not buf.is_contiguous():
-            buf.data = buf.data.contiguous()
+        # Optical masks/grids are data, not CNN activations. DDP's coalesced
+        # broadcast can reject channels-last [1,1,H,W] buffers whose singleton
+        # channel stride is 1, even though is_contiguous() also returns True.
+        # Explicit clone forces canonical strides; contiguous() alone may no-op.
+        # Include boolean masks and complex ASM kernels, not only float buffers.
+        if buf.ndim == 4 or not buf.is_contiguous():
+            buf.data = buf.clone(memory_format=torch.contiguous_format)
 
 
 def wrap_data_parallel(config, module, module_name="module", find_unused_parameters=False):
