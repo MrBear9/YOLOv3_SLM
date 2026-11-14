@@ -71,6 +71,9 @@ def load_optics(path=OPTICS_CONFIG_PATH):
         coordinate_mode = propagation.get("coordinate_mode", "legacy")
         if coordinate_mode not in ("physical", "legacy"):
             raise ValueError("propagation.coordinate_mode must be physical or legacy.")
+        asm_kernel = propagation.get("asm_kernel", "legacy")
+        if asm_kernel not in ("legacy", "fftfreq"):
+            raise ValueError("propagation.asm_kernel must be legacy or fftfreq.")
         extent_factor = _positive(propagation.get("field_extent_factor", 1.5), "field_extent_factor")
         if extent_factor < 1:
             raise ValueError("field_extent_factor must be at least one.")
@@ -137,7 +140,7 @@ def load_optics(path=OPTICS_CONFIG_PATH):
             profiles=profiles, layer_profiles=layer_profiles, distances=tuple(distances),
             phase_levels=export["levels"], gray_inverted=export["gray_inverted"],
             phase_offset=offset, gray_to_phase_lut=lut or "",
-            coordinate_mode=coordinate_mode, relay_magnification=magnification,
+            coordinate_mode=coordinate_mode, asm_kernel=asm_kernel, relay_magnification=magnification,
             num_layers=num_layers,
             field_extent_factor=extent_factor, grid_multiple=grid_multiple, max_grid_size=max_grid_size,
             **factors,
@@ -155,6 +158,7 @@ def save_optics_snapshot(output_dir, num_layers=None):
         return
     source = yaml.safe_load(OPTICS_CONFIG_PATH.read_text(encoding="utf-8-sig"))
     source["propagation"].setdefault("num_layers", OPTICS["num_layers"])
+    source["propagation"].setdefault("asm_kernel", OPTICS["asm_kernel"])
     if num_layers is not None:
         source["propagation"]["num_layers"] = int(num_layers)
     if OPTICS["gray_to_phase_lut"]:
@@ -163,6 +167,11 @@ def save_optics_snapshot(output_dir, num_layers=None):
     if destination.exists():
         previous = yaml.safe_load(destination.read_text(encoding="utf-8-sig"))
         previous["propagation"].setdefault("num_layers", min(2, len(previous["propagation"]["layers"])))
+        # Existing snapshots without a selector predate this change. Do not
+        # append legacy-kernel training to a historical physical/fftfreq run.
+        previous["propagation"].setdefault(
+            "asm_kernel", "fftfreq" if previous["propagation"].get("coordinate_mode", "legacy") == "physical" else "legacy"
+        )
         if previous != source:
             raise ValueError(f"{destination} belongs to different optics; select a new output directory.")
         return

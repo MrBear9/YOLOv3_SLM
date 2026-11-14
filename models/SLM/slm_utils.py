@@ -38,6 +38,12 @@ def configure_backends():
 
 
 def stage_schedule():
+    if getattr(Config, "REFINE_FROM_PAIR", False):
+        return [
+            ("phase_refine", Config.PHASE_REFINE_EPOCHS),
+            ("detector_focus", Config.DETECTOR_FOCUS_EPOCHS),
+            ("joint_fit", Config.JOINT_FIT_EPOCHS),
+        ]
     return [
         ("phase_focus", Config.PHASE_FOCUS_EPOCHS),
         ("detector_focus", Config.DETECTOR_FOCUS_EPOCHS),
@@ -84,7 +90,10 @@ def build_stage_scheduler(optimizer, stage_name, stage_epochs):
             optimizer,
             lr_lambda=[phase_cosine if group.get("slm_group") == "phase" else lambda _: 1.0 for group in optimizer.param_groups],
         )
-    if str(getattr(Config, "LR_SCHEDULER", "")).lower() != "cosineannealinglr":
+    scheduler_name = str(getattr(Config, "LR_SCHEDULER", "")).lower()
+    if stage_name == "joint_fit" and str(getattr(Config, "JOINT_LR_SCHEDULER", "")).lower() == "cosineannealinglr":
+        scheduler_name = "cosineannealinglr"
+    if scheduler_name != "cosineannealinglr":
         return None
     return CosineAnnealingLR(optimizer, T_max=max(int(stage_epochs), 1), eta_min=Config.ETA_MIN)
 
@@ -379,7 +388,7 @@ def log_config():
     )
     num_layers = int(getattr(Config, "NUM_LAYERS", 2))
     log_to_file(Config, f"Optics YAML: {Config.OPTICS_CONFIG_PATH}; wavelength={Config.WAVELENGTH:g} m")
-    log_to_file(Config, f"ASM sampling: P={Config.ASM_PADDING_FACTOR}, K={Config.ASM_SUPERSAMPLE_FACTOR}")
+    log_to_file(Config, f"ASM sampling: kernel={Config.ASM_KERNEL}, P={Config.ASM_PADDING_FACTOR}, K={Config.ASM_SUPERSAMPLE_FACTOR}")
     multi = bool(getattr(Config, "SLM_MULTI_HEAD_ENABLED", False))
     log_to_file(Config, f"Optical: {num_layers}-layer, multi_head={multi}, phase_mode={Config.SLM_PHASE_PARAM_MODE}, init={Config.SLM_INIT_MODE}")
     log_to_file(
@@ -417,6 +426,9 @@ def log_config():
         f"phase_refine={Config.PHASE_REFINE_EPOCHS}  joint={Config.JOINT_FIT_EPOCHS}  "
         f"norm_joint={Config.NORM_JOINT_EPOCHS}",
     )
+    if getattr(Config, "REFINE_FROM_PAIR", False):
+        log_to_file(Config, "Paired refinement order: all-layer phase_refine -> detector_focus -> joint_fit; "
+                    "initial validation pair is included in best-checkpoint selection.")
     if str(Config.SLM_INIT_MODE).lower() == "teacher_static":
         log_to_file(
             Config,

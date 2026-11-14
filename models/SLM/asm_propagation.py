@@ -13,6 +13,9 @@ class ASMPropagation(nn.Module):
     and center-cropped afterwards. P controls padding; K repeats complex pixels
     on a pitch/K grid, then averages complex blocks back to the input grid.
     K does not add phase parameters or model camera intensity integration.
+    ASM_KERNEL selects kernel construction independently of coordinate mode:
+    legacy (default) retains historical linspace/float32 arithmetic; fftfreq
+    delegates to the optional asm_fftfreq module.
     """
 
     def __init__(self, config, distance, wavelength=None, pixel_size=None,
@@ -45,6 +48,9 @@ class ASMPropagation(nn.Module):
         self.fine_pixel_size = (dy, dx)
         self.wavelength = wavelength
         self.distance = distance
+        self.kernel_mode = getattr(config, "ASM_KERNEL", "legacy")
+        if self.kernel_mode not in ("legacy", "fftfreq"):
+            raise ValueError("ASM_KERNEL must be legacy or fftfreq.")
 
         self.fine_resolution = (height * supersample_factor, width * supersample_factor)
         padded_height, padded_width = (n * self.padding_factor for n in self.fine_resolution)
@@ -52,18 +58,11 @@ class ASMPropagation(nn.Module):
 
         fy_max = 1.0 / math.sqrt((2.0 * distance / y_len) ** 2 + 1.0) / wavelength
         fx_max = 1.0 / math.sqrt((2.0 * distance / x_len) ** 2 + 1.0) / wavelength
-        if getattr(config, "OPTICAL_COORDINATE_MODE", "legacy") == "physical":
-            # Physical mode uses the exact DFT bins. Compute the relative phase
-            # in float64 to avoid losing diffraction phase in the large k*z
-            # carrier; the omitted carrier is a spatially uniform phase only.
-            fy_exact = np.fft.fftshift(np.fft.fftfreq(padded_height, d=dy))
-            fx_exact = np.fft.fftshift(np.fft.fftfreq(padded_width, d=dx))
-            radial2 = fy_exact[:, None] ** 2 + fx_exact[None, :] ** 2
-            root = np.sqrt(np.maximum(wavelength ** -2 - radial2, 0))
-            relative_phase = -2 * math.pi * distance * radial2 / (root + 1 / wavelength)
-            valid = ((radial2 <= wavelength ** -2) &
-                     (np.abs(fy_exact[:, None]) < fy_max) & (np.abs(fx_exact[None, :]) < fx_max))
-            transfer_centered = torch.from_numpy((valid * np.exp(1j * relative_phase)).astype(np.complex64))
+        if self.kernel_mode == "fftfreq":
+            from models.SLM.asm_fftfreq import build_fftfreq_kernel
+            transfer_centered = build_fftfreq_kernel(
+                (padded_height, padded_width), (dy, dx), wavelength, distance, (fy_max, fx_max)
+            )
         else:
             # Match the validated neural-holography ordering: centered H, then ifftshift.
             fy = np.linspace(
@@ -107,9 +106,10 @@ class ASMPropagation(nn.Module):
             error_msgs.append(
                 f"{key}: checkpoint ASM kernel differs from configured optics "
                 f"(wavelength={self.wavelength:g} m, pitch={self.pixel_size} m, "
-                f"distance={self.distance:g} m, P={self.padding_factor}, K={self.supersample_factor}). Use the checkpoint's original "
-                "configs/optics.yaml (legacy sampling: 13.0 / 6.4 um), or train "
-                "a new teacher/student pair for the new geometry."
+                f"distance={self.distance:g} m, P={self.padding_factor}, K={self.supersample_factor}, "
+                f"asm_kernel={self.kernel_mode}). Use the checkpoint's original optics YAML and kernel, "
+                "or train a new teacher/student pair. Physical checkpoints created before the kernel "
+                "selector require propagation.asm_kernel: fftfreq; historical legacy runs use legacy."
             )
             # Preserve the configured kernel even when load_state_dict raises.
             state_dict[key] = self.H

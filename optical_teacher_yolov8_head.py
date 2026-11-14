@@ -22,6 +22,8 @@ def configure(args):
         Config.YAML_PATH = args.data
     if args.batch_size:
         Config.BATCH_SIZE = args.batch_size
+    if getattr(args, "no_early_stop", False):
+        Config.TEACHER_EARLY_STOP_PATIENCE = 0
     Config.TRAIN_SEED = args.seed
     Config.SAMPLER_SEED = args.seed
 
@@ -34,6 +36,8 @@ if __name__ == "__main__":
     parser.add_argument("--data")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no-early-stop", action="store_true",
+                        help="Run the full configured teacher schedule without early stopping; defaults stay unchanged.")
     parser.add_argument("--num-layers", type=int, choices=(1, 2, 3, 4),
                         help="Use the first N SLM layers in the optics YAML (default: YAML, otherwise 2).")
     parser.add_argument(

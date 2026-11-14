@@ -37,7 +37,13 @@ class OpticalStudent(nn.Module):
                 [config.slm_profile(i)["resolution"] for i in range(1, self.num_layers + 1)])
 
         for layer_idx in range(1, self.num_layers + 1):
-            slm = SLMLayer(config, layer_index=layer_idx)
+            phase_grid = getattr(config, "SLM_PHASE_GRID", "native")
+            if phase_grid not in {"native", "canvas"}:
+                raise ValueError("SLM_PHASE_GRID must be native or canvas.")
+            direct = str(config.SLM_PHASE_PARAM_MODE).lower() in {"direct", "direct_sgd", "direct_sgb"}
+            native = self.geometry is not None and phase_grid == "native" and direct
+            phase_resolution = self.geometry.active_shapes[layer_idx - 1] if native else config.RESOLUTION
+            slm = SLMLayer(config, resolution=phase_resolution, layer_index=layer_idx)
             dist = _resolve_prop_distance(config, layer_idx)
             sampling_pitch = (
                 config.sampling_pitch(layer_idx)

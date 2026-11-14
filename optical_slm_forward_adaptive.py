@@ -18,7 +18,7 @@ from models.SLM.forward_distributed import initialize, capture_rng, restore_rng
 from models.SLM.local_phase_learning import LocalPhaseLearner, synchronize_module, require_finite
 from models.SLM.slm_train_setup import setup_training
 from models.SLM.slm_utils import prepare_batch
-from models.SLM.utils_slm import save_detector_best, synchronize_detector_buffers
+from models.SLM.utils_slm import save_detector_best, synchronize_detector_buffers, checkpoint_phase_grid
 from models.SLM.evaluation_slm import evaluate_slm_detector, save_slm_detection_visualization
 from models.SLM.search_diagnostics import save_diagnostics
 from models.SLM.adaptive_snapshots import AdaptiveSnapshots
@@ -127,6 +127,10 @@ def main():
     Config.DEVICE,Config.GPU_IDS=str(device),([device.index] if device.type=='cuda' else [])
     Config.BATCH_SIZE,Config.NUM_WORKERS,Config.TRAIN_SEED=args.batch_size,args.workers,args.seed
     Config.SLM_PHASE_PARAM_MODE,Config.SLM_INIT_MODE='direct_sgd',args.phase_init
+    checkpoint=saved or (torch.load(args.init_pair,map_location='cpu',weights_only=True) if args.init_pair else None)
+    # Static training now defaults to native pixels. An adaptive resume must
+    # retain its saved grid: phase parameters, base phases and Adam moments agree.
+    Config.SLM_PHASE_GRID=checkpoint_phase_grid(checkpoint,Config.RESOLUTION)
     if args.phase_init=='zero': Config.SLM_INIT_NOISE_STD=0.
     Config.SLM_MULTI_HEAD_ENABLED,Config.STUDENT_NORM_SCHEDULE=False,'always'
     Config.ENABLE_CHANNELS_LAST=False
@@ -138,7 +142,6 @@ def main():
     if ctx['val_loader'] is None or not len(ctx['val_loader'].dataset): raise ValueError('A nonempty validation split is required')
     if len(ctx['train_loader'])<1: raise ValueError('No complete training batch on this rank')
     student.requires_grad_(False).eval()
-    checkpoint=saved or (torch.load(args.init_pair,map_location='cpu',weights_only=True) if args.init_pair else None)
     if checkpoint is not None:
         if checkpoint.get('teacher_detector_sha256',ctx['teacher_checkpoint_sha256'])!=ctx['teacher_checkpoint_sha256']:
             raise ValueError('The pair and --teacher have different teacher identities')

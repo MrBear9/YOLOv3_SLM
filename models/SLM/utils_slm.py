@@ -25,6 +25,17 @@ def extract_state_dict(checkpoint):
     return checkpoint
 
 
+def checkpoint_phase_grid(checkpoint, canvas_shape):
+    """Keep adaptive restarts in their original parameter space (including Adam moments)."""
+    if checkpoint is None:
+        return "canvas"  # Preserve the existing adaptive scratch experiment.
+    shapes = [tuple(value.shape[-2:]) for key, value in checkpoint["student_state_dict"].items()
+              if key.endswith(".phase_raw")]
+    if not shapes:
+        raise ValueError("Student checkpoint contains no direct phase parameters.")
+    return "canvas" if all(shape == tuple(canvas_shape) for shape in shapes) else "native"
+
+
 def load_matching_state(module, state_dict, prefixes=()):
     target_state = module.state_dict()
 
@@ -54,10 +65,20 @@ def load_matching_state(module, state_dict, prefixes=()):
         # loader can reject incompatible P/K instead of silently skipping H.
         if key in target_state and (
             target_state[key].shape == value.shape or key == "H" or key.endswith(".H")
+            or key == "phase_raw" or key.endswith(".phase_raw")
         ):
             compatible[key] = value
     from models.SLM.physical_grid import validate_geometry_state
     validate_geometry_state(module, normalized_state)
+    if hasattr(module, "all_slm_layers"):
+        # A partially loaded student must not silently retain random phases.
+        phase_keys = {k for k in target_state if k.endswith(".phase_raw")}
+        actual_phase_keys = {k for k in normalized_state if k.endswith(".phase_raw")}
+        if phase_keys != actual_phase_keys:
+            raise RuntimeError("Student checkpoint phase layers do not match the configured student.")
+        if any(".phase_field." in k for k in normalized_state) and not any(
+                ".phase_field." in k for k in target_state):
+            raise RuntimeError("Pyramid checkpoint requires its original phase parameterization.")
     if compatible:
         module.load_state_dict({**target_state, **compatible}, strict=False)
     return len(compatible), len(target_state)
@@ -107,6 +128,10 @@ def load_student_checkpoint(student, checkpoint_path, device):
         "epoch": checkpoint.get("epoch") if isinstance(checkpoint, dict) else None,
         "loss": checkpoint.get("loss") if isinstance(checkpoint, dict) else None,
         "val_map50": checkpoint.get("val_map50") if isinstance(checkpoint, dict) else None,
+        "phase_grid_migrations": {
+            name: layer.phase_grid_migration for name, layer in student.all_slm_layers()
+            if layer.phase_grid_migration is not None
+        },
     }
 
 
@@ -491,6 +516,9 @@ def synchronize_detector_buffers(detector):
 
 def _save_wrapped_phases(payload, student):
     """Save distinct optimization, simulator, and hardware phase conventions."""
+    payload["student_phase_grid_shapes"] = {
+        name: list(layer.phase_raw.shape[-2:]) for name, layer in student.all_slm_layers()
+    }
     payload["phase_export_convention"] = "hardware_phase=(raw_phase+pi) mod 2pi"
     payload["phase_parameterization"] = str(
         getattr(student.config, "SLM_PHASE_PARAM_MODE", "direct_sgd")

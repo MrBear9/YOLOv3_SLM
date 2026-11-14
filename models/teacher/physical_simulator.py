@@ -63,6 +63,7 @@ class PhysicalSLMSimulator(nn.Module):
             WAVELENGTH=self.wavelength, RESOLUTION=resolution,
             ASM_PADDING_FACTOR=getattr(config, "ASM_PADDING_FACTOR", 2),
             ASM_SUPERSAMPLE_FACTOR=getattr(config, "ASM_SUPERSAMPLE_FACTOR", 1),
+            ASM_KERNEL=getattr(config, "ASM_KERNEL", "legacy"),
             OPTICAL_COORDINATE_MODE=getattr(config, "OPTICAL_COORDINATE_MODE", "legacy"),
         )
         self.geometry = None

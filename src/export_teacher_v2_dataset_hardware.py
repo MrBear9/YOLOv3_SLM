@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from models.SLM.physical_defaults import add_optics_argument
 from models.class_display import class_name_for_id
-from src.hardware_detection_iou import add_detection_iou
+from src.hardware_detection_iou import add_detection_iou, summarize_detection_iou
 from models.dataset import YOLODataset, letterbox_image_targets
 from models.SLM.slm_modulation import resample_phase_map
 from models.teacher import build_teacher, configure_teacher_checkpoint
@@ -273,6 +273,7 @@ def main():
             manifest.append(record)
 
     export_info = {
+        "iou_summary": summarize_detection_iou(manifest, args.match_iou_threshold),
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_epoch": checkpoint.get("epoch"),
         "checkpoint_map50": checkpoint.get("val_map50"),

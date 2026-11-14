@@ -79,7 +79,7 @@ def log_all_parameters():
     arch_lower = str(Config.TEACHER_ARCH).strip().lower()
     log_to_file(Config, f"Teacher arch: {Config.TEACHER_ARCH}")
     log_to_file(Config, f"Optics YAML: {Config.OPTICS_CONFIG_PATH}")
-    log_to_file(Config, f"ASM sampling: P={Config.ASM_PADDING_FACTOR}, K={Config.ASM_SUPERSAMPLE_FACTOR}")
+    log_to_file(Config, f"ASM sampling: kernel={Config.ASM_KERNEL}, P={Config.ASM_PADDING_FACTOR}, K={Config.ASM_SUPERSAMPLE_FACTOR}")
     if getattr(getattr(teacher, "simulator", None), "geometry", None) is not None:
         log_to_file(Config, f"Physical coordinate grid: {teacher.simulator.geometry.metadata()}")
     if arch_lower in {"convteacher_v2", "v2"}:

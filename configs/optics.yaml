@@ -1,5 +1,6 @@
 # 教师 V2/V4、静态学生及导出共用；尺寸顺序 [高, 宽]。
 # 修改后重新启动进程生效。也可用 --optics PATH 指定另一份 YAML。
+# 本轮默认：旧数组传播 + 硬件采样间隔；教师、学生均从头训练。
 resolution: [640, 640]  # DMD/训练计算画布，不是 SLM 的整块面板分辨率
 dmd:
   pixel_pitch_um: 5.4
@@ -21,12 +22,13 @@ hardware:
 
 propagation:
   num_layers: 2  # 使用下面 layers 的前 N 层；支持 1/2/3/4，CLI --num-layers 可覆盖
-  coordinate_mode: physical  # physical: 物理坐标；legacy: 仅复现旧数值模型
-  field_extent_factor: 1.5  # 计算视野/中继后 DMD 参考区域；与 FFT 的 P 分开
-  grid_multiple: 32  # 每层网格自动向上取整；先保证后层视野不超出前层
-  max_grid_size: 2048  # 防止配置错误引起意外超大 FFT
-  # 理想读出：中继后 DMD 同尺寸物理区域，中心采样成 resolution。
-  # 不是相机标定模型；相机 ROI/像元与实际透镜后续单独标定。
+  coordinate_mode: legacy  # 旧数组逐层交接；physical 可切回物理坐标流程
+  asm_kernel: legacy  # 默认旧 linspace/float32 核；fftfreq 可选，与 coordinate_mode 独立
+  # 以下三项仅在 physical 模式生效；legacy 的每层光场均为 resolution。
+  field_extent_factor: 1.5  # 物理模式计算窗口倍率，与 FFT 的 P 分开
+  grid_multiple: 32
+  max_grid_size: 2048
+  # legacy 直接输出整个数组的强度；physical 才按 DMD 物理口径读取中心 ROI。
   # P：每个方向的零填充倍数，保持原来的 2 倍。
   padding_factor: 2
   # K：每个像素沿高、宽细分 K 份，细网格间距为 sampling_pitch / K。
@@ -42,9 +44,9 @@ propagation:
   layers:
     - {profile: zk_weixing_8p0, distance_cm: 20}
     - {profile: magicholo_4p5, distance_cm: 10}
-    # 预留器件沿用此前第 3、4 层回退到第 1 层的默认值，可按实际硬件修改。
-    - {profile: zk_weixing_8p0, distance_cm: 20}
-    - {profile: zk_weixing_8p0, distance_cm: 20}
+    # 第 3、4 层预留 MagicHolo，当前 num_layers=2 时不启用。
+    - {profile: magicholo_4p5, distance_cm: 10}
+    - {profile: magicholo_4p5, distance_cm: 10}
   # P=2、K=1 延续原来的带限 ASM；未启用 Zernike 校正。
 
 phase_export:

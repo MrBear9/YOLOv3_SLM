@@ -38,6 +38,10 @@ class ConfigSLM(OpticalConfig):
     # incompatible detector/teacher experiment.
     SLM_INIT_MODE = "random"
     SLM_INIT_CHECKPOINT = r""
+    # Direct physical phases use one parameter per illuminated hardware pixel.
+    # Legacy coordinates and the optional pyramid parameterization keep their canvas.
+    SLM_PHASE_GRID = "native"
+    REFINE_FROM_PAIR = False
     PHASE_FOCUS_EPOCHS = 100
     DETECTOR_FOCUS_EPOCHS = 80
     # Keep optional SLM2-only refinement disabled in the primary scratch run.
@@ -347,6 +351,32 @@ class ConfigSLM(OpticalConfig):
         os.makedirs(cls.VISUALIZATION_DIR, exist_ok=True)
         cls.TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
         cls.LOG_FILE = os.path.join(cls.LOG_ROOT_DIR, f"training_log_{cls.TIMESTAMP}.txt")
+
+    @classmethod
+    def configure_pair_refinement(cls):
+        """Reuse the existing stages, starting from a validated physical pair."""
+        if cls.SLM_INIT_MODE != "checkpoint" or not cls.SLM_INIT_CHECKPOINT:
+            raise ValueError("Pair refinement requires --init-pair.")
+        if cls.OPTICAL_COORDINATE_MODE != "physical" or cls.SLM_MULTI_HEAD_ENABLED:
+            raise ValueError("Pair refinement requires a single-head physical student.")
+        cls.REFINE_FROM_PAIR = True
+        cls.PHASE_FOCUS_EPOCHS = cls.NORM_JOINT_EPOCHS = 0
+        cls.PHASE_REFINE_EPOCHS = 20
+        cls.DETECTOR_FOCUS_EPOCHS = 10
+        cls.JOINT_FIT_EPOCHS = 20
+        cls.PHASE_REFINE_PHASE_PARAM_LR = cls.JOINT_PHASE_PARAM_LR = 1e-4
+        cls.DETECTOR_LR = 3e-5
+        cls.JOINT_DETECTOR_LR = 1e-5
+        cls.FEATURE_LOSS_WEIGHT_PHASE_REFINE = cls.FEATURE_LOSS_WEIGHT_JOINT = 0.1
+        # The historical phase_refine stage froze SLM1. Refine ALL active layers.
+        cls.PHASE_TRAINABLE_LAYERS = {
+            **cls.PHASE_TRAINABLE_LAYERS,
+            "phase_refine": {i: True for i in range(1, cls.NUM_LAYERS + 1)},
+        }
+        cls.PHASE_REFINE_LR_MULT = {i: 1.0 for i in range(1, cls.NUM_LAYERS + 1)}
+        cls.PHASE_REFINE_VAL_INTERVAL = 1
+        cls.RESTORE_BEST_PAIRED_BEFORE_REFINEMENT = True
+        cls.RESTORE_PAIRED_DETECTOR_FROM_SLM_CHECKPOINT = True
 
     @classmethod
     def configure_teacher_static_training(cls):

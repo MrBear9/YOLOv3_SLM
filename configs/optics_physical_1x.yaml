@@ -1,0 +1,44 @@
+# 两层 V2 从头训练对照；与建立本文件时的 optics.yaml 仅窗口倍率不同。
+# 教师通过 --optics 指定本文件；学生使用教师输出目录中保存的 optics.yaml。
+resolution: [640, 640]
+
+dmd:
+  pixel_pitch_um: 5.4
+  relay_magnification: 1.0
+
+hardware:
+  wavelength_nm: 532
+  profiles:
+    zk_weixing_8p0:
+      model: 中科微兴
+      resolution: [1080, 1920]
+      pixel_pitch_um: 8.0
+      fill_factor_pct: 87
+    magicholo_4p5:
+      model: MagicHolo
+      resolution: [1080, 1920]
+      pixel_pitch_um: 4.5
+      fill_factor_pct: 91
+
+propagation:
+  num_layers: 2
+  coordinate_mode: physical
+  field_extent_factor: 1.0
+  grid_multiple: 32
+  max_grid_size: 2048
+  padding_factor: 2
+  supersample_factor: 1
+  sampling_pitch_um:
+    zk_weixing_8p0: null
+    magicholo_4p5: null
+  layers:
+    - {profile: zk_weixing_8p0, distance_cm: 20}
+    - {profile: magicholo_4p5, distance_cm: 10}
+    - {profile: magicholo_4p5, distance_cm: 10}
+    - {profile: magicholo_4p5, distance_cm: 10}
+
+phase_export:
+  levels: 256
+  gray_inverted: true
+  phase_offset_pi: 1.0
+  gray_to_phase_lut: null

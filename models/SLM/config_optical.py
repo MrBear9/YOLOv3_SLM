@@ -39,6 +39,7 @@ class OpticalConfig:
     OPTICS_CONFIG_PATH = str(OPTICS_CONFIG_PATH)
     ASM_PADDING_FACTOR = OPTICS["padding_factor"]
     ASM_SUPERSAMPLE_FACTOR = OPTICS["supersample_factor"]
+    ASM_KERNEL = OPTICS["asm_kernel"]
     OPTICAL_COORDINATE_MODE = OPTICS["coordinate_mode"]
     DMD_RELAY_MAGNIFICATION = OPTICS["relay_magnification"]
     OPTICAL_FIELD_EXTENT_FACTOR = OPTICS["field_extent_factor"]

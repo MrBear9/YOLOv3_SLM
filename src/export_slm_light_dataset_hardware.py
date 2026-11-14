@@ -26,7 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from models.SLM.physical_defaults import add_optics_argument
 from models.class_display import class_name_for_id
-from src.hardware_detection_iou import add_detection_iou
+from src.hardware_detection_iou import add_detection_iou, summarize_detection_iou
 from models.SLM.config_slm import ConfigSLM as Config
 from models.SLM.dataset_slm import SLMFeatureDataset, slm_collate_fn
 from models.SLM.optical_layers import OpticalStudent
@@ -463,6 +463,7 @@ def main() -> None:
                 samples.append(record)
 
     manifest = {
+        "iou_summary": summarize_detection_iou(samples, args.match_iou_threshold),
         "export_type": "static_optical_student_plus_light",
         "checkpoint": str(args.checkpoint),
         "checkpoint_epoch": checkpoint.get("epoch"),

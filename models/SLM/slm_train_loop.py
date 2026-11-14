@@ -63,7 +63,7 @@ def train():
     if initial_stage is not None:
         initial_norm_mode = configure_student_norm_for_stage(initial_stage, deployment_norm_mode)
         ctx["student_raw"].enable_norm = bool(Config.ENABLE_STUDENT_NORM and initial_norm_mode != "none")
-    if (str(Config.SLM_INIT_MODE).lower() == "teacher_static"
+    if ((str(Config.SLM_INIT_MODE).lower() == "teacher_static" or getattr(Config, "REFINE_FROM_PAIR", False))
             and ctx["val_loader"] is not None and initial_stage is not None):
         # Ordinary best-checkpoint selection starts at the loaded teacher pair,
         # so adaptation cannot replace it with a lower-scoring student.
@@ -100,7 +100,8 @@ def train():
         if stage_epochs <= 0:
             continue
         if (
-            stage_name in {"phase_refine", "joint_fit", "norm_joint"}
+            (stage_name in {"phase_refine", "joint_fit", "norm_joint"}
+             or (getattr(Config, "REFINE_FROM_PAIR", False) and stage_name == "detector_focus"))
             and best_paired_checkpoint_path is not None
             and Config.RESTORE_BEST_PAIRED_BEFORE_REFINEMENT
         ):

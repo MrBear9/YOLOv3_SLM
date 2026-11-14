@@ -86,6 +86,34 @@ class SLMLayer(nn.Module):
         else:
             self.register_parameter("amp_raw", None)
 
+        self.phase_grid_migration = None
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        key = prefix + "phase_raw"
+        source = state_dict.get(key)
+        has_residual = any(k.startswith(prefix + "phase_field.") for k in state_dict)
+        if has_residual and self.phase_field is None:
+            error_msgs.append(f"{prefix}pyramid checkpoint requires its original phase parameterization; "
+                              "refusing to discard its learned residual.")
+        if source is not None and source.shape != self.phase_raw.shape:
+            # Only the known canvas -> native conversion is lossless at the
+            # modulator. Never silently resize arbitrary/mismatched checkpoints.
+            physical = getattr(self.config, "OPTICAL_COORDINATE_MODE", "legacy") == "physical"
+            migratable = (physical and self._phase_param_mode == "direct_sgd"
+                          and not has_residual and source.ndim == 4
+                          and tuple(source.shape[:2]) == (1, 1)
+                          and tuple(source.shape[-2:]) == tuple(self.config.RESOLUTION)
+                          and self.resolution == tuple(self.config.slm_active_shape(self.layer_index)))
+            if migratable:
+                state_dict[key] = resample_phase_map(source, self.resolution)
+                self.phase_grid_migration = {
+                    "from_hw": list(source.shape[-2:]), "to_hw": list(self.resolution),
+                    "method": "unit_phasor_bilinear; preserve simulated modulation",
+                }
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
+
     def _load_gray_to_phase_lut(self):
         path = str(getattr(self.config, "SLM_GRAY_TO_PHASE_LUT", "") or "").strip()
         if not path:

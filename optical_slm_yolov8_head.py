@@ -20,6 +20,12 @@ if __name__ == "__main__":
         help="SLM initialization; teacher-static imports V4's shared phase base",
     )
     parser.add_argument("--init-pair", help="paired SLM checkpoint for --init-mode checkpoint")
+    parser.add_argument("--phase-grid", choices=("native", "canvas"),
+                        help="Physical direct-phase parameters: native SLM pixels (default) or old canvas control.")
+    parser.add_argument("--joint-lr-scheduler", choices=("cosine", "cosine-phase-floor"),
+                        help="Joint-stage LR schedule; cosine reproduces the original V2 cosine decay. Omit to keep config defaults.")
+    parser.add_argument("--refine", action="store_true",
+                        help="Refine --init-pair: 20 phase-only, 10 head-only, 20 joint epochs; no distillation warmup.")
     args = parser.parse_args()
     if args.num_layers is not None:
         Config.configure_num_layers(args.num_layers)
@@ -45,4 +51,17 @@ if __name__ == "__main__":
             Config.SLM_INIT_MODE = "checkpoint"
     if Config.SLM_INIT_MODE == "checkpoint" and not Config.SLM_INIT_CHECKPOINT:
         parser.error("--init-mode checkpoint requires --init-pair")
+    if args.phase_grid:
+        Config.SLM_PHASE_GRID = args.phase_grid
+    if args.refine:
+        if not args.init_pair or not args.output or Config.SLM_INIT_MODE != "checkpoint":
+            parser.error("--refine requires --init-pair, a separate --output, and checkpoint initialization")
+        from pathlib import Path
+        if Path(args.init_pair).resolve().parent == Path(args.output).resolve():
+            parser.error("--refine --output must differ from the source checkpoint directory")
+        Config.configure_pair_refinement()
+    if args.joint_lr_scheduler is not None:
+        Config.JOINT_LR_SCHEDULER = (
+            "CosineAnnealingLR" if args.joint_lr_scheduler == "cosine" else "cosine_phase_floor"
+        )
     train()

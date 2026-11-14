@@ -68,6 +68,9 @@ def export_student_phase_images(config, checkpoint_path, output_dir, device="cpu
         "simulate_hardware_pixel_grid": bool(getattr(config, "SIMULATE_HARDWARE_PIXEL_GRID", False)),
         "direct_sgd_pyramid_scale": float(getattr(config, "SLM_DIRECT_SGD_PYRAMID_SCALE", 0.0)),
         "simulation_resolution_hw": [int(config.RESOLUTION[0]), int(config.RESOLUTION[1])],
+        "phase_parameter_shapes_hw": {
+            name: list(layer.phase_raw.shape[-2:]) for name, layer in student.all_slm_layers()
+        },
         "dmd_pixel_pitch_m": float(getattr(config, "DMD_PIXEL_PITCH", 0.0)),
         "dmd_aperture_m": list(config.dmd_aperture()) if hasattr(config, "dmd_aperture") else None,
         "slm_layers": {

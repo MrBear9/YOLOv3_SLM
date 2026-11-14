@@ -1,0 +1,40 @@
+# 旧版 V2 教师/静态学生的绘图与复现配置（13 / 6.4 μm）。
+# 使用 --optics configs/optics_legacy.yaml 指定；不改变主项目默认 physical 配置。
+resolution: [640, 640]
+
+dmd:
+  pixel_pitch_um: 5.4
+  relay_magnification: 1.0
+
+hardware:
+  wavelength_nm: 532
+  profiles:
+    zk_weixing_8p0:
+      model: 中科微兴
+      resolution: [1080, 1920]
+      pixel_pitch_um: 8.0
+      fill_factor_pct: 87
+    magicholo_4p5:
+      model: MagicHolo
+      resolution: [1080, 1920]
+      pixel_pitch_um: 4.5
+      fill_factor_pct: 91
+
+propagation:
+  coordinate_mode: legacy
+  padding_factor: 2
+  supersample_factor: 1
+  sampling_pitch_um:
+    zk_weixing_8p0: 13.0
+    magicholo_4p5: 6.4
+  layers:
+    - {profile: zk_weixing_8p0, distance_cm: 20}
+    - {profile: magicholo_4p5, distance_cm: 10}
+    - {profile: zk_weixing_8p0, distance_cm: 20}
+    - {profile: zk_weixing_8p0, distance_cm: 20}
+
+phase_export:
+  levels: 256
+  gray_inverted: true
+  phase_offset_pi: 1.0
+  gray_to_phase_lut: null
